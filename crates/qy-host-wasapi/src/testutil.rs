@@ -99,3 +99,29 @@ impl Feeder {
         done
     }
 }
+
+pub fn flac_fixture_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../qy-codec-flac/tests/fixtures")
+        .join(name)
+}
+
+/// libFLAC 参考样本（`.s32le`，交错右对齐 i32），见 qy-codec-flac 夹具 MANIFEST。
+pub fn flac_reference(stem: &str) -> Vec<i32> {
+    std::fs::read(flac_fixture_path(&format!("{stem}.s32le")))
+        .unwrap_or_default()
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// 独立公式：N 位样本放入容器 C 的高位（WASAPI 左对齐），小端取 C/8 字节。
+pub fn place(samples: &[i32], n: u8, c: u8) -> Vec<u8> {
+    samples
+        .iter()
+        .flat_map(|&s| {
+            let word = (i64::from(s) << (c - n)) as u32;
+            word.to_le_bytes()[..usize::from(c / 8)].to_vec()
+        })
+        .collect()
+}

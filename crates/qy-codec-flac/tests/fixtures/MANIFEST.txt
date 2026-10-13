@@ -12,67 +12,210 @@ cli_16_wasted_bits: flac --silent --force --no-padding  -o cli_16_wasted_bits.fl
 cli_24_rice2_noise: flac --silent --force --no-padding -8 -o cli_24_rice2_noise.flac cli_24_rice2_noise.wav
 cli_16_blocksize_1000: flac --silent --force --no-padding -b 1000 -o cli_16_blocksize_1000.flac cli_16_blocksize_1000.wav
 cli_16_blocksize_16384: flac --silent --force --no-padding --lax -b 16384 -o cli_16_blocksize_16384.flac cli_16_blocksize_16384.wav
-cli_16_stereo_44k_default -> ok - (44515 字节) flac 命令行：
-cli_16_stereo_exhaustive_ms -> ok - (25696 字节) flac 命令行：-8 -e -m
-cli_24_mono_96k_lpc12 -> ok - (32805 字节) flac 命令行：-l 12 -r 6
-cli_24_stereo_fixed_only -> ok - (39505 字节) flac 命令行：-l 0
-cli_32_stereo_192k -> ok - (128654 字节) flac 命令行：--lax -8
-cli_32_noise_verbatim -> ok - (72140 字节) flac 命令行：--lax
-cli_16_constant_channel -> ok - (9048 字节) flac 命令行：
-cli_16_wasted_bits -> ok - (5297 字节) flac 命令行：
-cli_24_rice2_noise -> ok - (21765 字节) flac 命令行：-8
-cli_16_blocksize_1000 -> ok - (6372 字节) flac 命令行：-b 1000
-cli_16_blocksize_16384 -> ok - (88572 字节) flac 命令行：--lax -b 16384
-max_block_verbatim_32_stereo -> ok - (524334 字节) 手写：65535 块 verbatim，32 位极值
-side_33bit_extremes -> ok - (1680 字节) 手写：32 位 left/side、side/right、mid/side 极值，33 位侧声道 verbatim/固定/LPC
-escape_partitions -> ok - (389 字节) 手写：固定 2 阶，escape 12 位/0 位，Rice 参数 0 与 14
-rice2_partitions -> ok - (1606 字节) 手写：Rice2 参数 23、Rice2 escape 24 位
-wasted_bits -> ok - (863 字节) 手写：wasted bits 1–5，常量/verbatim/固定/LPC
-fixed_orders_and_lpc32 -> ok - (9820 字节) 手写：固定 0–4 阶，LPC 32 阶精度 15 位移 15，分区阶数 4
-variable_blocksize_uncommon -> ok - (14938 字节) 手写：可变块，块大小码 6/7/1/5 与 8/16 位非常用值，采样率/位深取自 STREAMINFO
-rate_code12_7khz -> ok - (686 字节) 手写：非常用采样率 7000 Hz
-rate_code13_11025 -> ok - (690 字节) 手写：非常用采样率 11025 Hz
-rate_code14_100k -> ok - (695 字节) 手写：非常用采样率 100000 Hz
-metadata_skip -> ok - (120001 字节) 手写：填充、注释、100 KB 图片与保留类型元数据
-unknown_max_frame -> ok - (19591 字节) 手写：STREAMINFO 最小/最大帧长度为 0（未知）
-lying_max_frame -> ok - (19591 字节) 手写：STREAMINFO 最大帧长度谎报为 100
-short_tail_frame -> ok - (1318 字节) 手写：固定块 512，尾帧 17 帧
-err_header_crc -> Malformed HeaderCrc (3404 字节) 手写错误：首帧帧头 1 位翻转
-err_frame_crc -> Malformed FrameCrc (3404 字节) 手写错误：第二帧 verbatim 样本 1 位翻转
-err_truncated_mid_frame -> Truncated Truncated (3397 字节) 手写错误：尾帧缺最后 7 字节
-err_truncated_at_frame_boundary -> Truncated Truncated (1724 字节) 手写错误：在帧边界截断，STREAMINFO 总样本数不足
-err_no_marker -> Malformed BadMarker (3404 字节) 手写错误：标记不是 fLaC
-err_first_block_not_streaminfo -> Malformed BadStreamInfo (3404 字节) 手写错误：首个元数据块不是 STREAMINFO
-err_metadata_type_127 -> Malformed BadMetadataType (3412 字节) 手写错误：元数据块类型 127
-err_negative_lpc_shift -> Malformed NegativeShift (144 字节) 手写错误：LPC 右移量 −1（CRC 正确）
-err_lpc_precision_15 -> Malformed BadLpcPrecision (144 字节) 手写错误：LPC 精度字段 0b1111（CRC 正确）
-err_partition_order -> Malformed BadPartitionOrder (54 字节) 手写错误：块 100、分区阶数 3
-err_residual_overflow -> Malformed ResidualOverflow (59 字节) 手写错误：Rice 商 2^32
-err_sample_overflow -> Malformed SampleOverflow (62 字节) 手写错误：16 位预测结果 32768
-err_nonzero_padding -> Malformed NonZeroPadding (57 字节) 手写错误：帧尾填充位为 1
-err_stream_mismatch -> Malformed StreamMismatch (100 字节) 手写错误：帧位深 24、STREAMINFO 16
-err_blocking_change -> Malformed StreamMismatch (190 字节) 手写错误：第二帧改为可变块
-err_reserved_blocksize -> Malformed ReservedCode (180 字节) 手写错误：块大小码 0（CRC-8 重算）
-err_reserved_channels -> Malformed ReservedCode (180 字节) 手写错误：声道码 11（CRC-8 重算）
-err_unsupported_3ch -> Unsupported Unsupported (438 字节) 手写错误：3 声道（libFLAC 可解）
-err_unsupported_384k -> Unsupported Unsupported (182 字节) 手写错误：384 kHz
+cli_16_stereo_44k_default -> ok -
+  sha256 44438ab521f6b08c09b3dd941f17adc6a09882b0215a951cd995780a7240146e
+  44515 字节；来源：flac 命令行：；种子：smooth 11
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 44100 Hz/2 声道/16 位/最大块 4096/总样本 20000；块大小 ["3616", "4096"]；分支要求 ["type=LPC"] 满足
+cli_16_stereo_exhaustive_ms -> ok -
+  sha256 99086a08e36e92918c218a3adf6ea759870eed88d580e48bdd0591bffa2d8cff
+  25696 字节；来源：flac 命令行：-8 -e -m；种子：smooth 12
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 48000 Hz/2 声道/16 位/最大块 4096/总样本 12000；块大小 ["3808", "4096"]；分支要求 ["channel_assignment=MID_SIDE|channel_assignment=LEFT_SIDE|channel_assignment=RIGHT_SIDE"] 满足
+cli_24_mono_96k_lpc12 -> ok -
+  sha256 74db78256d4fdee063d1b7ebb5d6db576d45f3522662eb7a7f441972e4fbc8e1
+  32805 字节；来源：flac 命令行：-l 12 -r 6；种子：smooth 13
+  核对：libFLAC 参考解码（raw，有符号小端 24 位）逐样本一致；metaflac 96000 Hz/1 声道/24 位/最大块 4096/总样本 15000；块大小 ["2712", "4096"]；分支要求 ["type=LPC", "!type=LPC order=32"] 满足
+cli_24_stereo_fixed_only -> ok -
+  sha256 a51489a0a24f5338b9380d9fe20c8e9888062e23b6cd8b9e686353de7e1511a9
+  39505 字节；来源：flac 命令行：-l 0；种子：smooth 14
+  核对：libFLAC 参考解码（raw，有符号小端 24 位）逐样本一致；metaflac 88200 Hz/2 声道/24 位/最大块 1152/总样本 9000；块大小 ["1152", "936"]；分支要求 ["!type=LPC", "type=FIXED order=1|type=FIXED order=2|type=FIXED order=3|type=FIXED order=4"] 满足
+cli_32_stereo_192k -> ok -
+  sha256 bf645e982de2d951bb504adc8530a6dfc630f0e5ccc1b0dde40e4fd0559f9d2c
+  128654 字节；来源：flac 命令行：--lax -8；种子：smooth 15
+  核对：libFLAC 参考解码（raw，有符号小端 32 位）逐样本一致；metaflac 192000 Hz/2 声道/32 位/最大块 4096/总样本 20000；块大小 ["3616", "4096"]；分支要求 ["type=LPC|type=FIXED order=2|type=FIXED order=3|type=FIXED order=4"] 满足
+cli_32_noise_verbatim -> ok -
+  sha256 d5e814e9760f814d5a154885feb642cf464d52e1e91b1339adf6a105c7d49deb
+  72140 字节；来源：flac 命令行：--lax；种子：noise 16
+  核对：libFLAC 参考解码（raw，有符号小端 32 位）逐样本一致；metaflac 176400 Hz/2 声道/32 位/最大块 4096/总样本 9000；块大小 ["4096", "808"]；分支要求 ["type=VERBATIM"] 满足
+cli_16_constant_channel -> ok -
+  sha256 1aaf60b64f14d263c192ecab57fc8d5bfa1e77824a8d351c2b6a622226ec667c
+  9048 字节；来源：flac 命令行：；种子：smooth 17
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 44100 Hz/2 声道/16 位/最大块 4096/总样本 8000；块大小 ["3904", "4096"]；分支要求 ["type=CONSTANT"] 满足
+cli_16_wasted_bits -> ok -
+  sha256 8f4d588cdf5567f2b8f5e08ee72e966a5370f5bea4f36908feab5358cbaee57c
+  5297 字节；来源：flac 命令行：；种子：smooth 18
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 32000 Hz/1 声道/16 位/最大块 4096/总样本 8000；块大小 ["3904", "4096"]；分支要求 ["wasted_bits>0"] 满足
+cli_24_rice2_noise -> ok -
+  sha256 a9fc22048bf84866d210cbb2ab287253fa46b24ab7c88ca3c0a5426bfff82665
+  21765 字节；来源：flac 命令行：-8；种子：noise 19 + smooth 20
+  核对：libFLAC 参考解码（raw，有符号小端 24 位）逐样本一致；metaflac 48000 Hz/1 声道/24 位/最大块 4096/总样本 8000；块大小 ["3904", "4096"]；分支要求 ["residual_type=RICE2"] 满足
+cli_16_blocksize_1000 -> ok -
+  sha256 14e320efb69fecff7b839dd96d29eaf85c1352fad84a15a4059040aef158f890
+  6372 字节；来源：flac 命令行：-b 1000；种子：smooth 21
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 22050 Hz/1 声道/16 位/最大块 1000/总样本 5500；块大小 ["1000", "500"]；分支要求 ["blocksize=1000"] 满足
+cli_16_blocksize_16384 -> ok -
+  sha256 12dbe104984a22bf1c7e1cc3f6978cc14af62c0f203ad296c8d8df118903f5db
+  88572 字节；来源：flac 命令行：--lax -b 16384；种子：smooth 22
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 96000 Hz/2 声道/16 位/最大块 16384/总样本 40000；块大小 ["16384", "7232"]；分支要求 ["blocksize=16384"] 满足
+max_block_verbatim_32_stereo -> ok -
+  sha256 6198ccd6939de9a10018dfc6771f820f31775e650219d985e098934ad3bc2dff
+  524334 字节；来源：手写：65535 块 verbatim，32 位极值；种子：noise 101
+  核对：libFLAC 参考解码（raw，有符号小端 32 位）逐样本一致；metaflac 48000 Hz/2 声道/32 位/最大块 65535/总样本 65535；块大小 ["65535"]；分支要求 ["blocksize=65535", "type=VERBATIM"] 满足
+side_33bit_extremes -> ok -
+  sha256 46fefbd6f5987642cb78550ccd0269f0d5883c7189424637233801c3f563bebb
+  1680 字节；来源：手写：32 位 left/side、side/right、mid/side 极值，33 位侧声道 verbatim/固定/LPC；种子：无（确定性构造）
+  核对：libFLAC 参考解码（raw，有符号小端 32 位）逐样本一致；metaflac 44100 Hz/2 声道/32 位/最大块 64/总样本 256；块大小 ["32", "64"]；分支要求 ["channel_assignment=LEFT_SIDE", "channel_assignment=RIGHT_SIDE", "channel_assignment=MID_SIDE", "type=VERBATIM", "type=LPC", "residual_type=RICE2"] 满足
+escape_partitions -> ok -
+  sha256 729106bc0755935f598556ed51bfaf210afa623282b51ec37ec30354254882ee
+  389 字节；来源：手写：固定 2 阶，escape 12 位/0 位，Rice 参数 0 与 14；种子：无（确定性构造）
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 16000 Hz/1 声道/16 位/最大块 256/总样本 256；块大小 ["256"]；分支要求 ["escape_partition", "type=FIXED order=2"] 满足
+rice2_partitions -> ok -
+  sha256 40b61b17fe541886c53233555ad868581f9da26e2152e029392f0a824b6393c5
+  1606 字节；来源：手写：Rice2 参数 23、Rice2 escape 24 位；种子：noise 202
+  核对：libFLAC 参考解码（raw，有符号小端 24 位）逐样本一致；metaflac 96000 Hz/1 声道/24 位/最大块 512/总样本 512；块大小 ["512"]；分支要求 ["residual_type=RICE2", "escape_partition", "type=FIXED order=0"] 满足
+wasted_bits -> ok -
+  sha256 38d7a3c1ab24d6e53fffffb9ac1232a979ed93026c771f6a73b28e2f5fca62b3
+  863 字节；来源：手写：wasted bits 1–5，常量/verbatim/固定/LPC；种子：smooth 303
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 44100 Hz/2 声道/16 位/最大块 100/总样本 340；块大小 ["100", "40"]；分支要求 ["wasted_bits>0", "type=CONSTANT", "type=LPC", "type=VERBATIM"] 满足
+fixed_orders_and_lpc32 -> ok -
+  sha256 7558e727292fa998f74c9ebaa01260cd000376952d5da242a9e1d6012111d9d0
+  9820 字节；来源：手写：固定 0–4 阶，LPC 32 阶精度 15 位移 15，分区阶数 4；种子：smooth 404
+  核对：libFLAC 参考解码（wav，有符号小端 20 位）逐样本一致；metaflac 48000 Hz/1 声道/20 位/最大块 640/总样本 3840；块大小 ["640"]；分支要求 ["type=FIXED order=0", "type=FIXED order=1", "type=FIXED order=2", "type=FIXED order=3", "type=FIXED order=4", "type=LPC order=32"] 满足
+variable_blocksize_uncommon -> ok -
+  sha256 a4fc316d366d9b3f4436c9d8a9d17d718c831491fc87a5451fdc2a7e8da59886
+  14938 字节；来源：手写：可变块，块大小码 6/7/1/5 与 8/16 位非常用值，采样率/位深取自 STREAMINFO；种子：smooth 505
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 44100 Hz/2 声道/16 位/最大块 4608/总样本 6116；块大小 ["1000", "16", "192", "300", "4608"]；分支要求 ["blocksize=16", "blocksize=1000", "blocksize=192", "blocksize=4608", "blocksize=300", "channel_assignment=MID_SIDE", "channel_assignment=RIGHT_SIDE"] 满足
+rate_code12_7khz -> ok -
+  sha256 eaa17400a0196ef4eabf57f5070329fd64ee6169638de7431d3945efdc7a3a6a
+  686 字节；来源：手写：非常用采样率 7000 Hz；种子：smooth 7606
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 7000 Hz/1 声道/16 位/最大块 250/总样本 500；块大小 ["250"]；分支要求 [] 满足
+rate_code13_11025 -> ok -
+  sha256 b903bd83e8e5b5b9822e3f8f04bb16dd11afcc2447ab41b49c327baef94d34c4
+  690 字节；来源：手写：非常用采样率 11025 Hz；种子：smooth 11631
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 11025 Hz/1 声道/16 位/最大块 250/总样本 500；块大小 ["250"]；分支要求 [] 满足
+rate_code14_100k -> ok -
+  sha256 92cc6cebb15f47b0175d5065a9ec66f89ca48a7e7eb83a8b86e850c93f24d854
+  695 字节；来源：手写：非常用采样率 100000 Hz；种子：smooth 100606
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 100000 Hz/1 声道/16 位/最大块 250/总样本 500；块大小 ["250"]；分支要求 [] 满足
+metadata_skip -> ok -
+  sha256 3bc333c1f388ab2126b01e07ecde5d4a0c93bb9cde140970c97669a2f3bff9a6
+  120001 字节；来源：手写：填充、注释、100 KB 图片与保留类型元数据；种子：smooth 707
+  核对：libFLAC 参考解码（raw，有符号小端 24 位）逐样本一致；metaflac 48000 Hz/2 声道/24 位/最大块 512/总样本 1000；块大小 ["488", "512"]；分支要求 [] 满足
+unknown_max_frame -> ok -
+  sha256 9e74edd2f077a585834bb946ab5f26117646a9af6bf093278a1190f94b3f519c
+  19591 字节；来源：手写：STREAMINFO 最小/最大帧长度为 0（未知）；种子：smooth 707
+  核对：libFLAC 参考解码（raw，有符号小端 24 位）逐样本一致；metaflac 48000 Hz/2 声道/24 位/最大块 512/总样本 1000；块大小 ["488", "512"]；分支要求 [] 满足
+lying_max_frame -> ok -
+  sha256 1ff0157f06bda73d11b97b48149457a0e305e2da348610cc8b896e6dc3ae0480
+  19591 字节；来源：手写：STREAMINFO 最大帧长度谎报为 100；种子：smooth 707
+  核对：libFLAC 参考解码（raw，有符号小端 24 位）逐样本一致；metaflac 48000 Hz/2 声道/24 位/最大块 512/总样本 1000；块大小 ["488", "512"]；分支要求 [] 满足
+short_tail_frame -> ok -
+  sha256 5710241351adc88d24bf4065c310b64b537125ffaf1f085bfd9bd2a60e350790
+  1318 字节；来源：手写：固定块 512，尾帧 17 帧；种子：smooth 808
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 22050 Hz/1 声道/16 位/最大块 512/总样本 1041；块大小 ["17", "512"]；分支要求 ["blocksize=17", "blocksize=512"] 满足
+err_header_crc -> Malformed HeaderCrc
+  sha256 8ff3572c9dbbc2f47b7c6a93d4e4f16b81bdc986e1861a3c54cd38ae87b1a1f2
+  3404 字节；来源：手写错误：首帧帧头 1 位翻转；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_frame_crc -> Malformed FrameCrc
+  sha256 a59928d4b0238e729b982d8392c7dff427817db936832f34d95d62e00548bbbc
+  3404 字节；来源：手写错误：第二帧 verbatim 样本 1 位翻转；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_truncated_mid_frame -> Truncated Truncated
+  sha256 2791f0ddb3145b91952425680fc8c5c7d98ccfb05972d9334308ba8ef1458d19
+  3397 字节；来源：手写错误：尾帧缺最后 7 字节；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_truncated_at_frame_boundary -> Truncated Truncated
+  sha256 ba6d8d63def630d4fc72a51028d05ce461dc723bafc7ae7a75e2452a5cc3ae22
+  1724 字节；来源：手写错误：在帧边界截断，STREAMINFO 总样本数不足；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_no_marker -> Malformed BadMarker
+  sha256 32be06f30395eea382f9b959876f1b700f94c10ce74a62002d51f985f765f050
+  3404 字节；来源：手写错误：标记不是 fLaC；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_first_block_not_streaminfo -> Malformed BadStreamInfo
+  sha256 48bbd30822cc1d65ce63321f68f98cbbc7709e667ed0dd79e1a7b9cd12576503
+  3404 字节；来源：手写错误：首个元数据块不是 STREAMINFO；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_metadata_type_127 -> Malformed BadMetadataType
+  sha256 d875e2aa14904d2fa0f04553fe106339e69f5c5d57fc9f588c1f9820fccf415d
+  3412 字节；来源：手写错误：元数据块类型 127；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_negative_lpc_shift -> Malformed NegativeShift
+  sha256 f1deb1c0320eeeb0a5622a5be3d1777e188c5daf3cddb3621f6bb7061f64fdcd
+  144 字节；来源：手写错误：LPC 右移量 −1（CRC 正确）；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_lpc_precision_15 -> Malformed BadLpcPrecision
+  sha256 60a3007c851469d6158e22e26ebcf4320ba31b5e442cab34766e116f0d1f7c14
+  144 字节；来源：手写错误：LPC 精度字段 0b1111（CRC 正确）；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_partition_order -> Malformed BadPartitionOrder
+  sha256 b530de9d3671626138dbcad82b7a326d3ed5f517457acf84753cee4f1290015b
+  54 字节；来源：手写错误：块 100、分区阶数 3；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_residual_overflow -> Malformed ResidualOverflow
+  sha256 674224f8680099cc1e52b81cbc7dea56a0509640d4a8f18c5f3be081961f4608
+  59 字节；来源：手写错误：Rice 商 2^32；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_sample_overflow -> Malformed SampleOverflow
+  sha256 a55e01a41748ccff703a9b0e1d805357e4306bcc7c16ebd63dd69973de385b44
+  62 字节；来源：手写错误：16 位预测结果 32768；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_nonzero_padding -> Malformed NonZeroPadding
+  sha256 90535819244393e0b2765bc91be7cf0f4d299d8d954018f41aab5989cfb9f741
+  57 字节；来源：手写错误：帧尾填充位为 1；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_stream_mismatch -> Malformed StreamMismatch
+  sha256 ae7e4b993956e10d7a4452a36d0258dc571ad5359b4edf008d86519190aca9e9
+  100 字节；来源：手写错误：帧位深 24、STREAMINFO 16；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_blocking_change -> Malformed StreamMismatch
+  sha256 7e16936ab95cdad00c88c929a4001f845d2791e6ed2d86a01021e10334b9c190
+  190 字节；来源：手写错误：第二帧改为可变块；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_reserved_blocksize -> Malformed ReservedCode
+  sha256 1668e6e6ddec8a2684c0c0554ebafc9eece1695674cc2fa575416a8892a4008d
+  180 字节；来源：手写错误：块大小码 0（CRC-8 重算）；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_reserved_channels -> Malformed ReservedCode
+  sha256 8e03f4f89e8b5ddf92bc16b0f563175b87042f1ecee8e5895148c244ac199665
+  180 字节；来源：手写错误：声道码 11（CRC-8 重算）；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_unsupported_3ch -> Unsupported Unsupported
+  sha256 2a193b4f38750e91a50ad7cc17a31f51814821ae46d9b6f570571fa7332286c0
+  438 字节；来源：手写错误：3 声道（libFLAC 可解）；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
+err_unsupported_384k -> Unsupported Unsupported
+  sha256 6005797d02c8ec146cae7a38e28dc44322f61e28a95983ef41af1bcc90ced1f2
+  182 字节；来源：手写错误：384 kHz；种子：smooth 909 / 1001–1004（错误夹具）
+  核对：未做参考解码（错误或不支持的夹具）
 
-# libFLAC --analyze 分支覆盖（有效夹具合计）
+# libFLAC --analyze 分支覆盖（含该分支的有效夹具数）
 blocksize=65535: 1
-channel_assignment=INDEPENDENT: 42
-channel_assignment=LEFT_SIDE: 8
-channel_assignment=MID_SIDE: 29
-channel_assignment=RIGHT_SIDE: 3
-escape_partition: 3
-residual_type=RICE: 76
-residual_type=RICE2: 35
-type=CONSTANT: 4
+channel_assignment=INDEPENDENT: 16
+channel_assignment=LEFT_SIDE: 4
+channel_assignment=MID_SIDE: 7
+channel_assignment=RIGHT_SIDE: 2
+escape_partition: 2
+residual_type=RICE: 18
+residual_type=RICE2: 6
+type=CONSTANT: 2
+type=FIXED: 14
 type=FIXED order=0: 2
-type=FIXED order=1: 9
-type=FIXED order=2: 45
+type=FIXED order=1: 4
+type=FIXED order=2: 12
 type=FIXED order=3: 2
 type=FIXED order=4: 2
-type=LPC: 51
+type=LPC: 12
+type=LPC order=10: 3
+type=LPC order=11: 2
+type=LPC order=12: 2
+type=LPC order=2: 2
 type=LPC order=32: 1
-type=VERBATIM: 18
-wasted_bits>0: 9
+type=LPC order=4: 1
+type=LPC order=5: 1
+type=LPC order=6: 1
+type=LPC order=7: 2
+type=LPC order=8: 5
+type=LPC order=9: 1
+type=VERBATIM: 4
+wasted_bits>0: 2

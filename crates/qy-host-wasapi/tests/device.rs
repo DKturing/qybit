@@ -80,6 +80,34 @@ fn exclusive_playback_48k_16bit() {
     assert!(report.finished && report.software_path_intact());
 }
 
+/// M1 T3：自有 FLAC 解码经独占流播放（libFLAC 生成的 44.1 kHz/16 位/双声道夹具，20000 帧）。
+#[test]
+#[ignore = "需要真实音频设备与 QYBIT_DEVICE_ID"]
+fn exclusive_playback_flac_44k_16bit() {
+    let id = device_id();
+    let file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../qy-codec-flac/tests/fixtures/cli_16_stereo_44k_default.flac");
+    let Ok(mut res) = HostResources::new() else {
+        panic!("资源分配失败");
+    };
+    let mut backend = WasapiBackend::new(id.clone());
+    let report = play(&mut backend, &mut res, &[file]);
+    println!("设备 {id}\n{report:#?}");
+    assert!(
+        report.open_failures.is_empty(),
+        "独占打开失败: {:#?}",
+        report.open_failures
+    );
+    assert_eq!(report.streams.len(), 1);
+    let Some(render) = report.streams[0].render else {
+        panic!("渲染线程未返回报告");
+    };
+    assert_eq!(render.end, RenderEnd::Drained);
+    assert_eq!(render.valid_frames, 20_000);
+    assert_eq!(render.underrun_events, 0, "出现欠载: {render:?}");
+    assert!(report.finished && report.software_path_intact());
+}
+
 /// 设备格式矩阵（60 项）与顺序换曲。报告写入 `QYBIT_REPORT_DIR`（默认 `target/qybit-report`）。
 /// 设备不支持某格式是正常能力结果；凡独占初始化成功的项都必须完整播放（排空、帧数一致、无欠载）。
 #[test]

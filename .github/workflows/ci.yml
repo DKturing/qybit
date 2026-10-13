@@ -21,9 +21,9 @@ jobs:
       - name: 安装工具链（rust-toolchain.toml）
         run: rustup show
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked -p qy-core -p qy-codec-wav -p qy-codec-flac -p qy-pcm-format -p qy-host-sim -p qy-gen-fixtures --all-targets -- -D warnings
+      - run: cargo clippy --locked -p qy-core -p qy-codec-wav -p qy-codec-flac -p qy-codec-auto -p qy-pcm-format -p qy-host-sim -p qy-gen-fixtures --all-targets -- -D warnings
       - run: cargo clippy --locked -p qy-codec-flac --features static-cell,test-metrics --all-targets -- -D warnings
-      - run: cargo test --locked -p qy-core -p qy-codec-wav -p qy-host-sim
+      - run: cargo test --locked -p qy-core -p qy-codec-wav -p qy-codec-auto -p qy-host-sim
       - run: cargo test --locked -p qy-codec-flac
       - run: cargo test --locked -p qy-codec-flac --features static-cell,test-metrics
       - run: cargo test --locked -p qy-pcm-format
@@ -42,7 +42,8 @@ jobs:
       - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-flac
       - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-flac --features static-cell
       - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-flac --features test-metrics
-      - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-core -p qy-codec-wav -p qy-pcm-format -p qy-codec-flac -- -D warnings
+      - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-auto
+      - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-core -p qy-codec-wav -p qy-pcm-format -p qy-codec-flac -p qy-codec-auto -- -D warnings
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-codec-flac --features static-cell -- -D warnings
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-codec-flac --features test-metrics -- -D warnings
 
@@ -57,9 +58,19 @@ jobs:
       - run: cargo build --locked -p qy-host-wasapi -p qybit
       - run: cargo test --locked -p qy-host-wasapi -p qybit
 
-  # WAV 解码 fuzz 冒烟（60 秒，以夹具为初始语料）。正式 10 分钟记录见 docs/m0-t2-wav.md。
+  # 解码 fuzz 冒烟（各 60 秒，以夹具为初始语料）。正式 10 分钟记录见 docs/m0-t2-wav.md 与 docs/m1-t3-integration.md。
   fuzz-smoke:
-    name: fuzz 冒烟 (wav_decode)
+    name: fuzz 冒烟 (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: wav_decode
+            fixtures: crates/qy-codec-wav/tests/fixtures/*.wav
+            max_len: 65536
+          - target: flac_decode
+            fixtures: crates/qy-codec-flac/tests/fixtures/*.flac
+            max_len: 1048576
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,11 +78,11 @@ jobs:
       - run: cargo +nightly-2026-10-12 install cargo-fuzz --version 0.13.2 --locked
       - name: 生成初始语料
         run: |
-          mkdir -p fuzz/corpus/wav_decode
-          for f in crates/qy-codec-wav/tests/fixtures/*.wav; do
+          mkdir -p fuzz/corpus/${{ matrix.target }}
+          for f in ${{ matrix.fixtures }}; do
             n=$(basename "$f")
-            (printf '\x00'; cat "$f") > "fuzz/corpus/wav_decode/$n.s0"
-            (printf '\x07'; cat "$f") > "fuzz/corpus/wav_decode/$n.s7"
+            (printf '\x00'; cat "$f") > "fuzz/corpus/${{ matrix.target }}/$n.s0"
+            (printf '\x87'; cat "$f") > "fuzz/corpus/${{ matrix.target }}/$n.s87"
           done
       - working-directory: fuzz
-        run: cargo +nightly-2026-10-12 fuzz run wav_decode -- -max_total_time=60 -max_len=65536 -seed=1
+        run: cargo +nightly-2026-10-12 fuzz run ${{ matrix.target }} -- -max_total_time=60 -max_len=${{ matrix.max_len }} -seed=1

@@ -1,0 +1,17 @@
+[package]
+name = "qy-codec-auto"
+description = "QyBit 按文件头选择自有 WAV / FLAC 解码器（静态分发，no_std，无 alloc）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+qy-core.workspace = true
+qy-codec-wav.workspace = true
+qy-codec-flac.workspace = true
+
+[lints]
+workspace = true

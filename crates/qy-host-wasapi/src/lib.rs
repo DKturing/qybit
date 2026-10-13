@@ -23,8 +23,9 @@ mod fake;
 #[cfg(test)]
 mod testutil;
 
-use qy_codec_wav::WavDecoder;
-use qy_core::{Core, DeviceFormat, INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES};
+use qy_codec_auto::{AutoDecoder, AutoInitError};
+use qy_codec_flac::Capacity;
+use qy_core::{Core, DeviceFormat, PCM_WORK_SAMPLES};
 use qy_pcm_format::ring::{
     DEFAULT_CAPACITY_BYTES, FrameConsumer, FrameProducer, PACK_SCRATCH_BYTES, RingError,
     frame_ring, reconfigure,
@@ -33,7 +34,7 @@ use qy_pcm_format::ring::{
 /// 宿主初始化/重配置错误。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostError {
-    Decoder(qy_core::DecodeError),
+    Decoder(AutoInitError),
     Core(qy_core::CoreError),
     Ring(RingError),
     /// 队列消费端仍在渲染线程中。
@@ -47,7 +48,7 @@ fn leak_zeroed<T: Copy + Default>(len: usize) -> &'static mut [T] {
 
 /// 宿主长期资源：整程序生命期复用。
 pub struct HostResources {
-    pub core: Core<WavDecoder>,
+    pub core: Core<AutoDecoder>,
     /// 生产端 pack 暂存区（启动时分配一次）。
     pub pack_scratch: &'static mut [u8],
     pub producer: FrameProducer,
@@ -57,11 +58,19 @@ pub struct HostResources {
 }
 
 impl HostResources {
+    /// 启动时一次性分配：WAV 工作区、FLAC 桌面容量工作区与 1 MiB 输入窗口。
     pub fn new() -> Result<Self, HostError> {
-        let input = leak_zeroed::<u8>(INPUT_WINDOW_BYTES);
-        let decoder =
-            WavDecoder::new(leak_zeroed::<i32>(PCM_WORK_SAMPLES)).map_err(HostError::Decoder)?;
-        let core = Core::new(input, decoder).map_err(HostError::Core)?;
+        let cap = Capacity::DESKTOP;
+        let decoder = AutoDecoder::new(
+            leak_zeroed::<i32>(PCM_WORK_SAMPLES),
+            cap,
+            leak_zeroed::<i64>(cap.workspace_len()),
+            leak_zeroed::<i32>(cap.pcm_len()),
+        )
+        .map_err(HostError::Decoder)?;
+        let window = decoder.required_window();
+        let input = leak_zeroed::<u8>(window);
+        let core = Core::with_window(input, window, decoder).map_err(HostError::Core)?;
         let (producer, consumer) = frame_ring(DEFAULT_CAPACITY_BYTES);
         Ok(Self {
             core,
@@ -91,7 +100,9 @@ mod tests {
         let Ok(mut r) = HostResources::new() else {
             panic!("init");
         };
-        assert_eq!(r.core.decoder().capacity_samples(), PCM_WORK_SAMPLES);
+        assert_eq!(r.core.decoder().wav().capacity_samples(), PCM_WORK_SAMPLES);
+        assert_eq!(r.core.decoder().flac().capacity(), Capacity::DESKTOP);
+        assert_eq!(r.core.decoder().required_window(), 1 << 20);
         let Ok(f) = DeviceFormat::wasapi(192_000, 2, 32, 32) else {
             panic!("fmt");
         };

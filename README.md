@@ -6,7 +6,7 @@ Rust 极简本地音频播放器。纯本地、严格保真：不重采样、不
 
 ## 当前状态
 
-M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wav.md)），pack 与 Windows 纯格式描述（[docs/m0-t3-pack.md](docs/m0-t3-pack.md)），真实路径模拟（[docs/m0-t4-sim.md](docs/m0-t4-sim.md)，`Action`/`Event`/`Decoder` 自此冻结），WASAPI 独占宿主（[docs/m0-t5-wasapi.md](docs/m0-t5-wasapi.md)），CLI 与真机矩阵（[docs/m0-t6-cli.md](docs/m0-t6-cli.md)）。**真机测试尚未运行**，见下方手动步骤。GUI 见 [tasks/GUI.md](tasks/GUI.md)，在 M0–M2 完成后再做。
+M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wav.md)），pack 与 Windows 纯格式描述（[docs/m0-t3-pack.md](docs/m0-t3-pack.md)），真实路径模拟（[docs/m0-t4-sim.md](docs/m0-t4-sim.md)，`Action`/`Event`/`Decoder` 自此冻结），WASAPI 独占宿主（[docs/m0-t5-wasapi.md](docs/m0-t5-wasapi.md)），CLI 与真机矩阵（[docs/m0-t6-cli.md](docs/m0-t6-cli.md)）。M1 T1–T3 已实现：自有 FLAC 解码（[docs/m1-t2-flac.md](docs/m1-t2-flac.md)），libFLAC 参考核对、按文件头识别 WAV/FLAC 并接入模拟与桌面播放（[docs/m1-t3-integration.md](docs/m1-t3-integration.md)）。**真机测试尚未运行**，见下方手动步骤。GUI 见 [tasks/GUI.md](tasks/GUI.md)，在 M0–M2 完成后再做。
 
 ## 工程结构
 
@@ -14,9 +14,10 @@ M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-
 | --- | --- |
 | `qy-core` | sans-IO 播放核心，`no_std`、无 alloc |
 | `qy-codec-wav` | 自有推送式 WAV 解码器，`no_std`、无 alloc |
-| `qy-codec-flac` | 自有推送式 FLAC 解码器（M1：T1 缓冲接口、T2 整帧解析已完成，见 [docs/m1-t2-flac.md](docs/m1-t2-flac.md)），`no_std`、无 alloc；`static-cell` 特性提供 MCU 静态缓冲，`test-metrics` 特性仅供测试统计 |
+| `qy-codec-flac` | 自有推送式 FLAC 解码器（见 [docs/m1-t2-flac.md](docs/m1-t2-flac.md)），`no_std`、无 alloc；`static-cell` 特性提供 MCU 静态缓冲，`test-metrics` 特性仅供测试统计 |
+| `qy-codec-auto` | 按文件头（`RIFF`/`fLaC`）选择自有 WAV/FLAC 解码器，静态分发，`no_std`、无 alloc |
 | `qy-pcm-format` | 与平台 SDK 无关的格式字段、WAVEFORMATEX/EXTENSIBLE 纯描述与 pack，`no_std`；`ring` 特性提供宿主用的设备帧 SPSC 队列 |
-| `qy-host-sim` | 模拟宿主：真实核心/解码/pack/队列，模拟文件、时间与设备；1000 种子场景测试 |
+| `qy-host-sim` | 模拟宿主：真实核心/解码/pack/队列，模拟文件、时间与设备；WAV 1000 种子与 FLAC 1200 种子场景、并发实例测试 |
 | `qy-host-wasapi` | WASAPI 独占宿主：跨平台渲染循环与播放驱动（可注入假 API 测试），Windows 绑定仅在 Windows 目标编译；真机测试见 `tests/device.rs`（默认忽略） |
 | `qybit` | 命令行程序，二进制名 `qybit` |
 
@@ -34,22 +35,23 @@ M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo build --target thumbv7em-none-eabihf -p qy-core -p qy-codec-wav -p qy-pcm-format -p qy-codec-flac
+cargo build --target thumbv7em-none-eabihf -p qy-core -p qy-codec-wav -p qy-pcm-format -p qy-codec-flac -p qy-codec-auto
 cargo build --target thumbv7em-none-eabihf -p qy-codec-flac --features static-cell
 cargo test -p qy-codec-flac --features test-metrics   # 含整帧重试复杂度测试
 ```
 
-测试夹具由 `cargo run -p qy-gen-fixtures -- [wav|flac|all]` 生成：WAV 需要 PATH 中有 ffmpeg 作为第二参考，FLAC 需要 Xiph `flac` ≥ 1.4.0（编码、`flac -d` 交叉核对与 `--analyze` 分支覆盖），fuzz 步骤见 [docs/m0-t2-wav.md](docs/m0-t2-wav.md)。
+测试夹具由 `cargo run -p qy-gen-fixtures -- [wav|flac|all]` 生成：WAV 需要 PATH 中有 ffmpeg 作为第二参考，FLAC 需要 Xiph `flac`/`metaflac` ≥ 1.4.0（编码、显式格式参考解码、实际格式与 `--analyze` 分支核对，清单含 SHA-256 与种子）。fuzz 步骤见 [docs/m0-t2-wav.md](docs/m0-t2-wav.md)（`wav_decode`）与 [docs/m1-t3-integration.md](docs/m1-t3-integration.md)（`flac_decode`）。
 
 | fuzz 依赖 | 版本 | 用途 |
 | --- | --- | --- |
 | `libfuzzer-sys` | =0.4.10 | libFuzzer 绑定，仅 `fuzz/`（独立 workspace，nightly） |
+| `sha2` | =0.10.9 | 夹具 SHA-256 摘要，仅 `tools/qy-gen-fixtures` |
 
 ## 使用（Windows）
 
 ```
 qybit list-devices                          # 列出端点 ID 与名称
-qybit --device <端点ID> a.wav b.wav         # WASAPI 独占顺序播放
+qybit --device <端点ID> a.wav b.flac        # WASAPI 独占顺序播放（按文件头识别 WAV/FLAC）
 qybit matrix --device <端点ID> --out report # 设备格式矩阵，写出 JSON/CSV
 ```
 
@@ -65,6 +67,7 @@ cargo test -p qy-host-wasapi --test device -- --ignored --test-threads=1 --nocap
 ```
 
 - `exclusive_playback_48k_16bit`：48 kHz/16 位双声道 1 秒独占播放。
+- `exclusive_playback_flac_44k_16bit`：自有 FLAC 解码，libFLAC 生成的 44.1 kHz/16 位双声道夹具（20000 帧）独占播放。
 - `format_matrix_and_sequential`：44.1–192 kHz × 16/16、24/24、32/24、32/32 × 单/双声道（EXTENSIBLE），16/16 另测 WAVEFORMATEX，共 60 项；再用两个不同采样率顺序换曲。生成 `qybit-device-matrix.json` / `.csv`。
 
 未设置 `QYBIT_DEVICE_ID` 或设备不存在时测试明确失败，不跳过。接口成功与播放统计只证明兼容与运行，不证明 DAC 输入样本逐位一致。

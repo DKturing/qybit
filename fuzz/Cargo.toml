@@ -15,10 +15,18 @@ cargo-fuzz = true
 libfuzzer-sys = "=0.4.10"
 qy-core = { path = "../crates/qy-core" }
 qy-codec-wav = { path = "../crates/qy-codec-wav" }
+qy-codec-flac = { path = "../crates/qy-codec-flac" }
 
 [[bin]]
 name = "wav_decode"
 path = "fuzz_targets/wav_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "flac_decode"
+path = "fuzz_targets/flac_decode.rs"
 test = false
 doc = false
 bench = false

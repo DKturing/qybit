@@ -31,7 +31,10 @@ fn reconfigure_reuses_buffers_without_allocation() {
     let Ok(mut host) = SimHost::new() else {
         panic!("host init");
     };
-    assert_eq!(host.core.decoder().capacity_samples(), PCM_WORK_SAMPLES);
+    assert_eq!(
+        host.core.decoder().wav().capacity_samples(),
+        PCM_WORK_SAMPLES
+    );
     assert_eq!(host.producer.free_frames(), 0); // 未配置帧宽
 
     let formats = [

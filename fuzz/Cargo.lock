@@ -70,6 +70,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "qy-codec-flac"
+version = "0.0.0"
+dependencies = [
+ "qy-core",
+]
+
+[[package]]
 name = "qy-codec-wav"
 version = "0.0.0"
 dependencies = [
@@ -88,6 +95,7 @@ name = "qy-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "qy-codec-flac",
  "qy-codec-wav",
  "qy-core",
 ]

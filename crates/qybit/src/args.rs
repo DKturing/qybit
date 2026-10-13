@@ -5,7 +5,7 @@ use std::path::PathBuf;
 pub const USAGE: &str = "\
 用法:
   qybit list-devices                         列出活动输出设备的端点 ID（及名称）
-  qybit --device <端点ID> <文件.wav>...      以 WASAPI 独占模式按顺序播放
+  qybit --device <端点ID> <文件>...          以 WASAPI 独占模式按顺序播放 WAV/FLAC（按文件头识别）
   qybit matrix --device <端点ID> [--out <目录>]
                                              运行设备格式矩阵，写出 JSON/CSV 报告
   qybit --version | --help
@@ -56,7 +56,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 files.push(PathBuf::from(a));
             }
             if files.is_empty() {
-                return Err("至少需要一个 WAV 文件".into());
+                return Err("至少需要一个音频文件（WAV 或 FLAC）".into());
             }
             Ok(Command::Play { device, files })
         }

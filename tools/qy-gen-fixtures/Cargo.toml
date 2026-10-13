@@ -8,5 +8,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+# 夹具 SHA-256 摘要（仅开发工具）。
+sha2 = "=0.10.9"
+
 [lints]
 workspace = true

@@ -17,6 +17,8 @@ use std::process::Command;
 
 use crate::Result;
 
+mod reference;
+
 // ---------------------------------------------------------------- 工具
 
 struct Lcg(u64);
@@ -1717,6 +1719,7 @@ pub fn generate(out: &Path) -> Result<()> {
     let tmp = std::env::temp_dir().join(format!("qy-gen-flac-{}", std::process::id()));
     std::fs::create_dir_all(&tmp)?;
     let version = flac_version()?;
+    reference::check_version(&version)?;
     let mut manifest = format!(
         "# qy-codec-flac 夹具清单（由 cargo run -p qy-gen-fixtures -- flac 生成）\n参考工具：{version}\n\n"
     );
@@ -1763,8 +1766,10 @@ pub fn generate(out: &Path) -> Result<()> {
         if !f.samples.is_empty() {
             std::fs::write(out.join(format!("{}.s32le", f.name)), s32le(&f.samples))?;
         }
+        let mut check = String::from("未做参考解码（错误或不支持的夹具）");
         if f.libflac_check {
-            let reference = libflac_decode(&path, &tmp)?;
+            let (rate, ch, bits) = f.format.ok_or("缺格式")?;
+            let (reference, how) = reference::libflac_reference(&path, bits, &tmp)?;
             if reference != f.samples {
                 let at = reference.iter().zip(&f.samples).position(|(a, b)| a != b);
                 return Err(format!(
@@ -1776,53 +1781,46 @@ pub fn generate(out: &Path) -> Result<()> {
                 )
                 .into());
             }
-            let ana = analyze(&path, &tmp)?;
-            for line in ana.lines() {
-                let t = line.trim_start();
-                for key in ["type=", "channel_assignment=", "residual_type="] {
-                    if let Some(rest) = t.split('\t').find_map(|x| x.strip_prefix(key)) {
-                        let mut k = format!("{key}{rest}");
-                        if key == "type=" && (rest == "FIXED" || rest == "LPC") {
-                            if let Some(o) = t.split('\t').find_map(|x| x.strip_prefix("order=")) {
-                                if rest == "FIXED" {
-                                    k = format!("type=FIXED order={o}");
-                                }
-                            }
-                        }
-                        *coverage.entry(k).or_default() += 1;
-                    }
-                }
-                if let Some(w) = t.split('\t').find_map(|x| x.strip_prefix("wasted_bits=")) {
-                    if w != "0" {
-                        *coverage.entry("wasted_bits>0".into()).or_default() += 1;
-                    }
-                }
-                if t.starts_with("parameter[") && t.contains("=ESCAPE") {
-                    *coverage.entry("escape_partition".into()).or_default() += 1;
-                }
-                if let Some(bs) = t.split('\t').find_map(|x| x.strip_prefix("blocksize=")) {
-                    if bs == "65535" {
-                        *coverage.entry("blocksize=65535".into()).or_default() += 1;
-                    }
-                }
-                if let Some(o) = t.split('\t').find_map(|x| x.strip_prefix("order=")) {
-                    if t.contains("type=LPC") && o == "32" {
-                        *coverage.entry("type=LPC order=32".into()).or_default() += 1;
-                    }
-                }
+            // metaflac 读出的实际格式必须与预期一致（不假设编码选项生效）。
+            let (m_rate, m_ch, m_bits, m_maxbs, m_total) = reference::metaflac_info(&path)?;
+            let frames = (f.samples.len() / ch as usize) as u64;
+            if (m_rate, m_ch, m_bits) != (rate, ch, bits) || (m_total != 0 && m_total != frames) {
+                return Err(format!(
+                    "{}: metaflac 实际格式 {m_rate}/{m_ch}/{m_bits} 总样本 {m_total} 与预期 {rate}/{ch}/{bits} {frames} 不符",
+                    f.name
+                )
+                .into());
             }
+            let keys = reference::analyze_keys(&analyze(&path, &tmp)?);
+            reference::check_branches(&f.name, &keys)?;
+            for k in &keys {
+                *coverage.entry(k.clone()).or_default() += 1;
+            }
+            let blocks: Vec<&str> = keys
+                .iter()
+                .filter_map(|k| k.strip_prefix("blocksize="))
+                .collect();
+            check = format!(
+                "libFLAC 参考解码（{how}，有符号小端 {bits} 位）逐样本一致；metaflac {m_rate} Hz/{m_ch} 声道/{m_bits} 位/最大块 {m_maxbs}/总样本 {m_total}；块大小 {blocks:?}；分支要求 {:?} 满足",
+                reference::expected_branches(&f.name)
+            );
         }
         let _ = writeln!(
             manifest,
-            "{} -> {} {} ({} 字节) {}",
+            "{} -> {} {}\n  sha256 {}\n  {} 字节；来源：{}；种子：{}\n  核对：{}",
             f.name,
             f.result,
             f.detail,
+            reference::sha256_hex(&f.data),
             f.data.len(),
-            f.origin
+            f.origin,
+            reference::seeds(&f.name),
+            check
         );
     }
-    manifest.push_str("\n# libFLAC --analyze 分支覆盖（有效夹具合计）\n");
+    // 块大小键只在覆盖汇总里保留 65535。
+    coverage.retain(|k, _| !k.starts_with("blocksize=") || k == "blocksize=65535");
+    manifest.push_str("\n# libFLAC --analyze 分支覆盖（含该分支的有效夹具数）\n");
     for (k, n) in &coverage {
         let _ = writeln!(manifest, "{k}: {n}");
     }

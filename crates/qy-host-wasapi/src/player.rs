@@ -391,6 +391,9 @@ impl<B: Backend> Player<'_, B> {
                 }
                 Action::Failed { track, fault, .. } => {
                     self.report.fault = Some((track, fault));
+                    if let Some(e) = self.res.core.decoder().flac_error() {
+                        self.report.messages.push(format!("FLAC 错误明细：{e:?}"));
+                    }
                     self.finish_stream();
                     break;
                 }
@@ -580,7 +583,9 @@ impl<B: Backend> Player<'_, B> {
 mod tests {
     use super::*;
     use crate::fake::{AUDCLNT_E_UNSUPPORTED_FORMAT, FakeBackend, FakeOutput, check_calls};
-    use crate::testutil::{data_chunk, fixture, fixture_path};
+    use crate::testutil::{
+        data_chunk, fixture, fixture_path, flac_fixture_path, flac_reference, place,
+    };
     use qy_core::DecodeError;
 
     const ALL: [(u8, u8); 4] = [(16, 16), (24, 24), (32, 24), (32, 32)];
@@ -589,7 +594,16 @@ mod tests {
         let Ok(mut res) = HostResources::new() else {
             panic!("res");
         };
-        let files: Vec<PathBuf> = names.iter().map(|n| fixture_path(n)).collect();
+        let files: Vec<PathBuf> = names
+            .iter()
+            .map(|n| {
+                if n.ends_with(".flac") {
+                    flac_fixture_path(n)
+                } else {
+                    fixture_path(n)
+                }
+            })
+            .collect();
         let report = play(backend, &mut res, &files);
         assert!(res.consumer.is_some(), "消费端须归还");
         let outputs = backend
@@ -753,5 +767,82 @@ mod tests {
         assert_eq!(outs.len(), 1);
         assert!(matches!(outs[0].report.end, RenderEnd::Error(_)));
         assert_eq!(outs[0].report.mmcss.reverted, Some(Ok(())));
+    }
+
+    /// M1 T3：FLAC 与 WAV 按文件头识别混排；期望字节由 libFLAC 参考样本按独立公式放置。
+    #[test]
+    fn flac_and_wav_mixed_playlist() {
+        let mut b = FakeBackend::new(&ALL);
+        let names = [
+            "pcm16_stereo_44k.wav",
+            "cli_16_stereo_44k_default.flac",
+            "fixed_orders_and_lpc32.flac",
+            "cli_32_stereo_192k.flac",
+            "max_block_verbatim_32_stereo.flac",
+        ];
+        let (r, outs) = run(&mut b, &names);
+        assert!(r.finished && r.software_path_intact(), "{r:?}");
+        // 同格式 WAV → FLAC 共用一个流（无缝），其余各自重开。
+        assert_eq!(outs.len(), 4);
+        let wav = data_chunk(&fixture(names[0]));
+        let first = [
+            wav,
+            place(&flac_reference("cli_16_stereo_44k_default"), 16, 16),
+        ]
+        .concat();
+        let expect = [
+            (first, (44_100, 2, 16, 16)),
+            (
+                place(&flac_reference("fixed_orders_and_lpc32"), 20, 24),
+                (48_000, 1, 24, 24),
+            ),
+            (
+                place(&flac_reference("cli_32_stereo_192k"), 32, 32),
+                (192_000, 2, 32, 32),
+            ),
+            (
+                place(&flac_reference("max_block_verbatim_32_stereo"), 32, 32),
+                (48_000, 2, 32, 32),
+            ),
+        ];
+        for (o, (e, (rate, ch, c, v))) in outs.iter().zip(&expect) {
+            assert!(!e.is_empty());
+            assert_eq!(
+                (
+                    o.format.sample_rate(),
+                    o.format.channels(),
+                    o.format.container_bits(),
+                    o.format.valid_bits()
+                ),
+                (*rate, *ch, *c, *v)
+            );
+            check_output(o, e);
+        }
+        assert_eq!(outs[3].report.valid_frames, 65_535);
+    }
+
+    #[test]
+    fn flac_decode_error_drains_verified_frames() {
+        // 第二帧 CRC-16 错误：只播放已校验的第一帧（512 帧），然后报告 Malformed。
+        let mut b = FakeBackend::new(&ALL);
+        let (r, outs) = run(&mut b, &["err_frame_crc.flac", "pcm16_stereo_44k.wav"]);
+        assert_eq!(r.fault, Some((0, Fault::Decode(DecodeError::Malformed))));
+        assert!(!r.finished && !r.software_path_intact());
+        assert_eq!(outs.len(), 1);
+        assert!(
+            r.messages.iter().any(|m| m == "FLAC 错误明细：FrameCrc"),
+            "{:?}",
+            r.messages
+        );
+        assert!(r.summary().contains("FLAC 错误明细：FrameCrc"));
+        let reference = flac_reference("err_frame_crc");
+        assert_eq!(reference.len(), 512 * 2);
+        check_output(&outs[0], &place(&reference, 16, 16));
+
+        // 无 fLaC/RIFF 文件头：按内容识别为不支持，不依据扩展名。
+        let mut b = FakeBackend::new(&ALL);
+        let (r, outs) = run(&mut b, &["err_no_marker.flac"]);
+        assert_eq!(r.fault, Some((0, Fault::Decode(DecodeError::Unsupported))));
+        assert!(outs.is_empty());
     }
 }
