@@ -9,7 +9,7 @@
 - 自行实现 WAV 和 FLAC 解码器；不得改用 Symphonia 或其他生产解码器替代。参考解码器仅用于测试。
 - M0 先完成 Windows：核心、WAV、模拟宿主、纯格式描述、WASAPI 独占、CLI。
 - M0 允许按命令行顺序播放多文件；不实现 GUI、拖放、随机播放、seek、配置保存或交互设备选择。
-- M1 实现自有 FLAC；M2 实现 ALSA 与 snd-aloop 自动回环。macOS、GUI 和 MCU 实机另列任务，不提前扩展范围。
+- M1 实现自有 FLAC；M2 实现 ALSA 与 snd-aloop 自动回环。GUI 见 tasks/GUI.md，在 M0–M2 全部完成后再做；macOS 和 MCU 实机另列任务，不提前扩展范围。
 
 ## 2. 核心与数据流
 
