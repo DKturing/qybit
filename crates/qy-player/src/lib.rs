@@ -15,6 +15,7 @@ pub mod backend;
 pub mod player;
 pub mod render;
 pub mod report;
+pub mod signal;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;

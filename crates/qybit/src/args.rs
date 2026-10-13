@@ -4,13 +4,16 @@ use std::path::PathBuf;
 
 pub const USAGE: &str = "\
 用法:
-  qybit list-devices                         列出活动输出设备的端点 ID（及名称）
-  qybit --device <端点ID> <文件>...          以 WASAPI 独占模式按顺序播放 WAV/FLAC（按文件头识别）
-  qybit matrix --device <端点ID> [--out <目录>]
+  qybit list-devices                         列出可用输出设备（Windows：端点 ID 与名称；Linux：hw 设备名）
+  qybit --device <设备> <文件>...            按顺序播放 WAV/FLAC（按文件头识别）
+  qybit matrix --device <设备> [--out <目录>]
                                              运行设备格式矩阵，写出 JSON/CSV 报告
   qybit --version | --help
 
-退出码：0 完整播放；2 播放完成但有欠载；1 失败（含设备不支持、独占打开失败、设备错误）。";
+设备：Windows 为 WASAPI 端点 ID（独占模式）；Linux 为 ALSA hw:卡,设备 或 hw:CARD=名称,DEV=n
+（只接受 hw 设备，拒绝 plughw/default/dmix/pipewire/pulse 等会转换或混音的设备）。
+
+退出码：0 完整播放；2 播放完成但有欠载；1 失败（含设备不支持、打开失败、设备错误）。";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {

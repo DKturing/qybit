@@ -10,6 +10,7 @@ members = [
     "crates/qy-host-sim",
     "crates/qy-player",
     "crates/qy-host-wasapi",
+    "crates/qy-host-alsa",
     "crates/qybit",
     "tools/qy-gen-fixtures",
 ]
@@ -31,10 +32,15 @@ qy-pcm-format = { path = "crates/qy-pcm-format" }
 qy-host-sim = { path = "crates/qy-host-sim" }
 qy-player = { path = "crates/qy-player" }
 qy-host-wasapi = { path = "crates/qy-host-wasapi" }
+qy-host-alsa = { path = "crates/qy-host-alsa" }
 # 成熟 SPSC 环形队列：存放已 pack 的完整设备帧字节（AGENTS §2，不自行编写无锁缓冲）。
 rtrb = { version = "=0.4.0", default-features = false }
 # MCU 一次性静态零缓冲（ConstStaticCell），仅 qy-codec-flac 的 static-cell 特性使用。
 static_cell = { version = "=2.1.1", default-features = false }
+# ALSA 绑定（封装系统 alsa-lib），仅 Linux 目标使用（M2 T3）。
+alsa = { version = "=0.12.1", default-features = false, features = ["std"] }
+# 渲染线程实时调度（sched_setscheduler），仅 Linux 目标使用；版本与锁文件中 alsa 的依赖一致。
+libc = { version = "=0.2.190", default-features = false }
 # Windows SDK 绑定（WASAPI / COM），仅 Windows 目标使用。
 windows = { version = "=0.62.2", default-features = false }
 

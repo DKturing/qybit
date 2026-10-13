@@ -6,7 +6,7 @@ Rust 极简本地音频播放器。纯本地、严格保真：不重采样、不
 
 ## 当前状态
 
-M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wav.md)），pack 与 Windows 纯格式描述（[docs/m0-t3-pack.md](docs/m0-t3-pack.md)），真实路径模拟（[docs/m0-t4-sim.md](docs/m0-t4-sim.md)，`Action`/`Event`/`Decoder` 自此冻结），WASAPI 独占宿主（[docs/m0-t5-wasapi.md](docs/m0-t5-wasapi.md)），CLI 与真机矩阵（[docs/m0-t6-cli.md](docs/m0-t6-cli.md)）。M1 T1–T3 已实现：自有 FLAC 解码（[docs/m1-t2-flac.md](docs/m1-t2-flac.md)），libFLAC 参考核对、按文件头识别 WAV/FLAC 并接入模拟与桌面播放（[docs/m1-t3-integration.md](docs/m1-t3-integration.md)）。M2 进行中：T1 平台无关播放器层（[docs/m2-t1-player.md](docs/m2-t1-player.md)）、T2 ALSA 格式映射与参数确认（[docs/m2-t2-alsa-format.md](docs/m2-t2-alsa-format.md)）已完成，ALSA 后端见 [tasks/M2.md](tasks/M2.md)。**真机测试尚未运行**，见下方手动步骤。GUI 见 [tasks/GUI.md](tasks/GUI.md)，在 M0–M2 完成后再做。
+M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wav.md)），pack 与 Windows 纯格式描述（[docs/m0-t3-pack.md](docs/m0-t3-pack.md)），真实路径模拟（[docs/m0-t4-sim.md](docs/m0-t4-sim.md)，`Action`/`Event`/`Decoder` 自此冻结），WASAPI 独占宿主（[docs/m0-t5-wasapi.md](docs/m0-t5-wasapi.md)），CLI 与真机矩阵（[docs/m0-t6-cli.md](docs/m0-t6-cli.md)）。M1 T1–T3 已实现：自有 FLAC 解码（[docs/m1-t2-flac.md](docs/m1-t2-flac.md)），libFLAC 参考核对、按文件头识别 WAV/FLAC 并接入模拟与桌面播放（[docs/m1-t3-integration.md](docs/m1-t3-integration.md)）。M2 进行中：T1 平台无关播放器层（[docs/m2-t1-player.md](docs/m2-t1-player.md)）、T2 ALSA 格式映射与参数确认（[docs/m2-t2-alsa-format.md](docs/m2-t2-alsa-format.md)）、T3 ALSA 渲染后端与 Linux CLI（[docs/m2-t3-alsa-backend.md](docs/m2-t3-alsa-backend.md)）已完成；数字回环与验证加强见 [tasks/M2.md](tasks/M2.md)。**真机测试尚未运行**，见下方手动步骤。GUI 见 [tasks/GUI.md](tasks/GUI.md)，在 M0–M2 完成后再做。
 
 ## 工程结构
 
@@ -20,6 +20,7 @@ M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-
 | `qy-host-sim` | 模拟宿主：真实核心/解码/pack/队列，模拟文件、时间与设备；WAV 1000 种子与 FLAC 1200 种子场景、并发实例测试 |
 | `qy-player` | 平台无关播放器层：宿主资源、播放驱动、整包（WASAPI）与短写（ALSA）两种渲染循环、协商与播放报告；`test-support` 特性提供假平台 API 与假后端 |
 | `qy-host-wasapi` | WASAPI 独占宿主：协商记录（HRESULT）、格式矩阵，Windows 绑定仅在 Windows 目标编译；真机测试见 `tests/device.rs`（默认忽略） |
+| `qy-host-alsa` | Linux ALSA 严格输出宿主：只接受 hw 设备，参数设置后读回核对，短写渲染；alsa-lib 绑定仅在 Linux 目标编译，其余逻辑跨平台可测；真机测试见 `tests/device.rs`（默认忽略） |
 | `qybit` | 命令行程序，二进制名 `qybit` |
 
 ## 依赖
@@ -28,6 +29,8 @@ M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-
 | --- | --- | --- |
 | `rtrb` | =0.4.0 | 成熟 SPSC 环形缓冲，存放已 pack 的设备帧字节 |
 | `windows` | =0.62.2 | Windows SDK 绑定（COM、WASAPI），仅 Windows 目标 |
+| `alsa` | =0.12.1 | alsa-lib 安全封装，仅 Linux 目标（构建需要 libasound 开发包，如 `libasound2-dev`） |
+| `libc` | =0.2.190 | Linux 渲染线程实时调度（`sched_setscheduler`），仅 Linux 目标 |
 | `static_cell` | =2.1.1 | MCU 一次性静态零缓冲（`ConstStaticCell`），仅 `qy-codec-flac` 的 `static-cell` 特性 |
 
 ## 本地检查
@@ -57,6 +60,24 @@ qybit matrix --device <端点ID> --out report # 设备格式矩阵，写出 JSON
 ```
 
 播放时显示源格式、每次独占请求的格式与 HRESULT、MMCSS 结果、有效帧、尾部填充与欠载。设备不支持源格式或独占打开失败时直接报错，不回退共享模式、不转换音频。输出不宣称设备端 bit-perfect。
+
+## 使用（Linux）
+
+```
+qybit list-devices                              # 列出 hw:CARD=…,DEV=… 设备
+qybit --device hw:CARD=DAC,DEV=0 a.flac b.wav   # ALSA hw 顺序播放（按文件头识别 WAV/FLAC）
+qybit matrix --device hw:CARD=DAC,DEV=0 --out report
+```
+
+只接受 `hw:` 设备，拒绝 `plughw`/`default`/`dmix`/`pipewire`/`pulse` 等会转换或混音的设备。设备被 PipeWire/PulseAudio 占用（EBUSY）时报告占用进程，不改用共享路径。参数设置后读回核对（格式、精确采样率、声道、周期、缓冲、重采样关闭、有效位），不一致即报错。
+
+## 真机测试（Linux ALSA，手动，需要音频设备）
+
+```
+QYBIT_ALSA_DEVICE=hw:CARD=DAC,DEV=0 cargo test -p qy-host-alsa --test device -- --ignored --test-threads=1 --nocapture
+```
+
+包括 48 kHz/16 位播放、FLAC 播放与 48 项格式矩阵（报告写入 `QYBIT_REPORT_DIR`，默认 `target/qybit-report`）。只证明参数读回一致与播放运行，不证明 DAC 输入样本逐位一致。
 
 ## 真机测试（手动，需要 Windows 与音频设备）
 

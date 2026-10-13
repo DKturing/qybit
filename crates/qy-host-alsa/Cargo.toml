@@ -1,0 +1,30 @@
+[package]
+name = "qy-host-alsa"
+description = "QyBit Linux ALSA 严格输出宿主（直连 hw 设备）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# 假 ALSA PCM 与假打开器，供本 crate 测试与上层集成测试使用。
+test-support = ["qy-player/test-support"]
+
+[dependencies]
+qy-core.workspace = true
+qy-player.workspace = true
+qy-pcm-format = { workspace = true, features = ["ring"] }
+
+# alsa-lib 绑定与实时调度仅在 Linux 目标编译；构建需要 libasound 开发包。
+[target.'cfg(target_os = "linux")'.dependencies]
+alsa.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+qy-player = { workspace = true, features = ["test-support"] }
+qy-host-alsa = { path = ".", features = ["test-support"] }
+
+[lints]
+workspace = true
