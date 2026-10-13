@@ -1,5 +1,6 @@
 /target
 /crates/qy-mcu-demo/target
+/crates/qy-board-stm32f411/target
 /fuzz/target
 /fuzz/corpus
 /fuzz/artifacts

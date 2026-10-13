@@ -160,6 +160,14 @@ pub fn pack(src: &Pcm<'_, Exact>, dev: &DeviceFormat, out: &mut [u8]) -> Result<
                         *b = word[bytes - 1 - k];
                     }
                 }
+                // 高半字在前，半字内小端；16 位容器只有一个半字（构造时已拒绝 24 位容器）。
+                Endian::HalfWordSwapped => {
+                    if bytes == 4 {
+                        dst.copy_from_slice(&[word[2], word[3], word[0], word[1]]);
+                    } else {
+                        dst.copy_from_slice(&word[..bytes]);
+                    }
+                }
             }
         }
     }
@@ -379,6 +387,9 @@ mod tests {
             let b = match d.endian() {
                 Endian::Little => bytes[k],
                 Endian::Big => bytes[bytes.len() - 1 - k],
+                // 第 k 个有效字节（从低到高）：低半字在后两个字节。
+                Endian::HalfWordSwapped if bytes.len() == 4 => bytes[(k + 2) % 4],
+                Endian::HalfWordSwapped => bytes[k],
             };
             word |= u32::from(b) << (8 * k);
         }
@@ -401,6 +412,38 @@ mod tests {
         }
     }
 
+    /// 高半字在前（STM32 SPI/I²S 16 位 DMA）：独立参考字节。
+    #[test]
+    fn half_word_swapped_bytes() {
+        // 32/32：0x1234_5678 → 34 12 78 56；−1 → ff ff ff ff；最小值 → 00 80 00 00。
+        let d = dev(1, 32, 32, Endian::HalfWordSwapped, Placement::MsbAligned);
+        let s = [0x1234_5678, -1, i32::MIN];
+        let Ok((out, len)) = pack_vec(&s, 1, 32, &d) else {
+            panic!()
+        };
+        assert_eq!(
+            &out[..len],
+            &[0x34, 0x12, 0x78, 0x56, 0xff, 0xff, 0xff, 0xff, 0x00, 0x80, 0x00, 0x00]
+        );
+        // 32/24 左对齐：24 位 0x12_3456 → 字 0x1234_5600 → 34 12 00 56。
+        let d = dev(1, 32, 24, Endian::HalfWordSwapped, Placement::MsbAligned);
+        let Ok((out, len)) = pack_vec(&[0x12_3456], 1, 24, &d) else {
+            panic!()
+        };
+        assert_eq!(&out[..len], &[0x34, 0x12, 0x00, 0x56]);
+        // 16/16 与小端相同。
+        let d = dev(1, 16, 16, Endian::HalfWordSwapped, Placement::MsbAligned);
+        let Ok((out, len)) = pack_vec(&[0x1234], 1, 16, &d) else {
+            panic!()
+        };
+        assert_eq!(&out[..len], &[0x34, 0x12]);
+        // 24 位容器无此表示。
+        assert_eq!(
+            DeviceFormat::new(48_000, 1, 24, 24, Endian::HalfWordSwapped, Placement::MsbAligned),
+            Err(crate::FormatError::Layout)
+        );
+    }
+
     #[test]
     fn roundtrip_preserves_value_and_relative_amplitude() {
         let mut seed = 0x1234_5678_9ABC_DEF0u64;
@@ -413,7 +456,10 @@ mod tests {
             (24, 20),
         ] {
             for placement in [Placement::MsbAligned, Placement::LsbAligned] {
-                for endian in [Endian::Little, Endian::Big] {
+                for endian in [Endian::Little, Endian::Big, Endian::HalfWordSwapped] {
+                    if endian == Endian::HalfWordSwapped && c == 24 {
+                        continue;
+                    }
                     for ch in [1u16, 2] {
                         let d = dev(ch, c, v, endian, placement);
                         for n in 1..=v {

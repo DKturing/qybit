@@ -57,6 +57,10 @@ pub enum FormatError {
 pub enum Endian {
     Little,
     Big,
+    /// 16 位半字内小端、**最高有效半字在前**（M3 T2）：STM32F4 等的 SPI/I²S 外设数据寄存器为
+    /// 16 位，经 16 位 DMA 发送 32 位槽位时先发高半字。32 位容器中值 `0x1234_5678` 的内存字节为
+    /// `34 12 78 56`；16 位容器与 [`Endian::Little`] 相同；24 位容器无此表示，构造时拒绝。
+    HalfWordSwapped,
 }
 
 /// 有效位在容器内的放置方式。
@@ -193,6 +197,9 @@ impl DeviceFormat {
         }
         if valid_bits == 0 || valid_bits > container_bits {
             return Err(FormatError::ValidBits);
+        }
+        if matches!(endian, Endian::HalfWordSwapped) && container_bits == 24 {
+            return Err(FormatError::Layout);
         }
         let bytes_per_sample = (container_bits / 8) as u16;
         let block_align = match channels.checked_mul(bytes_per_sample) {
