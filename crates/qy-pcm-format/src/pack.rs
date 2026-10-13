@@ -423,7 +423,9 @@ mod tests {
         };
         assert_eq!(
             &out[..len],
-            &[0x34, 0x12, 0x78, 0x56, 0xff, 0xff, 0xff, 0xff, 0x00, 0x80, 0x00, 0x00]
+            &[
+                0x34, 0x12, 0x78, 0x56, 0xff, 0xff, 0xff, 0xff, 0x00, 0x80, 0x00, 0x00
+            ]
         );
         // 32/24 左对齐：24 位 0x12_3456 → 字 0x1234_5600 → 34 12 00 56。
         let d = dev(1, 32, 24, Endian::HalfWordSwapped, Placement::MsbAligned);
@@ -439,7 +441,14 @@ mod tests {
         assert_eq!(&out[..len], &[0x34, 0x12]);
         // 24 位容器无此表示。
         assert_eq!(
-            DeviceFormat::new(48_000, 1, 24, 24, Endian::HalfWordSwapped, Placement::MsbAligned),
+            DeviceFormat::new(
+                48_000,
+                1,
+                24,
+                24,
+                Endian::HalfWordSwapped,
+                Placement::MsbAligned
+            ),
             Err(crate::FormatError::Layout)
         );
     }

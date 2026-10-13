@@ -8,7 +8,7 @@ QyBit Core：Rust 编写的 `no_std`、无 alloc 本地音频播放引擎，桌�
 
 ## 当前状态
 
-M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wav.md)），pack 与 Windows 纯格式描述（[docs/m0-t3-pack.md](docs/m0-t3-pack.md)），真实路径模拟（[docs/m0-t4-sim.md](docs/m0-t4-sim.md)，`Action`/`Event`/`Decoder` 自此冻结），WASAPI 独占宿主（[docs/m0-t5-wasapi.md](docs/m0-t5-wasapi.md)），CLI 与真机矩阵（[docs/m0-t6-cli.md](docs/m0-t6-cli.md)）。M1 T1–T3 已实现：自有 FLAC 解码（[docs/m1-t2-flac.md](docs/m1-t2-flac.md)），libFLAC 参考核对、按文件头识别 WAV/FLAC 并接入模拟与桌面播放（[docs/m1-t3-integration.md](docs/m1-t3-integration.md)）。M2 进行中：T1 平台无关播放器层（[docs/m2-t1-player.md](docs/m2-t1-player.md)）、T2 ALSA 格式映射与参数确认（[docs/m2-t2-alsa-format.md](docs/m2-t2-alsa-format.md)）、T3 ALSA 渲染后端与 Linux CLI（[docs/m2-t3-alsa-backend.md](docs/m2-t3-alsa-backend.md)）、T4 两层数字回环（[docs/m2-t4-loopback.md](docs/m2-t4-loopback.md)：A 层 file 插件在 CI 运行；B 层 snd-aloop 未运行，CI runner 内核不含该模块）已完成；验证加强见 [tasks/M2.md](tasks/M2.md)。M3 T1 核心下沉已完成（[docs/m3-t1-engine.md](docs/m3-t1-engine.md)）：`no_std` 播放引擎（预填、换格式排空、暂停、上一首/下一首、出错跳过、能力检查）由模拟、桌面与 MCU 宿主共用，静态帧队列（bbqueue），Desktop / Embedded 配置档与 RAM 预算公式，解码器按需链接，thumbv7em 演示程序在 QEMU 中按独立参考核对通过（指令集仿真，不是实机）。F1 多声道已完成软件部分（[docs/f1-multichannel.md](docs/f1-multichannel.md)）：WAV EXTENSIBLE 声道掩码与 FLAC 1–8 声道（含 `WAVEFORMATEXTENSIBLE_CHANNEL_MASK` 标签）按扬声器位置保真送到设备，WASAPI 声道掩码、ALSA 声道映射设置与读回，设备顺序不同时纯置换，布局无法确认时明确拒绝；Embedded 配置档仍为双声道；真实多声道设备未运行。M3 T2 为不绑定开发板的通用嵌入式宿主；实物验证需要用户在任一满足最低要求的板上运行，尚未运行。**真机测试尚未运行**，见下方手动步骤。GUI 见 [tasks/GUI.md](tasks/GUI.md)，在 M3 之后再做。
+M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wav.md)），pack 与 Windows 纯格式描述（[docs/m0-t3-pack.md](docs/m0-t3-pack.md)），真实路径模拟（[docs/m0-t4-sim.md](docs/m0-t4-sim.md)，`Action`/`Event`/`Decoder` 自此冻结），WASAPI 独占宿主（[docs/m0-t5-wasapi.md](docs/m0-t5-wasapi.md)），CLI 与真机矩阵（[docs/m0-t6-cli.md](docs/m0-t6-cli.md)）。M1 T1–T3 已实现：自有 FLAC 解码（[docs/m1-t2-flac.md](docs/m1-t2-flac.md)），libFLAC 参考核对、按文件头识别 WAV/FLAC 并接入模拟与桌面播放（[docs/m1-t3-integration.md](docs/m1-t3-integration.md)）。M2 进行中：T1 平台无关播放器层（[docs/m2-t1-player.md](docs/m2-t1-player.md)）、T2 ALSA 格式映射与参数确认（[docs/m2-t2-alsa-format.md](docs/m2-t2-alsa-format.md)）、T3 ALSA 渲染后端与 Linux CLI（[docs/m2-t3-alsa-backend.md](docs/m2-t3-alsa-backend.md)）、T4 两层数字回环（[docs/m2-t4-loopback.md](docs/m2-t4-loopback.md)：A 层 file 插件在 CI 运行；B 层 snd-aloop 未运行，CI runner 内核不含该模块）已完成；验证加强见 [tasks/M2.md](tasks/M2.md)。M3 T1 核心下沉已完成（[docs/m3-t1-engine.md](docs/m3-t1-engine.md)）：`no_std` 播放引擎（预填、换格式排空、暂停、上一首/下一首、出错跳过、能力检查）由模拟、桌面与 MCU 宿主共用，静态帧队列（bbqueue），Desktop / Embedded 配置档与 RAM 预算公式，解码器按需链接，thumbv7em 演示程序在 QEMU 中按独立参考核对通过（指令集仿真，不是实机）。F1 多声道已完成软件部分（[docs/f1-multichannel.md](docs/f1-multichannel.md)）：WAV EXTENSIBLE 声道掩码与 FLAC 1–8 声道（含 `WAVEFORMATEXTENSIBLE_CHANNEL_MASK` 标签）按扬声器位置保真送到设备，WASAPI 声道掩码、ALSA 声道映射设置与读回，设备顺序不同时纯置换，布局无法确认时明确拒绝；Embedded 配置档仍为双声道；真实多声道设备未运行。M3 T2 通用嵌入式宿主的软件部分已完成（[docs/m3-t2-embedded-host.md](docs/m3-t2-embedded-host.md)）：`qy-host-embedded` 与开发板无关，经 `embedded-sdmmc` 读 SD 卡 FAT、DMA 中断喂数、串口命令，预填按最坏读卡耗时公式核对；宿主侧虚拟时间仿真（慢读、读错、拔卡）与 QEMU 中运行同一宿主，按独立参考逐字节核对；附 STM32F411 板级适配示例（只编译）。实物验收需要用户在任一满足最低要求的板上运行，尚未运行。**真机测试尚未运行**，见下方手动步骤。GUI 见 [tasks/GUI.md](tasks/GUI.md)，在 M3 之后再做。
 
 ## 工程结构
 
@@ -22,9 +22,11 @@ M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-
 | `qy-host-sim` | 模拟宿主：真实核心/解码/pack/队列，模拟文件、时间与设备；WAV 1000 种子与 FLAC 1200 种子场景、并发实例测试 |
 | `qy-player` | 平台无关播放器层：宿主资源、播放驱动、整包（WASAPI）与短写（ALSA）两种渲染循环、协商与播放报告；`test-support` 特性提供假平台 API 与假后端 |
 | `qy-host-wasapi` | WASAPI 独占宿主：协商记录（HRESULT）、格式矩阵，Windows 绑定仅在 Windows 目标编译；真机测试见 `tests/device.rs`（默认忽略） |
+| `qy-host-embedded` | 通用嵌入式宿主（M3 T2），`no_std`、无 alloc：曲目存储接口与基于 `embedded-sdmmc` 的 FAT 播放列表、I²S/DMA 输出接口与板级能力声明、DMA 中断喂数器、主循环宿主、串口命令、预填与读卡时序公式 |
 | `qy-host-alsa` | Linux ALSA 严格输出宿主：只接受 hw 设备，参数设置后读回核对，短写渲染；alsa-lib 绑定仅在 Linux 目标编译，其余逻辑跨平台可测；真机测试见 `tests/device.rs`（默认忽略） |
 | `qybit` | 命令行程序，二进制名 `qybit` |
-| `qy-mcu-demo` | MCU 资源演示（thumbv7em，不在主工作区，单独构建）：模拟读卡与 DMA 的纯软件宿主，在 QEMU 中由 `qy-host-sim/tests/mcu_demo.rs` 核对 |
+| `qy-mcu-demo` | MCU 演示（thumbv7em，不在主工作区，单独构建）：运行 `qy-host-embedded`，闪存中的 FAT16 “SD 卡”镜像、软件模拟 DMA 与串口命令脚本，在 QEMU 中由 `qy-host-sim/tests/mcu_demo.rs` 核对 |
+| `qy-board-stm32f411` | 板级适配示例（thumbv7em，不在主工作区）：STM32F411 的 SDIO、I²S2 + DMA、USART2，只做外设初始化与接口实现；只验证能编译，未在实物上运行 |
 
 ## 依赖
 
@@ -36,7 +38,9 @@ M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-
 | `libc` | =0.2.190 | Linux 渲染线程实时调度（`sched_setscheduler`），仅 Linux 目标 |
 | `static_cell` | =2.1.1 | MCU 一次性静态零缓冲（`ConstStaticCell`），`qy-codec-flac` 的 `static-cell` 特性与 `qy-mcu-demo` |
 | `bbqueue` | =0.7.0 | 成熟静态 SPSC BipBuffer（关闭默认特性，只用 CAS 原子协调），MCU 设备帧队列，仅 `qy-pcm-format` 的 `static-queue` 特性 |
-| `cortex-m-rt` / `cortex-m` / `cortex-m-semihosting` | =0.7.5 / =0.7.7 / =0.5.0 | Cortex-M 运行时、MSP/WFI 与半主机输出，仅 `qy-mcu-demo` |
+| `cortex-m-rt` / `cortex-m` / `cortex-m-semihosting` | =0.7.5 / =0.7.7 / =0.5.0 | Cortex-M 运行时、MSP/WFI、临界区与半主机输出，仅 `qy-mcu-demo` 与板级示例（板级示例不用半主机） |
+| `embedded-sdmmc` | =0.10.0 | SD 卡 / FAT16、FAT32 读取（no_std，无 alloc），`qy-host-embedded` |
+| `stm32f4xx-hal` / `stm32f4` | =0.23.0 / =0.16.0 | STM32F4 HAL 与 PAC（打开 `rt`），仅板级适配示例 `qy-board-stm32f411` |
 
 ## 本地检查
 
@@ -50,6 +54,8 @@ cargo test -p qy-codec-flac --features test-metrics   # 含整帧重试复杂度
 cargo test -p qy-pcm-format --features ring,static-queue
 cargo build --target thumbv7em-none-eabihf -p qy-pcm-format --features static-queue
 cargo build --target thumbv7em-none-eabihf -p qy-codec-auto --no-default-features --features wav
+cargo build --target thumbv7em-none-eabihf -p qy-host-embedded
+(cd crates/qy-board-stm32f411 && cargo build --release --target thumbv7em-none-eabihf)   # 板级示例，只编译
 ```
 
 MCU 演示（需要 `qemu-system-arm` ≥ 8，`mps2-an386`）：
@@ -72,6 +78,7 @@ QY_MCU_DEMO_LITE_ELF=crates/qy-mcu-demo/target/qy-mcu-demo-lite.elf \
 | --- | --- | --- |
 | `libfuzzer-sys` | =0.4.10 | libFuzzer 绑定，仅 `fuzz/`（独立 workspace，nightly） |
 | `sha2` | =0.10.9 | 夹具 SHA-256 摘要，仅 `tools/qy-gen-fixtures` |
+| `fatfs` | =0.3.6 | 生成测试与 MCU 演示用的 FAT16 镜像，仅 `tools/qy-fat-image`（与被测读取路径独立） |
 
 ## 使用（Windows）
 

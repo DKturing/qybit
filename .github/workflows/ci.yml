@@ -24,10 +24,10 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked -p qy-core -p qy-codec-wav -p qy-codec-flac -p qy-codec-auto -p qy-pcm-format -p qy-host-sim -p qy-player -p qy-host-alsa -p qy-gen-fixtures --all-targets -- -D warnings
+      - run: cargo clippy --locked -p qy-core -p qy-codec-wav -p qy-codec-flac -p qy-codec-auto -p qy-pcm-format -p qy-host-sim -p qy-player -p qy-host-alsa -p qy-host-embedded -p qy-gen-fixtures -p qy-fat-image --all-targets -- -D warnings
       - run: cargo clippy --locked -p qy-player --features test-support --all-targets -- -D warnings
       - run: cargo clippy --locked -p qy-codec-flac --features static-cell,test-metrics --all-targets -- -D warnings
-      - run: cargo test --locked -p qy-core -p qy-codec-wav -p qy-codec-auto -p qy-host-sim -p qy-player -p qy-host-alsa
+      - run: cargo test --locked -p qy-core -p qy-codec-wav -p qy-codec-auto -p qy-host-sim -p qy-player -p qy-host-alsa -p qy-host-embedded -p qy-fat-image
       - run: cargo test --locked -p qy-codec-flac
       - run: cargo test --locked -p qy-codec-flac --features static-cell,test-metrics
       - run: cargo test --locked -p qy-pcm-format
@@ -61,6 +61,8 @@ jobs:
       - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-auto --no-default-features --features wav
       - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-auto --no-default-features --features flac
       - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-auto --no-default-features
+      - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-host-embedded
+      - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-host-embedded -- -D warnings
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-pcm-format --features static-queue -- -D warnings
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-codec-auto --no-default-features --features wav -- -D warnings
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-core -p qy-codec-wav -p qy-pcm-format -p qy-codec-flac -p qy-codec-auto -- -D warnings
@@ -95,6 +97,13 @@ jobs:
           QY_MCU_DEMO_ELF: crates/qy-mcu-demo/target/qy-mcu-demo-full.elf
           QY_MCU_DEMO_LITE_ELF: crates/qy-mcu-demo/target/qy-mcu-demo-lite.elf
         run: cargo test --locked -p qy-host-sim --test mcu_demo -- --nocapture
+      # M3 T2 板级适配示例（STM32F411）：只验证能编译，未在实物上运行。
+      - name: 板级适配示例（STM32F411，只编译）
+        working-directory: crates/qy-board-stm32f411
+        run: |
+          cargo fmt -- --check
+          cargo clippy --locked --release --target thumbv7em-none-eabihf -- -D warnings
+          cargo build --locked --release --target thumbv7em-none-eabihf
       - name: 上传 MCU 演示报告
         uses: actions/upload-artifact@v4
         with:
