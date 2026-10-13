@@ -62,4 +62,15 @@ for f in crates/qy-codec-wav/tests/fixtures/*.wav; do n=$(basename $f)
 cd fuzz && cargo +nightly fuzz run wav_decode -- -max_total_time=600 -max_len=65536 -seed=20261013
 ```
 
-10 分钟运行记录：进行中，完成后补充。
+10 分钟运行记录（2026-10-13，Linux x86_64）：
+
+| 项 | 值 |
+| --- | --- |
+| 工具链 | rustc 1.101.0-nightly (e9bbadf68 2026-10-12)，cargo-fuzz 0.13.2，libfuzzer-sys 0.4.10 |
+| 参数 | `-max_total_time=600 -max_len=65536 -seed=20261013` |
+| 时长 | 601 s，2,552,339 次执行，平均 4246 exec/s |
+| 初始语料 | 108 个文件（去重后 76 个 / 139 KB），INITED cov 331 ft 895 |
+| 结束状态 | cov 355 ft 1267，最小化语料 203 个 / 312 KB，新增单元 944 |
+| 失败 | 0（无 panic、无断言失败、无 crash artifact），退出码 0 |
+
+语料没有提交到仓库（`fuzz/corpus` 在 .gitignore 中），可用上面的命令从夹具重建。
