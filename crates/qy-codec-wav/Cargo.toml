@@ -1,6 +1,6 @@
 [package]
 name = "qy-codec-wav"
-description = "QyFi 自有推送式 WAV 解码器（no_std，无 alloc）"
+description = "QyBit 自有推送式 WAV 解码器（no_std，无 alloc）"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

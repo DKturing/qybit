@@ -1,6 +1,6 @@
 [package]
 name = "qy-host-wasapi"
-description = "QyFi Windows WASAPI 独占宿主"
+description = "QyBit Windows WASAPI 独占宿主"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

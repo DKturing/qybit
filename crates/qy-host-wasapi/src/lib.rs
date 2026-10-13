@@ -1,4 +1,4 @@
-//! QyFi WASAPI 宿主。
+//! QyBit WASAPI 宿主。
 //!
 //! 大型缓冲在 [`HostResources::new`] 中启动时一次性分配（与模拟宿主同一契约）；
 //! Windows SDK 绑定只在 Windows 目标编译。

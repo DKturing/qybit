@@ -61,7 +61,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "qyfi"
+name = "qybit"
 version = "0.0.0"
 dependencies = [
  "qy-host-wasapi",

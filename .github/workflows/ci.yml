@@ -45,9 +45,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
-      - run: cargo clippy --locked -p qy-host-wasapi -p qyfi --all-targets -- -D warnings
-      - run: cargo build --locked -p qy-host-wasapi -p qyfi
-      - run: cargo test --locked -p qy-host-wasapi -p qyfi
+      - run: cargo clippy --locked -p qy-host-wasapi -p qybit --all-targets -- -D warnings
+      - run: cargo build --locked -p qy-host-wasapi -p qybit
+      - run: cargo test --locked -p qy-host-wasapi -p qybit
 
   # WAV 解码 fuzz 冒烟（60 秒，以夹具为初始语料）。正式 10 分钟记录见 docs/m0-t2-wav.md。
   fuzz-smoke:

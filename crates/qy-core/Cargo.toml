@@ -1,6 +1,6 @@
 [package]
 name = "qy-core"
-description = "QyFi sans-IO 播放核心（no_std，无 alloc）"
+description = "QyBit sans-IO 播放核心（no_std，无 alloc）"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

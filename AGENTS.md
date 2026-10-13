@@ -1,10 +1,10 @@
-# QyFi：Rust 极简本地音频播放器长期规则
+# QyBit：Rust 极简本地音频播放器长期规则
 
 本文件是唯一长期规则来源；CLAUDE.md 仅保留 `@AGENTS.md`。当前实现范围、接口定义、测试数据和验收步骤以任务卡为准，任务卡不得降低保真要求。
 
 ## 1. 路线与当前范围
 
-- 项目名 QyFi，Cargo 应用包名 `qyfi`，命令行二进制名 `qybit`，内部 crate 统一 `qy-` 前缀。
+- 项目名 QyBit，命令行程序/Cargo 应用包名 `qybit`，二进制名 `qybit`，内部 crate 统一 `qy-` 前缀。
 - Rust、纯本地、跨平台；桌面与 MCU 共用核心及自有解码路径，宿主分别适配 I/O。
 - 自行实现 WAV 和 FLAC 解码器；不得改用 Symphonia 或其他生产解码器替代。参考解码器仅用于测试。
 - M0 先完成 Windows：核心、WAV、模拟宿主、纯格式描述、WASAPI 独占、CLI。

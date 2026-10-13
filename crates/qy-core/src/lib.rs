@@ -1,4 +1,4 @@
-//! QyFi sans-IO 播放核心。
+//! QyBit sans-IO 播放核心。
 //!
 //! `#![no_std]`、不用 `alloc`，不访问文件、设备、线程或系统时钟（AGENTS §2）。
 //! 宿主循环调用 [`Core::poll`] 取得下一个 [`Action`] 并执行，结果以 [`Event`]

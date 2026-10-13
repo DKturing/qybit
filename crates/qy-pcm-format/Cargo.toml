@@ -1,6 +1,6 @@
 [package]
 name = "qy-pcm-format"
-description = "QyFi 与平台 SDK 无关的 PCM 格式字段与纯构造函数"
+description = "QyBit 与平台 SDK 无关的 PCM 格式字段与纯构造函数"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

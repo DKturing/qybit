@@ -1,6 +1,6 @@
 [package]
-name = "qyfi"
-description = "QyFi 极简本地音频播放器命令行"
+name = "qybit"
+description = "QyBit 极简本地音频播放器命令行"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

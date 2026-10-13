@@ -123,7 +123,7 @@ fn write_wav(fmt: &TrackFmt, samples: &[i32], junk: bool, bad_align: bool) -> (V
     }
     let mut body = b"WAVE".to_vec();
     if junk {
-        chunk(&mut body, b"JUNK", b"qyfi-sim");
+        chunk(&mut body, b"JUNK", b"qybit-sim");
     }
     chunk(&mut body, b"fmt ", &fmt_body);
     chunk(&mut body, b"LIST", b"INFOz");

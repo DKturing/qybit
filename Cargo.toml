@@ -7,7 +7,7 @@ members = [
     "crates/qy-pcm-format",
     "crates/qy-host-sim",
     "crates/qy-host-wasapi",
-    "crates/qyfi",
+    "crates/qybit",
 ]
 
 [workspace.package]
