@@ -6,7 +6,7 @@ Rust 极简本地音频播放器。纯本地、严格保真：不重采样、不
 
 ## 当前状态
 
-M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wav.md)），pack 与 Windows 纯格式描述（[docs/m0-t3-pack.md](docs/m0-t3-pack.md)），真实路径模拟（[docs/m0-t4-sim.md](docs/m0-t4-sim.md)，`Action`/`Event`/`Decoder` 自此冻结），WASAPI 独占宿主（[docs/m0-t5-wasapi.md](docs/m0-t5-wasapi.md)），CLI 与真机矩阵（[docs/m0-t6-cli.md](docs/m0-t6-cli.md)）。M1 T1–T3 已实现：自有 FLAC 解码（[docs/m1-t2-flac.md](docs/m1-t2-flac.md)），libFLAC 参考核对、按文件头识别 WAV/FLAC 并接入模拟与桌面播放（[docs/m1-t3-integration.md](docs/m1-t3-integration.md)）。M2 进行中：T1 平台无关播放器层已完成（[docs/m2-t1-player.md](docs/m2-t1-player.md)），ALSA 后端见 [tasks/M2.md](tasks/M2.md)。**真机测试尚未运行**，见下方手动步骤。GUI 见 [tasks/GUI.md](tasks/GUI.md)，在 M0–M2 完成后再做。
+M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wav.md)），pack 与 Windows 纯格式描述（[docs/m0-t3-pack.md](docs/m0-t3-pack.md)），真实路径模拟（[docs/m0-t4-sim.md](docs/m0-t4-sim.md)，`Action`/`Event`/`Decoder` 自此冻结），WASAPI 独占宿主（[docs/m0-t5-wasapi.md](docs/m0-t5-wasapi.md)），CLI 与真机矩阵（[docs/m0-t6-cli.md](docs/m0-t6-cli.md)）。M1 T1–T3 已实现：自有 FLAC 解码（[docs/m1-t2-flac.md](docs/m1-t2-flac.md)），libFLAC 参考核对、按文件头识别 WAV/FLAC 并接入模拟与桌面播放（[docs/m1-t3-integration.md](docs/m1-t3-integration.md)）。M2 进行中：T1 平台无关播放器层（[docs/m2-t1-player.md](docs/m2-t1-player.md)）、T2 ALSA 格式映射与参数确认（[docs/m2-t2-alsa-format.md](docs/m2-t2-alsa-format.md)）已完成，ALSA 后端见 [tasks/M2.md](tasks/M2.md)。**真机测试尚未运行**，见下方手动步骤。GUI 见 [tasks/GUI.md](tasks/GUI.md)，在 M0–M2 完成后再做。
 
 ## 工程结构
 
@@ -16,7 +16,7 @@ M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-
 | `qy-codec-wav` | 自有推送式 WAV 解码器，`no_std`、无 alloc |
 | `qy-codec-flac` | 自有推送式 FLAC 解码器（见 [docs/m1-t2-flac.md](docs/m1-t2-flac.md)），`no_std`、无 alloc；`static-cell` 特性提供 MCU 静态缓冲，`test-metrics` 特性仅供测试统计 |
 | `qy-codec-auto` | 按文件头（`RIFF`/`fLaC`）选择自有 WAV/FLAC 解码器，静态分发，`no_std`、无 alloc |
-| `qy-pcm-format` | 与平台 SDK 无关的格式字段、WAVEFORMATEX/EXTENSIBLE 纯描述与 pack，`no_std`；`ring` 特性提供宿主用的设备帧 SPSC 队列 |
+| `qy-pcm-format` | 与平台 SDK 无关的格式字段、WAVEFORMATEX/EXTENSIBLE 纯描述、ALSA 格式映射/设备名/参数确认与 pack，`no_std`；`ring` 特性提供宿主用的设备帧 SPSC 队列 |
 | `qy-host-sim` | 模拟宿主：真实核心/解码/pack/队列，模拟文件、时间与设备；WAV 1000 种子与 FLAC 1200 种子场景、并发实例测试 |
 | `qy-player` | 平台无关播放器层：宿主资源、播放驱动、整包（WASAPI）与短写（ALSA）两种渲染循环、协商与播放报告；`test-support` 特性提供假平台 API 与假后端 |
 | `qy-host-wasapi` | WASAPI 独占宿主：协商记录（HRESULT）、格式矩阵，Windows 绑定仅在 Windows 目标编译；真机测试见 `tests/device.rs`（默认忽略） |

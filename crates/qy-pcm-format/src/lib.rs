@@ -12,6 +12,7 @@
 #[cfg(feature = "ring")]
 extern crate alloc;
 
+pub mod alsa;
 pub mod pack;
 #[cfg(feature = "ring")]
 pub mod ring;
