@@ -8,10 +8,14 @@
 
 use qy_codec_wav::WavDecoder;
 use qy_core::{DecodeError, INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES};
-use qy_pcm_format::ring::{DEFAULT_CAPACITY_BYTES, FrameConsumer, FrameProducer, frame_ring};
+use qy_pcm_format::ring::{
+    DEFAULT_CAPACITY_BYTES, FrameConsumer, FrameProducer, PACK_SCRATCH_BYTES, frame_ring,
+};
 
 #[cfg(windows)]
 pub mod endpoints;
+#[cfg(windows)]
+pub mod sdk_format;
 
 /// 一次性分配零初始化切片并泄漏为 `'static`。只在宿主启动时调用。
 fn leak_zeroed<T: Copy + Default>(len: usize) -> &'static mut [T] {
@@ -22,6 +26,8 @@ fn leak_zeroed<T: Copy + Default>(len: usize) -> &'static mut [T] {
 pub struct HostResources {
     pub input: Option<&'static mut [u8]>,
     pub decoder: WavDecoder,
+    /// 生产端 pack 暂存区（启动时分配一次）。
+    pub pack_scratch: &'static mut [u8],
     pub producer: FrameProducer,
     pub consumer: FrameConsumer,
 }
@@ -34,6 +40,7 @@ impl HostResources {
         Ok(Self {
             input: Some(input),
             decoder,
+            pack_scratch: leak_zeroed::<u8>(PACK_SCRATCH_BYTES),
             producer,
             consumer,
         })

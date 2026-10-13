@@ -7,6 +7,7 @@
 //! 生产端只按完整帧入队，消费端只按完整帧出队；环形回绕时最多两段拷贝。
 //! 消费端不做位移、字节序或样本格式转换。
 
+use crate::pack::{Exact, PackError, Pcm, pack};
 use crate::{DeviceFormat, MAX_CHANNELS, MAX_SAMPLE_RATE, frames_for_millis};
 
 /// 预填 / 队列预算：当前采样率下 500 ms（M0 T1）。
@@ -36,7 +37,14 @@ pub enum RingError {
     StaleGeneration,
     /// 生产端与消费端不属于同一个队列。
     Mismatched,
+    /// 设备格式帧宽与队列当前配置不符。
+    FrameWidth,
+    /// pack 拒绝（精度、格式或样本范围）。
+    Pack(PackError),
 }
+
+/// 每批 pack 的最大字节数：工作区最大帧数 × 最大帧宽，宿主据此分配一次 pack 暂存区。
+pub const PACK_SCRATCH_BYTES: usize = 4096 * MAX_FRAME_BYTES;
 
 /// 生产端（非实时线程：解码 + pack 后入队）。
 pub struct FrameProducer {
@@ -111,6 +119,29 @@ pub fn reconfigure(
 impl FrameProducer {
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// 生产端：把精确 PCM 中能放入队列的完整帧 pack 到 `scratch` 后入队。
+    /// 返回入队帧数，调用方据此从解码器释放同样帧数；队列满时返回 0。
+    pub fn pack_push(
+        &mut self,
+        pcm: &Pcm<'_, Exact>,
+        device: &DeviceFormat,
+        scratch: &mut [u8],
+    ) -> Result<usize, RingError> {
+        let fb = self.frame_bytes;
+        if fb == 0 {
+            return Err(RingError::NotConfigured);
+        }
+        if usize::from(device.block_align()) != fb {
+            return Err(RingError::FrameWidth);
+        }
+        let room = self.free_frames().min(scratch.len() / fb);
+        let frames = pcm.frames().min(room);
+        let packed = pack(pcm, device, &mut scratch[..frames * fb]).map_err(RingError::Pack)?;
+        let pushed = self.push_frames(&scratch[..packed * fb])?;
+        debug_assert_eq!(pushed, packed);
+        Ok(pushed)
     }
 
     pub fn frame_bytes(&self) -> usize {

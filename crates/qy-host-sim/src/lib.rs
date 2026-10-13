@@ -9,7 +9,8 @@
 use qy_codec_wav::WavDecoder;
 use qy_core::{DecodeError, DeviceFormat, INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES};
 use qy_pcm_format::ring::{
-    DEFAULT_CAPACITY_BYTES, FrameConsumer, FrameProducer, RingError, frame_ring, reconfigure,
+    DEFAULT_CAPACITY_BYTES, FrameConsumer, FrameProducer, PACK_SCRATCH_BYTES, RingError,
+    frame_ring, reconfigure,
 };
 
 /// 宿主初始化错误。
@@ -29,6 +30,8 @@ pub struct SimHost {
     /// 交给核心管理的输入窗口（T4 接入核心后移交）。
     pub input: Option<&'static mut [u8]>,
     pub decoder: WavDecoder,
+    /// 生产端 pack 暂存区（启动时分配一次）。
+    pub pack_scratch: &'static mut [u8],
     pub producer: FrameProducer,
     pub consumer: FrameConsumer,
     generation: u64,
@@ -44,6 +47,7 @@ impl SimHost {
         Ok(Self {
             input: Some(input),
             decoder,
+            pack_scratch: leak_zeroed::<u8>(PACK_SCRATCH_BYTES),
             producer,
             consumer,
             generation: 0,

@@ -12,8 +12,10 @@
 #[cfg(feature = "ring")]
 extern crate alloc;
 
+pub mod pack;
 #[cfg(feature = "ring")]
 pub mod ring;
+pub mod wave;
 
 /// 本阶段支持的最大声道数（M0：单/双声道）。
 pub const MAX_CHANNELS: u16 = 2;
@@ -33,6 +35,8 @@ pub enum FormatError {
     ValidBits,
     /// 派生字段（blockAlign、字节率等）计算溢出。
     Overflow,
+    /// 字节序或有效位放置方式不符合目标描述（如 WASAPI 要求小端、高位对齐）。
+    Layout,
 }
 
 /// 样本字节序。
@@ -148,6 +152,23 @@ impl DeviceFormat {
             block_align,
             bytes_per_sec,
         })
+    }
+
+    /// WASAPI PCM 设备格式：小端、有效位高位对齐（WAVEFORMATEXTENSIBLE 语义）。
+    pub const fn wasapi(
+        sample_rate: u32,
+        channels: u16,
+        container_bits: u8,
+        valid_bits: u8,
+    ) -> Result<Self, FormatError> {
+        Self::new(
+            sample_rate,
+            channels,
+            container_bits,
+            valid_bits,
+            Endian::Little,
+            Placement::MsbAligned,
+        )
     }
 
     pub const fn sample_rate(&self) -> u32 {
