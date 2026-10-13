@@ -186,6 +186,8 @@ pub struct FakeBackend {
     /// 第 n 个流在第 k 次 GetBuffer 时报告设备失效。
     pub invalidate: Option<(usize, u64)>,
     pub priority: FakePriority,
+    /// 只尝试该 (C, V) 与描述类型（矩阵逐项测试用）。
+    pub forced: Option<((u8, u8), Descriptor)>,
     opened: usize,
 }
 
@@ -196,6 +198,7 @@ impl FakeBackend {
             outputs: Arc::default(),
             invalidate: None,
             priority: FakePriority::default(),
+            forced: None,
             opened: 0,
         }
     }
@@ -222,7 +225,15 @@ impl Backend for FakeBackend {
             attempts: Vec::new(),
             chosen: None,
         };
-        for (c, v) in candidates(source) {
+        let list: Vec<((u8, u8), Descriptor)> = match self.forced {
+            Some((cv, d)) if cv.1 >= source.bits() => vec![(cv, d)],
+            Some(_) => Vec::new(),
+            None => candidates(source)
+                .into_iter()
+                .map(|cv| (cv, Descriptor::Extensible))
+                .collect(),
+        };
+        for ((c, v), descriptor) in list {
             let Ok(format) = DeviceFormat::wasapi(source.sample_rate(), source.channels(), c, v)
             else {
                 continue;
@@ -230,7 +241,7 @@ impl Backend for FakeBackend {
             let ok = self.supported.contains(&(c, v));
             negotiation.attempts.push(Attempt {
                 format,
-                descriptor: Descriptor::Extensible,
+                descriptor,
                 is_format_supported: Some(if ok { 0 } else { AUDCLNT_E_UNSUPPORTED_FORMAT }),
                 initialize: ok.then_some(0),
                 aligned_retry: None,

@@ -142,6 +142,149 @@ impl PlaybackReport {
     }
 }
 
+fn hr_text(v: Option<i32>) -> String {
+    v.map_or_else(|| "—".into(), |x| format!("0x{:08X}", x as u32))
+}
+
+fn descriptor_text(d: Descriptor) -> &'static str {
+    match d {
+        Descriptor::Extensible => "WAVEFORMATEXTENSIBLE",
+        Descriptor::WaveFormatEx => "WAVEFORMATEX",
+    }
+}
+
+fn negotiation_text(out: &mut String, n: &Negotiation) {
+    use std::fmt::Write as _;
+    let s = &n.source;
+    let _ = writeln!(
+        out,
+        "  源格式：{} Hz / {} 声道 / {} 位有效",
+        s.sample_rate(),
+        s.channels(),
+        s.bits()
+    );
+    for (i, a) in n.attempts.iter().enumerate() {
+        let f = &a.format;
+        let _ = write!(
+            out,
+            "  请求 #{i}：{} Hz / {} 声道 / 容器 {} 位 / 有效 {} 位（{}）IsFormatSupported(独占) {}，Initialize {}",
+            f.sample_rate(),
+            f.channels(),
+            f.container_bits(),
+            f.valid_bits(),
+            descriptor_text(a.descriptor),
+            hr_text(a.is_format_supported),
+            hr_text(a.initialize),
+        );
+        if a.aligned_retry.is_some() {
+            let _ = write!(out, "，对齐重试 {}", hr_text(a.aligned_retry));
+        }
+        if let Some(b) = a.buffer_frames {
+            let _ = write!(out, "，端点缓冲 {b} 帧");
+        }
+        if let Some(p) = a.period_hns {
+            let _ = write!(out, "，周期 {p}×100ns");
+        }
+        if n.chosen == Some(i) {
+            out.push_str(" ← 已协商");
+        }
+        out.push('\n');
+    }
+}
+
+impl PlaybackReport {
+    /// 面向用户的中文摘要。只陈述软件路径与独占协商结果，不宣称设备端 bit-perfect。
+    pub fn summary(&self) -> String {
+        use std::fmt::Write as _;
+        let mut o = String::new();
+        for (i, s) in self.streams.iter().enumerate() {
+            let _ = writeln!(o, "输出流 {}：", i + 1);
+            negotiation_text(&mut o, &s.negotiation);
+            let _ = writeln!(o, "  已入队帧：{}", s.pushed_frames);
+            match &s.render {
+                None => o.push_str("  渲染：无报告（渲染线程异常结束）\n"),
+                Some(r) => {
+                    let reg = match r.mmcss.registered {
+                        Ok(()) => "成功".to_string(),
+                        Err(c) => format!("失败（Win32 错误 {c}）"),
+                    };
+                    let rev = match r.mmcss.reverted {
+                        None => "未注册无需撤销".to_string(),
+                        Some(Ok(())) => "已撤销".to_string(),
+                        Some(Err(c)) => format!("撤销失败（Win32 错误 {c}）"),
+                    };
+                    let end = match r.end {
+                        RenderEnd::Drained => "已排空".to_string(),
+                        RenderEnd::Stopped => "已停止（未排空）".to_string(),
+                        RenderEnd::Error(e) => {
+                            format!("错误：{:?} HRESULT 0x{:08X}", e.op, e.hresult as u32)
+                        }
+                    };
+                    let _ = writeln!(o, "  MMCSS “Pro Audio”：注册{reg}，{rev}");
+                    let _ = writeln!(
+                        o,
+                        "  渲染：有效帧 {}，尾部填充 {} 帧，排空静音 {} 帧，欠载 {} 次 / {} 帧，{end}",
+                        r.valid_frames,
+                        r.tail_fill_frames,
+                        r.drain_frames,
+                        r.underrun_events,
+                        r.underrun_frames
+                    );
+                    for u in r.underrun_records() {
+                        let _ = writeln!(
+                            o,
+                            "    欠载：第 {} 包（设备帧 {}）缺 {} 帧",
+                            u.packet, u.device_frame, u.missing_frames
+                        );
+                    }
+                }
+            }
+        }
+        for f in &self.open_failures {
+            let _ = writeln!(o, "独占打开失败：{}", f.message);
+            negotiation_text(&mut o, &f.negotiation);
+        }
+        for m in &self.messages {
+            let _ = writeln!(o, "错误：{m}");
+        }
+        if let Some((track, fault)) = self.fault {
+            let _ = writeln!(o, "曲目 {} 失败：{fault:?}", track + 1);
+        }
+        if self.device_error {
+            o.push_str("输出设备错误：播放已停止。\n");
+        }
+        if self.software_path_intact() {
+            o.push_str(
+                "结论：全部曲目已播放，无欠载、无错误。这只说明软件路径与独占协商正常，不证明设备端 bit-perfect。\n",
+            );
+        } else if self.finished && self.underrun_events() > 0 {
+            let _ = writeln!(
+                o,
+                "结论：播放完成但发生 {} 次欠载，本次播放不是完整保真。",
+                self.underrun_events()
+            );
+        } else {
+            o.push_str("结论：播放未完整完成。\n");
+        }
+        o
+    }
+
+    /// 进程退出码：0 完整，2 完成但有欠载，1 失败或设备错误。
+    pub fn exit_code(&self) -> u8 {
+        if self.software_path_intact() {
+            0
+        } else if self.finished
+            && self.fault.is_none()
+            && !self.device_error
+            && self.protocol_errors == 0
+        {
+            2
+        } else {
+            1
+        }
+    }
+}
+
 enum Stream<B: Backend> {
     Pending(B::Pending),
     Running(<B::Pending as PendingStream>::Running),
@@ -571,6 +714,30 @@ mod tests {
         // 截断前 50 个完整帧全部播放。
         let wav = fixture("trunc_mid_frame.wav");
         check_output(&outs[0], &wav[44..44 + 50 * 4]);
+    }
+
+    #[test]
+    fn summary_reports_negotiation_and_conclusion() {
+        let mut b = FakeBackend::new(&ALL);
+        let (r, _) = run(&mut b, &["ext20in24_mono_center.wav"]);
+        let s = r.summary();
+        assert!(s.contains("源格式：96000 Hz / 1 声道 / 20 位有效"), "{s}");
+        assert!(s.contains("请求 #0：96000 Hz / 1 声道 / 容器 24 位 / 有效 24 位（WAVEFORMATEXTENSIBLE）IsFormatSupported(独占) 0x00000000，Initialize 0x00000000"), "{s}");
+        assert!(s.contains("← 已协商"));
+        assert!(s.contains("MMCSS “Pro Audio”：注册成功，已撤销"));
+        assert!(s.contains("欠载 0 次 / 0 帧，已排空"));
+        assert!(s.contains("不证明设备端 bit-perfect"));
+        assert_eq!(r.exit_code(), 0);
+
+        let mut b = FakeBackend::new(&[(16, 16)]);
+        let (r, _) = run(&mut b, &["pcm24_stereo_large.wav"]);
+        let s = r.summary();
+        assert!(s.contains("独占打开失败"), "{s}");
+        assert!(s.contains("IsFormatSupported(独占) 0x88890008"), "{s}");
+        assert!(s.contains("曲目 1 失败：Configure"), "{s}");
+        assert!(s.contains("结论：播放未完整完成。"));
+        assert!(!s.contains("无欠载、无错误"));
+        assert_eq!(r.exit_code(), 1);
     }
 
     #[test]

@@ -1,13 +1,26 @@
-//! 渲染端点枚举（Windows 平台边界，unsafe 集中于此模块）。
+//! 渲染端点与系统信息（Windows 平台边界，unsafe 集中于此模块）。
+//!
+//! 读不到的属性记为 `None`，不猜测。驱动版本取端点属性存储中的
+//! `DEVPKEY_Device_DriverVersion`（{A8B865DD-2E3D-4094-AD97-E593A70C75D6},3），
+//! 端点上通常不存在该属性，此时记为 `None`。
 #![allow(unsafe_code)]
 
-use windows::Win32::Media::Audio::{
-    DEVICE_STATE_ACTIVE, IMMDeviceEnumerator, MMDeviceEnumerator, eRender,
+use windows::Win32::Devices::FunctionDiscovery::{
+    PKEY_Device_DeviceDesc, PKEY_Device_FriendlyName, PKEY_DeviceInterface_FriendlyName,
 };
+use windows::Win32::Foundation::{ERROR_SUCCESS, PROPERTYKEY};
+use windows::Win32::Media::Audio::{
+    DEVICE_STATE_ACTIVE, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, eRender,
+};
+use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToBSTR};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
-    CoUninitialize,
+    CoUninitialize, STGM_READ,
 };
+use windows::Win32::System::Registry::{
+    HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
+};
+use windows::core::{GUID, HSTRING, PCWSTR, w};
 
 /// 当前线程的 COM 初始化守卫；Drop 时配对 CoUninitialize。
 struct ComGuard;
@@ -27,27 +40,136 @@ impl Drop for ComGuard {
     }
 }
 
+const PKEY_DRIVER_VERSION: PROPERTYKEY = PROPERTYKEY {
+    fmtid: GUID::from_u128(0xa8b865dd_2e3d_4094_ad97_e593a70c75d6),
+    pid: 3,
+};
+
+/// 渲染端点信息。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EndpointInfo {
+    pub id: String,
+    /// 端点友好名（如“扬声器 (USB DAC)”）。
+    pub name: Option<String>,
+    /// 适配器（接口）友好名。
+    pub interface_name: Option<String>,
+    pub description: Option<String>,
+    pub driver_version: Option<String>,
+}
+
+fn property(device: &IMMDevice, key: &PROPERTYKEY) -> Option<String> {
+    // SAFETY: COM 已初始化；属性存储只读打开，PROPVARIANT 读取后清理。
+    unsafe {
+        let store = device.OpenPropertyStore(STGM_READ).ok()?;
+        let mut value = store.GetValue(key).ok()?;
+        let text = PropVariantToBSTR(&value).ok().map(|b| b.to_string());
+        let _ = PropVariantClear(&mut value);
+        text.filter(|s| !s.is_empty())
+    }
+}
+
+fn device_id(device: &IMMDevice) -> windows::core::Result<String> {
+    // SAFETY: GetId 返回的字符串由调用方用 CoTaskMemFree 释放。
+    unsafe {
+        let pwstr = device.GetId()?;
+        let id = pwstr.to_string();
+        CoTaskMemFree(Some(pwstr.0 as *const _));
+        id.map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_UNEXPECTED))
+    }
+}
+
+fn info(device: &IMMDevice) -> windows::core::Result<EndpointInfo> {
+    Ok(EndpointInfo {
+        id: device_id(device)?,
+        name: property(device, &PKEY_Device_FriendlyName),
+        interface_name: property(device, &PKEY_DeviceInterface_FriendlyName),
+        description: property(device, &PKEY_Device_DeviceDesc),
+        driver_version: property(device, &PKEY_DRIVER_VERSION),
+    })
+}
+
+fn enumerator() -> windows::core::Result<IMMDeviceEnumerator> {
+    // SAFETY: 调用方已初始化 COM。
+    unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
+}
+
+/// 列出活动渲染端点。
+pub fn list_render_endpoints() -> windows::core::Result<Vec<EndpointInfo>> {
+    let _com = ComGuard::new()?;
+    let e = enumerator()?;
+    // SAFETY: 接口由 windows crate 管理引用计数，均在 `_com` 析构前释放。
+    unsafe {
+        let collection = e.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)?;
+        let count = collection.GetCount()?;
+        let mut out = Vec::new();
+        for i in 0..count {
+            out.push(info(&collection.Item(i)?)?);
+        }
+        Ok(out)
+    }
+}
+
 /// 列出活动渲染端点的 ID 字符串。
 pub fn list_render_endpoint_ids() -> windows::core::Result<Vec<String>> {
+    Ok(list_render_endpoints()?.into_iter().map(|e| e.id).collect())
+}
+
+/// 按 ID 查询端点；设备不存在时返回错误。
+pub fn endpoint_info(id: &str) -> windows::core::Result<EndpointInfo> {
     let _com = ComGuard::new()?;
-    // SAFETY: COM 已在本线程初始化；接口由 windows crate 管理引用计数，
-    // 且全部在 `_com` 析构前释放（局部变量逆序 drop）。
-    unsafe {
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-        let collection = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)?;
-        let count = collection.GetCount()?;
-        let mut ids = Vec::new();
-        for i in 0..count {
-            let device = collection.Item(i)?;
-            let pwstr = device.GetId()?;
-            let id = pwstr.to_string();
-            // GetId 返回的字符串由调用方用 CoTaskMemFree 释放。
-            CoTaskMemFree(Some(pwstr.0 as *const _));
-            ids.push(id.map_err(|_| {
-                windows::core::Error::from(windows::Win32::Foundation::E_UNEXPECTED)
-            })?);
-        }
-        Ok(ids)
+    let e = enumerator()?;
+    // SAFETY: 同上。
+    let device = unsafe { e.GetDevice(&HSTRING::from(id))? };
+    info(&device)
+}
+
+fn reg_string(name: PCWSTR) -> Option<String> {
+    let mut buf = [0u16; 256];
+    let mut size = (buf.len() * 2) as u32;
+    // SAFETY: 缓冲与长度对应；RRF_RT_REG_SZ 保证以 NUL 结尾。
+    let r = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"),
+            name,
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if r != ERROR_SUCCESS {
+        return None;
     }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16(&buf[..len]).ok()
+}
+
+fn reg_dword(name: PCWSTR) -> Option<u32> {
+    let mut v = 0u32;
+    let mut size = 4u32;
+    // SAFETY: 输出为 4 字节 DWORD。
+    let r = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"),
+            name,
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut v as *mut u32).cast()),
+            Some(&mut size),
+        )
+    };
+    (r == ERROR_SUCCESS).then_some(v)
+}
+
+/// 系统版本，如 "Windows 10 Pro 22H2 (build 19045.4291)"。
+pub fn os_version() -> Option<String> {
+    let product = reg_string(w!("ProductName"))?;
+    let display = reg_string(w!("DisplayVersion")).unwrap_or_default();
+    let build = reg_string(w!("CurrentBuildNumber")).unwrap_or_default();
+    let ubr = reg_dword(w!("UBR"))
+        .map(|u| format!(".{u}"))
+        .unwrap_or_default();
+    Some(format!("{product} {display} (build {build}{ubr})").replace("  ", " "))
 }

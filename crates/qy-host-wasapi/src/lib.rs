@@ -7,6 +7,7 @@
 //! - `wasapi`（仅 Windows）：WASAPI 独占事件驱动后端与 MMCSS。
 //! - `sdk_format`（仅 Windows）：纯格式描述到 SDK 结构的字段映射。
 
+pub mod matrix;
 pub mod player;
 pub mod render;
 

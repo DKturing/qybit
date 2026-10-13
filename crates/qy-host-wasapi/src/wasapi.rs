@@ -98,6 +98,8 @@ pub struct WasapiBackend {
     pub device_id: String,
     /// 16/16 格式使用的描述类型；默认 EXTENSIBLE（T6 矩阵另测 WAVEFORMATEX）。
     pub descriptor_16: Descriptor,
+    /// 只尝试该 (C, V) 与描述类型（矩阵逐项测试用）；为 `None` 时按 [`candidates`]。
+    pub forced: Option<((u8, u8), Descriptor)>,
 }
 
 impl WasapiBackend {
@@ -105,6 +107,7 @@ impl WasapiBackend {
         Self {
             device_id: device_id.into(),
             descriptor_16: Descriptor::Extensible,
+            forced: None,
         }
     }
 }
@@ -129,10 +132,23 @@ impl Backend for WasapiBackend {
         let (go_tx, go_rx) = channel::<Go>();
         let id = self.device_id.clone();
         let source = *source;
-        let descriptor_16 = self.descriptor_16;
-        let handle = std::thread::spawn(move || {
-            stream_thread(&id, &source, descriptor_16, &info_tx, &go_rx)
-        });
+        let list: Vec<((u8, u8), Descriptor)> = match self.forced {
+            Some((cv, d)) if cv.1 >= source.bits() => vec![(cv, d)],
+            Some(_) => Vec::new(),
+            None => candidates(&source)
+                .into_iter()
+                .map(|cv| {
+                    let d = if cv == (16, 16) {
+                        self.descriptor_16
+                    } else {
+                        Descriptor::Extensible
+                    };
+                    (cv, d)
+                })
+                .collect(),
+        };
+        let handle =
+            std::thread::spawn(move || stream_thread(&id, &source, &list, &info_tx, &go_rx));
         let failure = |message: String| OpenFailure {
             negotiation: Negotiation {
                 source,
@@ -203,7 +219,7 @@ struct Stream {
 fn stream_thread(
     id: &str,
     source: &SourceFormat,
-    descriptor_16: Descriptor,
+    list: &[((u8, u8), Descriptor)],
     info: &Sender<Result<(DeviceFormat, Negotiation), OpenFailure>>,
     go: &Receiver<Go>,
 ) -> ThreadOut {
@@ -221,7 +237,7 @@ fn stream_thread(
             return None;
         }
     };
-    let (stream, negotiation) = match negotiate(id, source, descriptor_16) {
+    let (stream, negotiation) = match negotiate(id, source, list) {
         Ok(v) => v,
         Err(f) => {
             let _ = info.send(Err(f));
@@ -251,7 +267,7 @@ fn stream_thread(
 fn negotiate(
     id: &str,
     source: &SourceFormat,
-    descriptor_16: Descriptor,
+    list: &[((u8, u8), Descriptor)],
 ) -> Result<(Stream, Negotiation), OpenFailure> {
     let mut negotiation = Negotiation {
         source: *source,
@@ -270,14 +286,9 @@ fn negotiate(
         Ok(d) => d,
         Err(e) => return Err(fail(negotiation, format!("找不到设备 {id}: {e}"))),
     };
-    for (c, v) in candidates(source) {
+    for &((c, v), descriptor) in list {
         let Ok(format) = DeviceFormat::wasapi(source.sample_rate(), source.channels(), c, v) else {
             continue;
-        };
-        let descriptor = if c == 16 && v == 16 {
-            descriptor_16
-        } else {
-            Descriptor::Extensible
         };
         let mut attempt = Attempt {
             format,
@@ -503,4 +514,40 @@ impl ThreadPriority for Mmcss {
         // SAFETY: 句柄来自本线程的 AvSetMmThreadCharacteristicsW。
         unsafe { AvRevertMmThreadCharacteristics(h) }.map_err(|e| win32_code(e.code()))
     }
+}
+
+/// 运行真机格式矩阵与顺序换曲检查，生成报告（不写文件）。
+///
+/// 设备 ID 必须显式给出且存在，否则返回错误；临时 WAV 写入 `work_dir`。
+pub fn device_matrix(
+    device_id: &str,
+    work_dir: &std::path::Path,
+) -> Result<crate::matrix::MatrixReport, String> {
+    use crate::matrix::{DeviceMeta, MatrixReport, matrix_items, run_matrix, run_sequential};
+    let info = crate::endpoints::endpoint_info(device_id)
+        .map_err(|e| format!("找不到设备 {device_id}: {e}"))?;
+    let mut res = crate::HostResources::new().map_err(|e| format!("资源分配失败: {e:?}"))?;
+    std::fs::create_dir_all(work_dir).map_err(|e| e.to_string())?;
+    let items = matrix_items();
+    let entries = run_matrix(&items, &mut res, work_dir, |item| WasapiBackend {
+        device_id: device_id.to_string(),
+        descriptor_16: Descriptor::Extensible,
+        forced: Some(((item.container_bits, item.valid_bits), item.descriptor)),
+    })
+    .map_err(|e| e.to_string())?;
+    let mut backend = WasapiBackend::new(device_id);
+    let sequential =
+        run_sequential(&entries, &mut res, work_dir, &mut backend).map_err(|e| e.to_string())?;
+    Ok(MatrixReport {
+        device: DeviceMeta {
+            id: info.id,
+            name: info.name,
+            interface_name: info.interface_name,
+            driver_version: info.driver_version,
+            os: crate::endpoints::os_version(),
+            backend: crate::matrix::backend_version(),
+        },
+        entries,
+        sequential,
+    })
 }

@@ -12,7 +12,7 @@ publish.workspace = true
 name = "qybit"
 path = "src/main.rs"
 
-[target.'cfg(windows)'.dependencies]
+[dependencies]
 qy-host-wasapi.workspace = true
 
 [lints]

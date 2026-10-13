@@ -79,3 +79,37 @@ fn exclusive_playback_48k_16bit() {
     assert_eq!(render.underrun_events, 0, "出现欠载: {render:?}");
     assert!(report.finished && report.software_path_intact());
 }
+
+/// 设备格式矩阵（60 项）与顺序换曲。报告写入 `QYBIT_REPORT_DIR`（默认 `target/qybit-report`）。
+/// 设备不支持某格式是正常能力结果；凡独占初始化成功的项都必须完整播放（排空、帧数一致、无欠载）。
+#[test]
+#[ignore = "需要真实音频设备与 QYBIT_DEVICE_ID"]
+fn format_matrix_and_sequential() {
+    let id = device_id();
+    let work = std::env::temp_dir().join("qybit-device-matrix");
+    let report = match qy_host_wasapi::wasapi::device_matrix(&id, &work) {
+        Ok(r) => r,
+        Err(e) => panic!("{e}"),
+    };
+    let out = std::env::var("QYBIT_REPORT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/qybit-report")
+        });
+    match report.write(&out) {
+        Ok((json, csv)) => println!("报告：{}\n      {}", json.display(), csv.display()),
+        Err(e) => panic!("写报告失败: {e}"),
+    }
+    assert_eq!(report.entries.len(), 60);
+    let bad: Vec<_> = report
+        .entries
+        .iter()
+        .filter(|e| e.initialize == Some(0) || e.aligned_retry == Some(0))
+        .filter(|e| !e.played_ok())
+        .collect();
+    assert!(bad.is_empty(), "独占初始化成功但未完整播放: {bad:#?}");
+    match &report.sequential {
+        Some(s) => assert!(s.ok, "顺序换曲失败: {s:?}"),
+        None => panic!("支持并播放成功的采样率少于两个，无法验证顺序换曲"),
+    }
+}
