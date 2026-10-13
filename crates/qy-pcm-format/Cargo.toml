@@ -12,9 +12,12 @@ publish.workspace = true
 default = []
 # 生产端/消费端之间的设备帧字节 SPSC 队列；需要 alloc，仅宿主启用。
 ring = ["dep:rtrb"]
+# 静态设备帧队列（bbqueue，no_std 无 alloc，需要 CAS 原子）；MCU 宿主启用（M3 T1）。
+static-queue = ["dep:bbqueue"]
 
 [dependencies]
 rtrb = { workspace = true, optional = true }
+bbqueue = { workspace = true, optional = true }
 
 [lints]
 workspace = true

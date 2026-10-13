@@ -30,6 +30,7 @@ pub fn seeds(name: &str) -> &'static str {
         "rate_code12_7khz" => "smooth 7606",
         "rate_code13_11025" => "smooth 11631",
         "rate_code14_100k" => "smooth 100606",
+        "rate_384k_stereo_24" => "smooth 384000",
         "metadata_skip" | "unknown_max_frame" | "lying_max_frame" => "smooth 707",
         "short_tail_frame" => "smooth 808",
         n if n.starts_with("err_") => "smooth 909 / 1001–1004（错误夹具）",
@@ -97,6 +98,7 @@ pub fn expected_branches(name: &str) -> &'static [&'static str] {
             "channel_assignment=RIGHT_SIDE",
         ],
         "short_tail_frame" => &["blocksize=17", "blocksize=512"],
+        "rate_384k_stereo_24" => &["channel_assignment=MID_SIDE"],
         _ => &[],
     }
 }

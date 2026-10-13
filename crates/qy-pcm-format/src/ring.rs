@@ -7,16 +7,19 @@
 //! 生产端只按完整帧入队，消费端只按完整帧出队；环形回绕时最多两段拷贝。
 //! 消费端不做位移、字节序或样本格式转换。
 
-use crate::pack::{Exact, PackError, Pcm, pack};
-use crate::{DeviceFormat, MAX_CHANNELS, MAX_SAMPLE_RATE, frames_for_millis};
+use crate::pack::{Exact, Pcm, pack};
+pub use crate::queue::RingError;
+use crate::queue::{FrameSink, FrameSource};
+use crate::{DeviceFormat, frames_for_millis};
 
 /// 预填 / 队列预算：当前采样率下 500 ms（M0 T1）。
 pub const BUFFER_MILLIS: u32 = 500;
-/// 最大设备帧字节数：最多 2 声道 × C32。
-pub const MAX_FRAME_BYTES: usize = MAX_CHANNELS as usize * 4;
-/// 默认队列容量：192 kHz 下 500 ms 的双声道 C32 帧，即 96000 帧 = 768000 字节。
+pub use crate::queue::MAX_FRAME_BYTES;
+/// 默认队列预算：192 kHz 下 500 ms 的双声道 C32 帧，即 96000 帧 = 768000 字节。
+/// 这是宿主的默认资源配置，不是软件上限：更高采样率由宿主按资源预算分配更大的队列，
+/// 预算不足时 [`reconfigure`] 返回容量错误（播放前明确报告）。
 pub const DEFAULT_CAPACITY_BYTES: usize =
-    frames_for_millis(MAX_SAMPLE_RATE, BUFFER_MILLIS) as usize * MAX_FRAME_BYTES;
+    frames_for_millis(192_000, BUFFER_MILLIS) as usize * MAX_FRAME_BYTES;
 
 /// 启动前预填目标：当前采样率下 500 ms 的帧数（向上取整）。
 /// 短曲目由宿主预填全部有效帧并明确 EOF。
@@ -24,27 +27,7 @@ pub fn prefill_frames(format: &DeviceFormat) -> u64 {
     frames_for_millis(format.sample_rate(), BUFFER_MILLIS)
 }
 
-/// 队列错误。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RingError {
-    /// 尚未用 [`reconfigure`] 配置帧宽与代次。
-    NotConfigured,
-    /// 写入的字节数不是完整帧的整数倍。
-    PartialFrame,
-    /// 队列容量不足以容纳当前格式下的缓冲预算。
-    CapacityExceeded { required: usize, capacity: usize },
-    /// 新代次必须严格大于当前代次。
-    StaleGeneration,
-    /// 生产端与消费端不属于同一个队列。
-    Mismatched,
-    /// 设备格式帧宽与队列当前配置不符。
-    FrameWidth,
-    /// pack 拒绝（精度、格式或样本范围）。
-    Pack(PackError),
-}
-
-/// 每批 pack 的最大字节数：工作区最大帧数 × 最大帧宽，宿主据此分配一次 pack 暂存区。
-pub const PACK_SCRATCH_BYTES: usize = 4096 * MAX_FRAME_BYTES;
+pub use crate::queue::PACK_SCRATCH_BYTES;
 
 /// 生产端（非实时线程：解码 + pack 后入队）。
 pub struct FrameProducer {
@@ -79,18 +62,34 @@ pub fn frame_ring(capacity_bytes: usize) -> (FrameProducer, FrameConsumer) {
 
 /// 当前格式下缓冲预算所需字节数（500 ms，向上取整到帧）。
 pub fn required_bytes(format: &DeviceFormat) -> usize {
-    usize::try_from(prefill_frames(format))
+    required_bytes_for(format, BUFFER_MILLIS)
+}
+
+/// 当前格式下 `millis` 毫秒缓冲预算所需字节数（向上取整到帧）。
+pub fn required_bytes_for(format: &DeviceFormat, millis: u32) -> usize {
+    usize::try_from(frames_for_millis(format.sample_rate(), millis))
         .ok()
         .and_then(|f| f.checked_mul(usize::from(format.block_align())))
         .unwrap_or(usize::MAX)
 }
 
-/// 设备重配置：核对两端属于同一队列、容量满足预算、代次递增，
-/// 然后丢弃旧代次的残留字节并设置新帧宽。必须在两端都停止使用时调用。
+/// 设备重配置（缓冲预算 500 ms）：见 [`reconfigure_for`]。
 pub fn reconfigure(
     producer: &mut FrameProducer,
     consumer: &mut FrameConsumer,
     format: &DeviceFormat,
+    generation: u64,
+) -> Result<(), RingError> {
+    reconfigure_for(producer, consumer, format, BUFFER_MILLIS, generation)
+}
+
+/// 设备重配置：核对两端属于同一队列、容量满足 `millis` 毫秒的预算（宿主配置档的预填时长）、
+/// 代次递增，然后丢弃旧代次的残留字节并设置新帧宽。必须在两端都停止使用时调用。
+pub fn reconfigure_for(
+    producer: &mut FrameProducer,
+    consumer: &mut FrameConsumer,
+    format: &DeviceFormat,
+    millis: u32,
     generation: u64,
 ) -> Result<(), RingError> {
     if !core::ptr::eq(producer.inner.buffer(), consumer.inner.buffer()) {
@@ -100,7 +99,7 @@ pub fn reconfigure(
         return Err(RingError::StaleGeneration);
     }
     let capacity = producer.inner.buffer().capacity();
-    let required = required_bytes(format);
+    let required = required_bytes_for(format, millis);
     if required > capacity {
         return Err(RingError::CapacityExceeded { required, capacity });
     }
@@ -286,6 +285,47 @@ impl FrameConsumer {
         };
         chunk.commit(done * fb);
         Ok(done)
+    }
+}
+
+impl FrameSink for FrameProducer {
+    type Error = RingError;
+
+    fn push(
+        &mut self,
+        pcm: &Pcm<'_, Exact>,
+        device: &DeviceFormat,
+        scratch: &mut [u8],
+    ) -> Result<usize, RingError> {
+        self.pack_push(pcm, device, scratch)
+    }
+
+    fn queued_frames(&self) -> usize {
+        self.queued_frames_hint()
+    }
+}
+
+impl FrameSource for FrameConsumer {
+    type Error = RingError;
+
+    fn frame_bytes(&self) -> usize {
+        self.frame_bytes
+    }
+
+    fn available_frames(&self) -> usize {
+        FrameConsumer::available_frames(self)
+    }
+
+    fn pop_frames(&mut self, out: &mut [u8]) -> Result<usize, RingError> {
+        FrameConsumer::pop_frames(self, out)
+    }
+
+    fn consume_contiguous(
+        &mut self,
+        max_frames: usize,
+        write: impl FnOnce(&[u8]) -> usize,
+    ) -> Result<usize, RingError> {
+        FrameConsumer::consume_contiguous(self, max_frames, write)
     }
 }
 

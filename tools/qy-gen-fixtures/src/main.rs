@@ -313,6 +313,16 @@ fn build_cases() -> Vec<Case> {
         &[chunk(b"LIST", b"INFOx")],
     );
     ok_pcm(cs, "pcm32_stereo_96k", pcm(2, 96_000, 32), 200, 4, &[], &[]);
+    // M3 T1 去掉 192 kHz 软件上限：384 kHz 为有效样本（原 unsup_rate_384k）。
+    ok_pcm(
+        cs,
+        "pcm16_stereo_384k",
+        pcm(2, 384_000, 16),
+        400,
+        384,
+        &[],
+        &[],
+    );
     ok_pcm(
         cs,
         "pcm24_stereo_large",
@@ -552,11 +562,6 @@ fn build_cases() -> Vec<Case> {
     cs.push(err_case(
         "unsup_bits64",
         riff(&[fmt_pcm(pcm(1, 44_100, 64)), d.clone()]),
-        un,
-    ));
-    cs.push(err_case(
-        "unsup_rate_384k",
-        riff(&[fmt_pcm(pcm(2, 384_000, 16)), d.clone()]),
         un,
     ));
     cs.push(err_case(

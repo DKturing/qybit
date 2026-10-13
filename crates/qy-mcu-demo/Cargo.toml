@@ -1,0 +1,50 @@
+[package]
+name = "qy-mcu-demo"
+description = "QyBit MCU 资源演示（M3 T1）：thumbv7em no_std 纯软件宿主，模拟读卡与 DMA"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/DKturing/qybit"
+publish = false
+
+# 只为 thumbv7em-none-eabihf 构建，不属于主工作区（主工作区在宿主目标上构建与测试）。
+[workspace]
+
+[features]
+default = ["full"]
+# Embedded Full 配置档：WAV + FLAC。关闭后为 Embedded Lite：只链接 WAV。
+full = ["qy-codec-auto/flac", "dep:qy-codec-flac"]
+# 播放结束后停在 WFI 循环（不经半主机退出），供宿主测试经 QEMU 监视器读取内存测栈用量。
+hold = []
+
+[dependencies]
+qy-core = { path = "../qy-core" }
+qy-codec-auto = { path = "../qy-codec-auto", default-features = false, features = ["wav"] }
+qy-codec-flac = { path = "../qy-codec-flac", optional = true }
+qy-pcm-format = { path = "../qy-pcm-format", features = ["static-queue"] }
+# 一次性静态零缓冲（与 qy-codec-flac 的 static-cell 特性同一版本）。
+static_cell = { version = "=2.1.1", default-features = false }
+# Cortex-M 运行时（向量表、复位、链接脚本）；paint-stack：复位时把栈区涂为 0xCCCCCCCC 以测高水位。
+cortex-m-rt = { version = "=0.7.5", features = ["paint-stack"] }
+# 读取 MSP、WFI。
+cortex-m = "=0.7.7"
+# 半主机输出与退出（QEMU / 调试器）。
+cortex-m-semihosting = "=0.5.0"
+
+[profile.release]
+codegen-units = 1
+lto = true
+debug = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

@@ -32,10 +32,10 @@ fn reconfigure_reuses_buffers_without_allocation() {
         panic!("host init");
     };
     assert_eq!(
-        host.core.decoder().wav().capacity_samples(),
-        PCM_WORK_SAMPLES
+        host.engine.decoder().wav().map(|w| w.capacity_samples()),
+        Some(PCM_WORK_SAMPLES)
     );
-    assert_eq!(host.producer.free_frames(), 0); // 未配置帧宽
+    assert_eq!(host.engine.sink().free_frames(), 0); // 未配置帧宽
 
     let formats = [
         (44_100, 2, 16, 16),
@@ -58,7 +58,10 @@ fn reconfigure_reuses_buffers_without_allocation() {
         };
         let frame = usize::from(f.block_align());
         assert_eq!(host.consumer.frame_bytes(), frame);
-        assert_eq!(host.producer.free_frames(), DEFAULT_CAPACITY_BYTES / frame);
+        assert_eq!(
+            host.engine.sink().free_frames(),
+            DEFAULT_CAPACITY_BYTES / frame
+        );
     }
     assert_eq!(ALLOCS.load(Ordering::SeqCst), before, "重配置不应分配");
 }

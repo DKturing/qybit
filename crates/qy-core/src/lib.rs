@@ -18,8 +18,10 @@
 //! M0 T4 验收后 `Action`、`Event`、`Decoder` 为冻结接口，破坏性变更须先征得用户同意。
 #![no_std]
 
+pub mod engine;
+
 pub use qy_pcm_format::pack::{Exact, Pcm};
-pub use qy_pcm_format::{DeviceFormat, MAX_CHANNELS, MAX_SAMPLE_RATE, SourceFormat};
+pub use qy_pcm_format::{DeviceFormat, MAX_CHANNELS, SourceFormat};
 
 /// M0 默认输入窗口字节数。
 pub const INPUT_WINDOW_BYTES: usize = 8192;

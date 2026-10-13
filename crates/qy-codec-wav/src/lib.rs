@@ -247,7 +247,8 @@ impl WavDecoder {
         if block_align != expected_align {
             return Err(DecodeError::Malformed);
         }
-        if channels > 2 || rate > qy_core::MAX_SAMPLE_RATE {
+        // 多于 2 声道：多声道（声道映射）尚未实现，见 tasks/FORMATS.md F1。采样率不设软件上限。
+        if channels > 2 || rate == 0 {
             return Err(DecodeError::Unsupported);
         }
         if let Some(mask) = channel_mask {

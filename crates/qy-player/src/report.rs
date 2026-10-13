@@ -12,9 +12,19 @@
 
 use std::fmt::{Debug, Write as _};
 
-use qy_core::{DeviceFormat, Fault, SourceFormat};
+use qy_core::engine::EngineFault;
+use qy_core::{DeviceFormat, SourceFormat};
 
 use crate::render::{RenderEnd, RenderReport};
+
+/// 故障说明：核心故障按原名（如 `Configure`、`Decode(Malformed)`），能力不足给出具体原因。
+pub fn fault_text(fault: &EngineFault) -> String {
+    match fault {
+        EngineFault::Core(f) => format!("{f:?}"),
+        EngineFault::Capability(e) => format!("能力不足：{e}"),
+        EngineFault::Output => "输出队列错误".into(),
+    }
+}
 
 /// 后端的一次格式尝试记录。
 pub trait AttemptRecord: Clone + Debug + Send + 'static {
@@ -104,7 +114,9 @@ pub struct StreamReport<A> {
 pub struct PlaybackReport<A> {
     pub streams: Vec<StreamReport<A>>,
     pub open_failures: Vec<OpenFailure<A>>,
-    pub fault: Option<(u32, Fault)>,
+    pub fault: Option<(u32, EngineFault)>,
+    /// 按出错策略跳过的曲目（[`qy_core::engine::ErrorPolicy::Skip`]）。
+    pub skipped: Vec<(u32, EngineFault)>,
     /// I/O 错误等附加说明。
     pub messages: Vec<String>,
     pub finished: bool,
@@ -119,6 +131,7 @@ impl<A> Default for PlaybackReport<A> {
             streams: Vec::new(),
             open_failures: Vec::new(),
             fault: None,
+            skipped: Vec::new(),
             messages: Vec::new(),
             finished: false,
             device_error: false,
@@ -291,8 +304,11 @@ impl<A: AttemptRecord> PlaybackReport<A> {
         for m in &self.messages {
             let _ = writeln!(o, "错误：{m}");
         }
+        for (track, fault) in &self.skipped {
+            let _ = writeln!(o, "曲目 {} 已跳过：{}", track + 1, fault_text(fault));
+        }
         if let Some((track, fault)) = self.fault {
-            let _ = writeln!(o, "曲目 {} 失败：{fault:?}", track + 1);
+            let _ = writeln!(o, "曲目 {} 失败：{}", track + 1, fault_text(&fault));
         }
         if self.device_error {
             o.push_str("输出设备错误：播放已停止。\n");

@@ -1,13 +1,18 @@
-//! 生产端播放驱动（M0 T5 起，M2 T1 移入平台无关层），对输出后端泛型。
+//! 生产端播放驱动（M0 T5 起，M2 T1 移入平台无关层，M3 T1 起由 `qy_core::engine` 调度），
+//! 对输出后端泛型。
 //!
-//! 在调用线程（非实时）运行真实 `qy-core`、自有解码（按文件头选 WAV/FLAC）与 pack：
-//! 同步读文件、按核心动作执行，把已 pack 的完整帧推入 SPSC 队列；渲染线程由后端创建。
-//! 宿主规则与模拟宿主一致：
+//! 在调用线程（非实时）运行引擎：真实 `qy-core`、自有解码（按文件头选 WAV/FLAC）与 pack 都在
+//! 引擎内执行，本模块只执行引擎的 [`HostAction`]：同步读文件、经后端打开设备、启动/排空
+//! 渲染线程，并以 [`HostEvent`] 回报。播放规则由引擎负责，与模拟宿主、MCU 宿主一致：
 //! - 设备启动前预填当前采样率下至少 500 ms，或在播放结束/失败时直接启动排空；
-//! - 新源格式能被当前设备格式无损承载（采样率、声道相同且 N ≤ V）时继续使用，
-//!   否则先排空当前流（置 EOF、等渲染线程播完退出），再按新格式打开；
-//! - 打开失败（设备不支持、独占失败等）回报 `ConfigureFailed`，不做任何回退；
+//! - 新源格式能被当前设备格式无损承载（采样率、声道相同且 N ≤ V）时继续使用
+//!   （[`ReusePolicy::Accepts`](qy_core::engine::ReusePolicy::Accepts)），否则先排空当前流
+//!   （置 EOF、等渲染线程播完退出），再按新格式打开；
+//! - 超出配置档能力的源在打开设备前拒绝，并给出具体原因；
+//! - 打开失败（设备不支持、独占失败等）回报 `DeviceOpenFailed`，不做任何回退；
 //! - 播放失败时排空已入队的有效音频后停止；渲染线程出错（设备失效等）时停止核心。
+//!
+//! 桌面渲染循环尚未实现暂停；本驱动不发起暂停，收到暂停动作按协议错误记录。
 
 use std::fs::File;
 use std::io::{ErrorKind, Read};
@@ -16,8 +21,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use qy_core::{Action, DeviceFormat, Event, SourceFormat};
-use qy_pcm_format::ring::prefill_frames;
+use qy_core::engine::{HostAction, HostEvent, Poll, Wait};
+use qy_core::{DeviceFormat, Generation, SourceFormat};
 
 use crate::HostResources;
 use crate::backend::{Backend, PendingStream, RunningStream};
@@ -35,6 +40,8 @@ struct Active<B: Backend> {
     submission: Submission,
     negotiation: Negotiation<B::Attempt>,
     ctl: Arc<RenderControl>,
+    /// 打开本流时引擎的累计入队帧数。
+    pushed_base: u64,
 }
 
 /// 生产端等待队列空间时的休眠间隔。
@@ -56,8 +63,10 @@ pub fn play<B: Backend>(
     files: &[PathBuf],
 ) -> PlaybackReport<B::Attempt> {
     let count = u32::try_from(files.len()).unwrap_or(u32::MAX);
-    let _ = res.core.stop();
-    res.core.play(0, count);
+    // 清理上一次播放可能残留的状态（旧代次），丢弃其控制动作。
+    res.engine.stop();
+    while res.engine.take_control().is_some() {}
+    res.engine.play(0, count);
     let mut p = Player {
         backend,
         res,
@@ -71,82 +80,124 @@ pub fn play<B: Backend>(
 }
 
 impl<B: Backend> Player<'_, B> {
-    fn handle(&mut self, event: Event) {
-        if self.res.core.handle(event).is_err() {
+    fn handle(&mut self, event: HostEvent) {
+        if self.res.engine.handle(event).is_err() {
             self.report.protocol_errors += 1;
         }
     }
 
     fn run(&mut self) {
-        // 本宿主同步回报所有事件，poll 返回 None 即播放列表已结束。
-        while let Some(action) = self.res.core.poll() {
-            match action {
-                Action::Open { generation, track } => {
-                    match self.files.get(track as usize).map(File::open) {
-                        Some(Ok(f)) => {
-                            self.file = Some(f);
-                            self.handle(Event::Opened { generation });
-                        }
-                        other => {
-                            if let Some(Err(e)) = other {
-                                self.report
-                                    .messages
-                                    .push(format!("打开曲目 {track} 失败: {e}"));
-                            }
-                            self.handle(Event::OpenFailed { generation });
-                        }
+        loop {
+            let poll = self.res.engine.poll();
+            self.sync_pushed();
+            match poll {
+                Poll::Action(a) => {
+                    if !self.execute(a) {
+                        break;
                     }
                 }
-                Action::Read {
-                    generation,
-                    request,
-                    ..
-                } => self.read(generation, request),
-                Action::Configure { generation, format } => {
-                    if self.configure(&format) {
-                        self.handle(Event::Configured { generation });
-                    } else {
-                        self.handle(Event::ConfigureFailed { generation });
-                    }
-                }
-                Action::Output { generation, .. } => {
-                    let pushed = self.output();
-                    self.handle(Event::Output {
-                        generation,
-                        frames: pushed,
-                    });
-                    if pushed == 0 && !self.wait_for_space() {
+                Poll::Yield => {}
+                Poll::Wait(Wait::QueueFull) => {
+                    if !self.wait_for_space() {
                         // 渲染线程已出错结束：停止核心，旧代次回报此后一律拒绝。
-                        if self.res.core.stop().is_some() {
-                            self.file = None;
+                        self.res.engine.device_lost();
+                        while let Some(a) = self.res.engine.take_control() {
+                            self.execute(a);
                         }
                         break;
                     }
                 }
-                Action::Close { .. } => self.file = None,
-                Action::Finished { .. } => {
-                    self.finish_stream();
-                    self.report.finished = !self.report.device_error;
+                Poll::Wait(w) => {
+                    // 本宿主同步回报所有读取与设备事件，不应等待。
+                    self.report.protocol_errors += 1;
+                    self.report.messages.push(format!("引擎意外等待：{w:?}"));
                     break;
                 }
-                Action::Failed { track, fault, .. } => {
-                    self.report.fault = Some((track, fault));
-                    if let Some(e) = self.res.core.decoder().flac_error() {
-                        self.report.messages.push(format!("FLAC 错误明细：{e:?}"));
-                    }
-                    self.finish_stream();
-                    break;
-                }
+                Poll::Idle => break,
             }
         }
         // 未正常排空的流（设备错误路径）在此回收。
-        self.finish_stream();
+        self.finish_stream(false);
+        self.report.protocol_errors += self.res.engine.stats().protocol_errors;
     }
 
-    fn read(&mut self, generation: qy_core::Generation, request: u32) {
+    /// 把当前流的入队帧数同步给渲染线程。
+    fn sync_pushed(&self) {
+        if let Some(a) = &self.active {
+            let total = self.res.engine.stats().frames_pushed;
+            a.ctl
+                .pushed_frames
+                .store(total - a.pushed_base, Ordering::Release);
+        }
+    }
+
+    /// 执行引擎动作；返回 false 表示播放结束。
+    fn execute(&mut self, action: HostAction) -> bool {
+        match action {
+            HostAction::Open { generation, track } => {
+                match self.files.get(track as usize).map(File::open) {
+                    Some(Ok(f)) => {
+                        self.file = Some(f);
+                        self.handle(HostEvent::Opened { generation });
+                    }
+                    other => {
+                        if let Some(Err(e)) = other {
+                            self.report
+                                .messages
+                                .push(format!("打开曲目 {track} 失败: {e}"));
+                        }
+                        self.handle(HostEvent::OpenFailed { generation });
+                    }
+                }
+            }
+            HostAction::Read {
+                generation,
+                request,
+                ..
+            } => self.read(generation, request),
+            HostAction::Close { .. } => self.file = None,
+            HostAction::SelectDevice { .. } => {
+                // 复用策略为 Accepts，引擎不会请求选择设备格式。
+                self.report.protocol_errors += 1;
+                self.handle(HostEvent::DeviceUnsupported);
+            }
+            HostAction::OpenDevice { source, .. } => {
+                let event = match self.open_device(&source) {
+                    Some(format) => HostEvent::DeviceOpened { format },
+                    None => HostEvent::DeviceOpenFailed,
+                };
+                self.handle(event);
+            }
+            HostAction::StartDevice => self.start_if_pending(),
+            HostAction::DrainDevice => {
+                self.finish_stream(false);
+                self.handle(HostEvent::DeviceDrained);
+            }
+            HostAction::StopDevice => self.finish_stream(true),
+            HostAction::PauseDevice | HostAction::ResumeDevice => {
+                self.report.protocol_errors += 1;
+                self.report.messages.push("桌面渲染循环尚未实现暂停".into());
+            }
+            HostAction::TrackSkipped { track, fault } => self.report.skipped.push((track, fault)),
+            HostAction::Finished => {
+                self.report.finished = !self.report.device_error;
+                return false;
+            }
+            HostAction::Failed { track, fault } => {
+                self.report.fault = Some((track, fault));
+                if let Some(e) = self.res.engine.decoder().flac_error() {
+                    self.report.messages.push(format!("FLAC 错误明细：{e:?}"));
+                }
+                return false;
+            }
+        }
+        true
+    }
+
+    fn read(&mut self, generation: Generation, request: u32) {
         let result = match (
             self.file.as_mut(),
-            self.res.core.read_target(generation, request),
+            self.res.engine.read_target(generation, request),
         ) {
             (Some(file), Some(dst)) => loop {
                 match file.read(dst) {
@@ -161,18 +212,18 @@ impl<B: Backend> Player<'_, B> {
         };
         let event = match result {
             // 文件读取返回 0 表示到达结尾。
-            Ok(0) => Event::ReadEof {
+            Ok(0) => HostEvent::ReadEof {
                 generation,
                 request,
             },
-            Ok(len) => Event::ReadDone {
+            Ok(len) => HostEvent::ReadDone {
                 generation,
                 request,
                 len,
             },
             Err(e) => {
                 self.report.messages.push(format!("读取失败: {e}"));
-                Event::ReadFailed {
+                HostEvent::ReadFailed {
                     generation,
                     request,
                 }
@@ -181,23 +232,21 @@ impl<B: Backend> Player<'_, B> {
         self.handle(event);
     }
 
-    /// 配置输出；返回是否成功。
-    fn configure(&mut self, source: &SourceFormat) -> bool {
-        if let Some(a) = &self.active
-            && a.format.accepts(source)
-        {
-            return true;
-        }
-        self.finish_stream();
+    /// 打开设备并按协商格式重配置队列；返回设备格式。引擎保证此时没有活动流。
+    fn open_device(&mut self, source: &SourceFormat) -> Option<DeviceFormat> {
         if self.report.device_error {
-            return false;
+            return None;
+        }
+        if self.active.is_some() {
+            self.report.protocol_errors += 1;
+            self.finish_stream(false);
         }
         match self.backend.open(source) {
             Ok(pending) => {
                 let format = pending.format();
                 if let Err(e) = self.res.configure_ring(&format) {
                     self.report.messages.push(format!("队列重配置失败: {e:?}"));
-                    return false;
+                    return None;
                 }
                 self.active = Some(Active {
                     negotiation: pending.negotiation().clone(),
@@ -205,47 +254,15 @@ impl<B: Backend> Player<'_, B> {
                     stream: Stream::Pending(pending),
                     format,
                     ctl: Arc::new(RenderControl::default()),
+                    pushed_base: self.res.engine.stats().frames_pushed,
                 });
-                true
+                Some(format)
             }
             Err(f) => {
                 self.report.open_failures.push(f);
-                false
+                None
             }
         }
-    }
-
-    /// pack 并入队；返回入队帧数。
-    fn output(&mut self) -> usize {
-        let Some(active) = self.active.as_ref() else {
-            self.report.protocol_errors += 1;
-            return 0;
-        };
-        let Some(pcm) = self.res.core.pcm() else {
-            self.report.protocol_errors += 1;
-            return 0;
-        };
-        let pushed = match self
-            .res
-            .producer
-            .pack_push(&pcm, &active.format, self.res.pack_scratch)
-        {
-            Ok(n) => n,
-            Err(e) => {
-                self.report.messages.push(format!("pack 失败: {e:?}"));
-                self.report.protocol_errors += 1;
-                0
-            }
-        };
-        active
-            .ctl
-            .pushed_frames
-            .fetch_add(pushed as u64, Ordering::Release);
-        let queued = self.res.producer.queued_frames_hint();
-        if queued as u64 >= prefill_frames(&active.format) {
-            self.start_if_pending();
-        }
-        pushed
     }
 
     /// 队列满：启动尚未开始的流，或休眠等待渲染线程取走数据。
@@ -281,13 +298,14 @@ impl<B: Backend> Player<'_, B> {
         self.active = Some(Active { stream, ..active });
     }
 
-    /// 置 EOF 并等待当前流播完退出，归还消费端并记录报告。
-    fn finish_stream(&mut self) {
+    /// 结束当前流并归还消费端、记录报告：`stop` 为 false 时置 EOF 等它播完退出（排空），
+    /// 为 true 时立即停止（停止/切歌，丢弃队列中的数据）。
+    fn finish_stream(&mut self, stop: bool) {
         let Some(active) = self.active.take() else {
             return;
         };
         active.ctl.eof.store(true, Ordering::Release);
-        if self.report.device_error {
+        if stop || self.report.device_error {
             active.ctl.stop.store(true, Ordering::Release);
         }
         let running = match active.stream {
@@ -315,7 +333,7 @@ impl<B: Backend> Player<'_, B> {
             negotiation: active.negotiation,
             format: active.format,
             submission: active.submission,
-            pushed_frames: active.ctl.pushed_frames.load(Ordering::Acquire),
+            pushed_frames: self.res.engine.stats().frames_pushed - active.pushed_base,
             render,
             evidence: Default::default(),
         });
@@ -329,6 +347,7 @@ mod tests {
         FakeBackend, FakeDevice, FakeOutput, TestAttempt, WCall, check_calls, check_write_calls,
         data_chunk, fixture, fixture_path, flac_fixture_path, flac_reference, place,
     };
+    use qy_core::engine::EngineFault;
     use qy_core::{DecodeError, Fault};
 
     const ALL: [(u8, u8); 4] = [(16, 16), (24, 24), (32, 24), (32, 32)];
@@ -476,7 +495,7 @@ mod tests {
                     "pcm16_stereo_44k.wav",
                 ],
             );
-            assert_eq!(r.fault, Some((1, Fault::Configure)));
+            assert_eq!(r.fault, Some((1, EngineFault::Core(Fault::Configure))));
             assert!(!r.finished && !r.software_path_intact());
             assert_eq!(r.open_failures.len(), 1);
             let n = &r.open_failures[0].negotiation;
@@ -495,13 +514,16 @@ mod tests {
         for device in DEVICES {
             let mut b = backend(&ALL, device);
             let (r, outs) = run(&mut b, &["pcm16_stereo_44k.wav", "does_not_exist.wav"]);
-            assert_eq!(r.fault, Some((1, Fault::Open)));
+            assert_eq!(r.fault, Some((1, EngineFault::Core(Fault::Open))));
             assert_eq!(outs.len(), 1);
             check_output(&outs[0], &data_chunk(&fixture("pcm16_stereo_44k.wav")));
 
             let mut b = backend(&ALL, device);
             let (r, outs) = run(&mut b, &["trunc_mid_frame.wav"]);
-            assert_eq!(r.fault, Some((0, Fault::Decode(DecodeError::Truncated))));
+            assert_eq!(
+                r.fault,
+                Some((0, EngineFault::Core(Fault::Decode(DecodeError::Truncated))))
+            );
             // 截断前 50 个完整帧全部播放。
             let wav = fixture("trunc_mid_frame.wav");
             check_output(&outs[0], &wav[44..44 + 50 * 4]);
@@ -638,7 +660,10 @@ mod tests {
             // 第二帧 CRC-16 错误：只播放已校验的第一帧（512 帧），然后报告 Malformed。
             let mut b = backend(&ALL, device);
             let (r, outs) = run(&mut b, &["err_frame_crc.flac", "pcm16_stereo_44k.wav"]);
-            assert_eq!(r.fault, Some((0, Fault::Decode(DecodeError::Malformed))));
+            assert_eq!(
+                r.fault,
+                Some((0, EngineFault::Core(Fault::Decode(DecodeError::Malformed))))
+            );
             assert!(!r.finished && !r.software_path_intact());
             assert_eq!(outs.len(), 1);
             assert!(
@@ -654,7 +679,13 @@ mod tests {
             // 无 fLaC/RIFF 文件头：按内容识别为不支持，不依据扩展名。
             let mut b = backend(&ALL, device);
             let (r, outs) = run(&mut b, &["err_no_marker.flac"]);
-            assert_eq!(r.fault, Some((0, Fault::Decode(DecodeError::Unsupported))));
+            assert_eq!(
+                r.fault,
+                Some((
+                    0,
+                    EngineFault::Core(Fault::Decode(DecodeError::Unsupported))
+                ))
+            );
             assert!(outs.is_empty());
         }
     }

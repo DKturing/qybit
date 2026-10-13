@@ -96,6 +96,10 @@ rate_code14_100k -> ok -
   sha256 92cc6cebb15f47b0175d5065a9ec66f89ca48a7e7eb83a8b86e850c93f24d854
   695 字节；来源：手写：非常用采样率 100000 Hz；种子：smooth 100606
   核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 100000 Hz/1 声道/16 位/最大块 250/总样本 500；块大小 ["250"]；分支要求 [] 满足
+rate_384k_stereo_24 -> ok -
+  sha256 7957c4d48de4fc7a5db339e2a182526af865a39f5855c9fa3582359e239b59ea
+  37125 字节；来源：手写：384 kHz 双声道 24 位，mid/side；种子：smooth 384000
+  核对：libFLAC 参考解码（raw，有符号小端 24 位）逐样本一致；metaflac 384000 Hz/2 声道/24 位/最大块 1024/总样本 2048；块大小 ["1024"]；分支要求 ["channel_assignment=MID_SIDE"] 满足
 metadata_skip -> ok -
   sha256 3bc333c1f388ab2126b01e07ecde5d4a0c93bb9cde140970c97669a2f3bff9a6
   120001 字节；来源：手写：填充、注释、100 KB 图片与保留类型元数据；种子：smooth 707
@@ -180,29 +184,25 @@ err_reserved_channels -> Malformed ReservedCode
   sha256 8e03f4f89e8b5ddf92bc16b0f563175b87042f1ecee8e5895148c244ac199665
   180 字节；来源：手写错误：声道码 11（CRC-8 重算）；种子：smooth 909 / 1001–1004（错误夹具）
   核对：未做参考解码（错误或不支持的夹具）
-err_unsupported_3ch -> Unsupported Unsupported
+err_unsupported_3ch -> Unsupported ChannelsNotImplemented
   sha256 2a193b4f38750e91a50ad7cc17a31f51814821ae46d9b6f570571fa7332286c0
-  438 字节；来源：手写错误：3 声道（libFLAC 可解）；种子：smooth 909 / 1001–1004（错误夹具）
-  核对：未做参考解码（错误或不支持的夹具）
-err_unsupported_384k -> Unsupported Unsupported
-  sha256 6005797d02c8ec146cae7a38e28dc44322f61e28a95983ef41af1bcc90ced1f2
-  182 字节；来源：手写错误：384 kHz；种子：smooth 909 / 1001–1004（错误夹具）
+  438 字节；来源：手写错误：3 声道：多声道尚未实现（F1，libFLAC 可解）；种子：smooth 909 / 1001–1004（错误夹具）
   核对：未做参考解码（错误或不支持的夹具）
 
 # libFLAC --analyze 分支覆盖（含该分支的有效夹具数）
 blocksize=65535: 1
 channel_assignment=INDEPENDENT: 16
 channel_assignment=LEFT_SIDE: 4
-channel_assignment=MID_SIDE: 7
+channel_assignment=MID_SIDE: 8
 channel_assignment=RIGHT_SIDE: 2
 escape_partition: 2
-residual_type=RICE: 18
+residual_type=RICE: 19
 residual_type=RICE2: 6
 type=CONSTANT: 2
-type=FIXED: 14
+type=FIXED: 15
 type=FIXED order=0: 2
-type=FIXED order=1: 4
-type=FIXED order=2: 12
+type=FIXED order=1: 5
+type=FIXED order=2: 13
 type=FIXED order=3: 2
 type=FIXED order=4: 2
 type=LPC: 12

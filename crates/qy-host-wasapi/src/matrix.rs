@@ -245,8 +245,11 @@ pub fn entry_from_playback(
     let attempt = negotiation.and_then(first_attempt);
     let mut errors: Vec<String> = r.open_failures.iter().map(|f| f.message.clone()).collect();
     errors.extend(r.messages.iter().cloned());
-    if let Some((track, fault)) = r.fault {
-        errors.push(format!("曲目 {track} 失败: {fault:?}"));
+    if let Some((track, fault)) = &r.fault {
+        errors.push(format!(
+            "曲目 {track} 失败: {}",
+            qy_player::fault_text(fault)
+        ));
     }
     let render = r.streams.first().and_then(|s| s.render);
     if let Some(rr) = &render

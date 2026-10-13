@@ -16,6 +16,7 @@
 //!
 //! 每个场景都有超时上限；失败时打印种子。单独复现：`QY_SIM_SEED=<种子> cargo test -p qy-host-sim --test sim_seeds`。
 
+use qy_core::engine::{EngineFault, ErrorPolicy};
 use qy_core::{DecodeError, DeviceFormat, Fault, SourceFormat};
 use qy_host_sim::SimHost;
 use qy_host_sim::sim::{
@@ -408,6 +409,8 @@ fn build_case(seed: u64) -> Case {
         disconnect_at,
         restart,
         max_ticks: dur * 3 + stall_total + 100 * tracks.len() as u64 + 5_000,
+        on_error: ErrorPolicy::Stop,
+        controls: Vec::new(),
     };
     Case {
         tracks,
@@ -590,7 +593,7 @@ fn verify(case: &Case, r: &Report) -> Result<(), String> {
             fault,
             partial,
         } => {
-            if r.fault != Some((track, fault)) {
+            if r.fault != Some((track, EngineFault::Core(fault))) {
                 return Err(format!("期望故障 {:?}，实际 {:?}", (track, fault), r.fault));
             }
             if r.finished || r.fidelity_intact() {
@@ -691,12 +694,18 @@ fn thousand_seeds() {
         let _guard = SeedGuard(seed);
         let case = build_case(seed);
         let report = run(&mut host, &case.scenario);
+        if std::env::var_os("QY_DIGEST").is_some() {
+            println!("DIGEST {seed} {}", report.digest());
+        }
         stats[(seed % 10) as usize] += 1;
         underrun_events += report.underruns.len();
         stale += report.stale_rejected;
         restarts += u32::from(report.restarted_at.is_some());
         lost += u32::from(report.device_lost);
-        if let Some((_, f)) = report.fault {
+        if let Some((_, ef)) = report.fault {
+            let EngineFault::Core(f) = ef else {
+                panic!("种子 {seed} 出现非核心故障 {ef:?}");
+            };
             *faults.entry(format!("{f:?}")).or_default() += 1;
             if matches!(f, Fault::Read) && report.segments.iter().any(|s| !s.valid.is_empty()) {
                 partial_nonempty += 1;

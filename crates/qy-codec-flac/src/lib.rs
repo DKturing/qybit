@@ -33,21 +33,58 @@ pub struct Capacity {
     pub input_window: usize,
 }
 
-impl Capacity {
-    /// 桌面：块大小最大 65535、双声道、编码帧 ≤ 1 MiB。
-    pub const DESKTOP: Capacity = Capacity {
-        max_block: 65_535,
-        max_channels: 2,
-        input_window: 1 << 20,
-    };
+/// 帧头最大字节数（RFC 9639 §9.1）：同步码与标志 2、块大小/采样率码 1、声道/位深码 1、
+/// 编号（UTF-8 式编码，可变块时最多 7 字节）7、非常用块大小 2、非常用采样率 2、CRC-8 1。
+pub const MAX_FRAME_HEADER_BYTES: usize = 2 + 1 + 1 + 7 + 2 + 2 + 1;
 
-    /// MCU 参考配置：块大小 ≤ 4608（RFC 9639 可流式子集在 ≤ 48 kHz 时的上限）、
-    /// 双声道、编码帧 ≤ 32 KiB（足够 24 位双声道 4608 帧的 verbatim 帧）。
-    pub const MCU: Capacity = Capacity {
-        max_block: 4_608,
-        max_channels: 2,
-        input_window: 32 * 1024,
-    };
+/// 给定块大小、声道与位深时，不压缩（verbatim）编码帧的字节上界：
+/// 帧头 + Σ 各声道（子帧头 8 位 + 块大小 × 样本位宽）按字节向上取整 + CRC-16 2 字节。
+/// 双声道时其中一个声道可能是 side 声道，样本位宽多 1 位（RFC 9639 §9.2.3）；wasted bits
+/// 只会让子帧变短，不影响上界。
+///
+/// 正常编码器（如 libFLAC）在压缩反而更大时改用 verbatim，故这是实际可依赖的上界；
+/// 超出窗口的帧由解码器返回容量错误，不会越界。
+pub const fn verbatim_frame_bound(max_block: usize, channels: usize, bits: usize) -> usize {
+    let side = if channels == 2 { 1 } else { 0 };
+    let sub_bits = channels * 8 + max_block * (channels * bits + side);
+    MAX_FRAME_HEADER_BYTES + sub_bits.div_ceil(8) + 2
+}
+
+impl Capacity {
+    /// 按目标能力计算容量：输入窗口取不压缩帧上界（[`verbatim_frame_bound`]）。
+    pub const fn for_limits(max_block: usize, max_channels: usize, max_bits: usize) -> Capacity {
+        Capacity {
+            max_block,
+            max_channels,
+            input_window: verbatim_frame_bound(max_block, max_channels, max_bits),
+        }
+    }
+
+    /// 输入窗口至少为 `bytes`（为非 libFLAC 编码器可能产生的更大帧留余量）。
+    pub const fn with_min_window(self, bytes: usize) -> Capacity {
+        Capacity {
+            input_window: if self.input_window > bytes {
+                self.input_window
+            } else {
+                bytes
+            },
+            ..self
+        }
+    }
+
+    /// 桌面：块大小最大 65535、双声道、32 位。不压缩帧上界约 520 KiB，窗口保留 M1 承诺的
+    /// 1 MiB（编码帧 ≤ 1 MiB）。
+    pub const DESKTOP: Capacity = Capacity::for_limits(65_535, 2, 32).with_min_window(1 << 20);
+
+    /// MCU 参考配置：块大小 ≤ 4608（RFC 9639 可流式子集在 ≤ 48 kHz 时的上限）、双声道、
+    /// **覆盖到 24 位**（不压缩帧上界 28 244 字节）。32 位需要 [`Capacity::for_limits`]`(4608, 2, 32)`
+    /// （37 460 字节）。实际可用性以 M3 T3 在指定 MCU 上的实测为准。
+    pub const MCU: Capacity = Capacity::for_limits(4_608, 2, 24);
+
+    /// 三块缓冲的 RAM 字节数（输入窗口 + `i64` 工作区 + `i32` PCM）。
+    pub const fn ram_bytes(&self) -> usize {
+        self.input_window + self.workspace_len() * 8 + self.pcm_len() * 4
+    }
 
     /// `i64` 工作区元素数。
     pub const fn workspace_len(&self) -> usize {
@@ -142,8 +179,10 @@ pub enum FlacError {
     BlockTooLarge,
     /// 编码帧超出输入窗口容量（含 STREAMINFO 声明的最大帧长度）。
     FrameTooLarge,
-    /// 合法但本阶段不支持：声道数、采样率或位深。
+    /// 合法但不支持：位深或采样率超出格式描述可表示的范围。
     Unsupported,
+    /// 多于 2 声道：多声道（声道映射）尚未实现，见 tasks/FORMATS.md F1。
+    ChannelsNotImplemented,
     /// 源在完整结构前结束（含已解码样本少于 STREAMINFO 总样本数）。
     Truncated,
     /// 已解码样本多于 STREAMINFO 总样本数。
@@ -153,7 +192,7 @@ pub enum FlacError {
 impl FlacError {
     pub fn to_decode_error(self) -> DecodeError {
         match self {
-            FlacError::Unsupported => DecodeError::Unsupported,
+            FlacError::Unsupported | FlacError::ChannelsNotImplemented => DecodeError::Unsupported,
             FlacError::Truncated => DecodeError::Truncated,
             FlacError::BlockTooLarge | FlacError::FrameTooLarge => DecodeError::CapacityExceeded,
             _ => DecodeError::Malformed,
@@ -309,7 +348,10 @@ impl FlacDecoder {
         if rate == 0 || bits < 4 || max_block < 16 {
             return Err(FlacError::BadStreamInfo);
         }
-        if channels as usize > self.cap.max_channels || channels > 2 {
+        if channels > 2 {
+            return Err(FlacError::ChannelsNotImplemented);
+        }
+        if channels as usize > self.cap.max_channels {
             return Err(FlacError::Unsupported);
         }
         // 声明的容量需求先检查；实际帧仍逐帧检查。
@@ -488,6 +530,10 @@ impl FlacDecoder {
                     self.metrics.incomplete_attempts += 1;
                 }
                 let n = slice.len();
+                // 窗口之外还有数据：帧超出窗口容量，不是截断（即使已到 EOF）。
+                if avail.len() > window {
+                    return self.fail(FlacError::FrameTooLarge);
+                }
                 if eof {
                     return self.fail(FlacError::Truncated);
                 }

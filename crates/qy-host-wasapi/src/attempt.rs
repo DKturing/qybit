@@ -137,7 +137,10 @@ mod tests {
                 "pcm16_stereo_44k.wav",
             ],
         );
-        assert_eq!(r.fault, Some((1, Fault::Configure)));
+        assert_eq!(
+            r.fault,
+            Some((1, qy_core::engine::EngineFault::Core(Fault::Configure)))
+        );
         assert!(!r.finished && !r.software_path_intact());
         assert_eq!(r.open_failures.len(), 1);
         let n = &r.open_failures[0].negotiation;

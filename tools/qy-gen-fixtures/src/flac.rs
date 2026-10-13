@@ -973,6 +973,18 @@ fn crafted_cases() -> Vec<Fixture> {
         ));
     }
 
+    // M3 T1 去掉 192 kHz 软件上限：384 kHz（STREAMINFO 与帧头采样率码 0 取自 STREAMINFO）。
+    let vals = smooth(384_000, 2048, 2, 24, 0.5);
+    let frames = encode_blocks(&vals, 2, 384_000, 24, 1024, Assign::MidSide, &|_| {
+        vec![sub(Kind::Fixed(2, rice(10))), sub(Kind::Fixed(1, rice(10)))]
+    });
+    v.push(crafted(
+        "rate_384k_stereo_24",
+        &stream(384_000, 2, 24, frames),
+        vals,
+        "384 kHz 双声道 24 位，mid/side",
+    ));
+
     // 元数据：PADDING、VORBIS_COMMENT、PICTURE（100 KB，不缓存）、保留类型 10，均跳过。
     let vals = smooth(707, 1000, 2, 24, 0.5);
     let frames = encode_blocks(&vals, 2, 48_000, 24, 512, Assign::LeftSide, &|_| {
@@ -1365,7 +1377,7 @@ fn error_cases() -> Vec<Fixture> {
         vec![],
         "声道码 11（CRC-8 重算）",
     ));
-    // 不支持：3 声道、384 kHz、3 位位深（RFC 下限 4 位为非法）。
+    // 尚未实现：3 声道（多声道声道映射见 tasks/FORMATS.md F1）。384 kHz 自 M3 T1 起为有效夹具。
     let tri = smooth(1004, 64, 3, 16, 0.3);
     let frames = encode_blocks(&tri, 3, 44_100, 16, 64, Assign::Indep, &|_| {
         vec![sub(Kind::Verbatim); 3]
@@ -1374,25 +1386,13 @@ fn error_cases() -> Vec<Fixture> {
         "err_unsupported_3ch",
         stream_bytes(&stream(44_100, 3, 16, frames)),
         "Unsupported",
-        "Unsupported",
+        "ChannelsNotImplemented",
         None,
         vec![],
-        "3 声道（libFLAC 可解）",
+        "3 声道：多声道尚未实现（F1，libFLAC 可解）",
     );
     f3.libflac_check = false;
     v.push(f3);
-    let frames = encode_blocks(&mono, 1, 384_000, 16, 64, Assign::Indep, &|_| {
-        vec![sub(Kind::Verbatim)]
-    });
-    v.push(err_fixture(
-        "err_unsupported_384k",
-        stream_bytes(&stream(384_000, 1, 16, frames)),
-        "Unsupported",
-        "Unsupported",
-        None,
-        vec![],
-        "384 kHz",
-    ));
     v
 }
 

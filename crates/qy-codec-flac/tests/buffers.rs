@@ -15,10 +15,127 @@ fn desktop_capacity_matches_task_card() {
     assert_eq!(c.workspace_len(), 2 * 65_535);
     assert_eq!(c.workspace_len() * 8, 1_048_560);
     assert_eq!(c.pcm_len() * 4, 524_280);
+    // M3 T1：MCU 容量由公式得出（覆盖 24 位，原手写 32 KiB），见 `verbatim_bound_formula`。
     let m = Capacity::MCU;
     assert_eq!(
         (m.max_block, m.max_channels, m.input_window),
-        (4_608, 2, 32_768)
+        (4_608, 2, 28_244)
+    );
+    assert_eq!(m.ram_bytes(), 28_244 + 4_608 * 2 * 8 + 4_608 * 2 * 4);
+}
+
+/// 不压缩帧上界：独立按 RFC 9639 逐项相加核对，并与最大块 verbatim 夹具的实际帧长比较。
+#[test]
+fn verbatim_bound_formula() {
+    use qy_codec_flac::verbatim_frame_bound;
+    // 帧头上限 16 字节 + 各声道（8 位子帧头 + 块 × 位宽，side 声道 +1 位）+ CRC-16。
+    let independent = |block: usize, ch: usize, bits: usize| {
+        let mut sub = 0usize;
+        for c in 0..ch {
+            let w = bits + usize::from(ch == 2 && c == 1);
+            sub += 8 + block * w;
+        }
+        16 + sub.div_ceil(8) + 2
+    };
+    for (b, c, n) in [
+        (4_608, 2, 24),
+        (4_608, 2, 32),
+        (4_608, 1, 16),
+        (65_535, 2, 32),
+        (16_384, 2, 24),
+        (1, 1, 4),
+    ] {
+        assert_eq!(
+            verbatim_frame_bound(b, c, n),
+            independent(b, c, n),
+            "{b}/{c}/{n}"
+        );
+    }
+    assert_eq!(verbatim_frame_bound(4_608, 2, 24), 28_244);
+    assert_eq!(verbatim_frame_bound(4_608, 2, 32), 37_460);
+    assert_eq!(verbatim_frame_bound(65_535, 2, 32), 532_492);
+    // 最大块 verbatim 夹具（65535 × 2 × 32 位，独立声道）：实际帧长不超过上界。
+    let data = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/max_block_verbatim_32_stereo.flac"),
+    )
+    .unwrap_or_default();
+    // fLaC(4) + STREAMINFO 块（4 + 34）之后即为唯一一帧。
+    let frame = data.len() - (4 + 4 + 34);
+    assert!(frame <= verbatim_frame_bound(65_535, 2, 32), "{frame}");
+    // 上界不应过松：夹具为独立声道（无 side 声道的 +1 位，约 65535 / 8 字节），帧头也短于
+    // 最大 16 字节；扣除这两项后实际帧长应达到上界。
+    let slack = 65_535usize.div_ceil(8) + qy_codec_flac::MAX_FRAME_HEADER_BYTES;
+    assert!(
+        frame + slack >= verbatim_frame_bound(65_535, 2, 32),
+        "上界过松：帧 {frame}"
+    );
+    assert_eq!(
+        Capacity::for_limits(65_535, 2, 32)
+            .with_min_window(1 << 20)
+            .input_window,
+        1 << 20
+    );
+}
+
+/// 用 `cap` 解码整个文件（每次给出全部剩余输入，EOF），返回输出帧数或错误明细。
+fn decode_all(data: &[u8], cap: Capacity) -> Result<usize, qy_codec_flac::FlacError> {
+    use qy_core::{Decoder, Status};
+    let Ok(mut d) = FlacDecoder::new(cap, leak(cap.workspace_len()), leak(cap.pcm_len())) else {
+        panic!("init");
+    };
+    let (mut pos, mut frames) = (0, 0);
+    for _ in 0..16 {
+        match d.decode(&data[pos..], true) {
+            Ok(p) => {
+                pos += p.consumed;
+                match p.status {
+                    Status::Frames(n) => {
+                        frames += n;
+                        d.release(n);
+                    }
+                    Status::End => return Ok(frames),
+                    Status::NeedInput | Status::NeedOutput => {}
+                }
+            }
+            Err(_) => {
+                return Err(d
+                    .last_error()
+                    .unwrap_or(qy_codec_flac::FlacError::Unsupported));
+            }
+        }
+    }
+    panic!("未结束");
+}
+
+/// 输入窗口正好等于最大块不压缩帧的长度时解码成功，少 1 字节时返回容量错误：
+/// STREAMINFO 声明了最大帧长时在文件头即拒绝；声明为 0（未知）时在该帧处拒绝。
+#[test]
+fn window_exactly_fits_max_block_verbatim_frame() {
+    use qy_codec_flac::FlacError;
+    let data = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/max_block_verbatim_32_stereo.flac"),
+    )
+    .unwrap_or_default();
+    let frame = data.len() - (4 + 4 + 34);
+    let cap = |window| Capacity {
+        max_block: 65_535,
+        max_channels: 2,
+        input_window: window,
+    };
+    assert_eq!(decode_all(&data, cap(frame)), Ok(65_535));
+    assert_eq!(
+        decode_all(&data, cap(frame - 1)),
+        Err(FlacError::FrameTooLarge)
+    );
+    // STREAMINFO 最大帧长（偏移 4 + 4 + 7，24 位）置 0：只能在帧处发现超出窗口。
+    let mut unknown = data.clone();
+    unknown[15..18].fill(0);
+    assert_eq!(decode_all(&unknown, cap(frame)), Ok(65_535));
+    assert_eq!(
+        decode_all(&unknown, cap(frame - 1)),
+        Err(FlacError::FrameTooLarge)
     );
 }
 

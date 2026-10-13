@@ -1,23 +1,21 @@
-//! 真实路径播放模拟（M0 T4）。
+//! 真实路径播放模拟（M0 T4；M3 T1 起播放规则由 `qy_core::engine` 负责）。
 //!
-//! 数据路径全部真实：`qy-core` 状态机、自有解码（`qy-codec-auto` 按文件头选 WAV/FLAC）、
-//! pack、`rtrb` SPSC 队列。
-//! 只模拟三样东西：
+//! 数据路径全部真实：`qy-core` 引擎与状态机、自有解码（`qy-codec-auto` 按文件头选 WAV/FLAC）、
+//! pack、`rtrb` SPSC 队列。只模拟三样东西：
 //! - 文件：内存中的字节，读取长度、延迟、零长度读、读错误与打开失败由场景决定；
 //! - 时间：离散时钟，1 tick = 1 ms，生产端可被注入停顿；
 //! - 设备：每 10 ms 一个周期。[`DeviceModel::Wasapi`] 每周期整包消费
-//!   `rate / 100` 帧，不足部分补静音：已确认该格式不再有数据（EOF、换格式、失败）时
-//!   计为尾部填充，否则计为欠载；[`DeviceModel::ShortWrite`] 每周期消费随机帧数
-//!   （允许部分消费、不补零），数据不足时只记录欠载，不假设补零。
+//!   `rate / 100` 帧，不足部分补静音：已确认该格式不再有数据（排空中）时
+//!   计为尾部填充，否则计为欠载；暂停时整包输出静音并单独计数；[`DeviceModel::ShortWrite`]
+//!   每周期消费随机帧数（允许部分消费、不补零），数据不足时只记录欠载，不假设补零。
 //!
-//! 宿主规则：
-//! - 设备启动前预填当前采样率下至少 500 ms，或在播放列表结束/失败时预填全部有效帧；
-//! - 输出格式变化时先排空旧格式（设备播完最后一包有效音频）再重配置；
-//! - 播放失败时排空已入队的有效音频后停止；设备断开时立即停止核心；
-//! - 停止/重启后旧代次的读取完成不写入输入窗口，交给核心拒绝并计数。
+//! 预填、换格式排空、结束/失败排空、背压、暂停与切歌都由引擎决定；本模块只执行引擎的
+//! [`HostAction`] 并回报 [`HostEvent`]。设备复用策略为 [`ReusePolicy::Identical`]：每首曲目都
+//! 选择 V ≥ N 中最小的设备格式（专门覆盖换格式路径）。停止/重启/切歌后旧代次的读取完成不
+//! 写入输入窗口，交给核心拒绝并计数。
 
-use qy_core::{Action, DeviceFormat, Event, Fault, Generation};
-use qy_pcm_format::ring::prefill_frames;
+use qy_core::engine::{EngineFault, ErrorPolicy, HostAction, HostEvent, Poll};
+use qy_core::{DeviceFormat, Generation};
 
 use crate::SimHost;
 
@@ -25,7 +23,7 @@ use crate::SimHost;
 pub const TICK_MS: u64 = 1;
 /// 设备周期（tick）。
 pub const DEVICE_PERIOD_TICKS: u64 = 10;
-/// 单 tick 内生产端最多执行的 `poll` 次数（防止实现错误导致死循环）。
+/// 单 tick 内生产端最多执行的引擎动作数（防止实现错误导致死循环）。
 const MAX_POLLS_PER_TICK: usize = 1_000_000;
 
 /// 可复现的伪随机数（SplitMix64）。
@@ -108,6 +106,21 @@ pub struct Scenario {
     pub restart: Option<(u64, u32)>,
     /// 超时上限（tick）。
     pub max_ticks: u64,
+    /// 曲目出错时的策略（默认停止）。
+    pub on_error: ErrorPolicy,
+    /// 在指定 tick 执行的播放控制。
+    pub controls: Vec<(u64, Control)>,
+}
+
+/// 播放控制。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    Pause,
+    Resume,
+    Next,
+    Prev,
+    Goto(u32),
+    Stop,
 }
 
 /// 一次设备配置期间输出的数据。`epoch` 在每次停止重启后递增。
@@ -136,7 +149,13 @@ pub struct Underrun {
 pub struct Report {
     pub segments: Vec<Segment>,
     pub underruns: Vec<Underrun>,
-    pub fault: Option<(u32, Fault)>,
+    pub fault: Option<(u32, EngineFault)>,
+    /// 按策略跳过的曲目。
+    pub skipped: Vec<(u32, EngineFault)>,
+    /// 暂停期间设备输出的静音帧（不计欠载）。
+    pub pause_silence_frames: u64,
+    /// 已执行的播放控制（tick、控制）。
+    pub controls_done: Vec<(u64, Control)>,
     pub finished: bool,
     pub device_lost: bool,
     pub timed_out: bool,
@@ -154,10 +173,42 @@ pub struct Report {
 }
 
 impl Report {
-    /// 本次播放记录能否描述为完整保真：无欠载、无失败、无断开、未超时。
+    /// 报告摘要：设备字节（哈希）、欠载、故障、结束状态与计数。用于在重构前后逐种子比对
+    /// 结果（`QY_DIGEST=1` 时种子测试逐行打印）。故障只取核心故障本身，与引擎层包装无关。
+    pub fn digest(&self) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for s in &self.segments {
+            s.epoch.hash(&mut h);
+            format!("{:?}", s.format).hash(&mut h);
+            s.valid.hash(&mut h);
+            s.tail_padding_frames.hash(&mut h);
+        }
+        let fault = self.fault.map(|(t, f)| match f {
+            EngineFault::Core(c) => (t, format!("{c:?}")),
+            other => (t, format!("{other:?}")),
+        });
+        format!(
+            "{:x} {:?} {:?} {} {} {} {:?} {} {} {} {}",
+            h.finish(),
+            self.underruns,
+            fault,
+            self.finished,
+            self.device_lost,
+            self.stale_rejected,
+            self.restarted_at,
+            self.reads_in_flight_at_restart,
+            self.ticks,
+            self.output_errors,
+            self.protocol_errors
+        )
+    }
+
+    /// 本次播放记录能否描述为完整保真：无欠载、无失败、无跳过、无断开、未超时。
     pub fn fidelity_intact(&self) -> bool {
         self.underruns.is_empty()
             && self.fault.is_none()
+            && self.skipped.is_empty()
             && !self.device_lost
             && !self.timed_out
             && self.protocol_errors == 0
@@ -180,23 +231,13 @@ pub fn choose_device_format(
     DeviceFormat::wasapi(src.sample_rate(), src.channels(), *c, *v).ok()
 }
 
-#[derive(Debug, Clone, Copy)]
-enum After {
-    Reconfigure {
-        format: DeviceFormat,
-        generation: Generation,
-    },
-    Finish,
-    Fail,
-}
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     /// 设备未启动，正在预填。
     Prefill,
     Playing,
     /// 该格式不再有新数据，等待设备播完。
-    Draining(After),
+    Draining,
     Done,
 }
 
@@ -219,6 +260,7 @@ struct PendingRead {
 struct Device {
     format: DeviceFormat,
     running: bool,
+    paused: bool,
     frames_processed: u64,
 }
 
@@ -229,19 +271,23 @@ struct Sim<'a> {
     report: Report,
     phase: Phase,
     device: Option<Device>,
+    start_requested: bool,
     epoch: u32,
     pending: Vec<PendingRead>,
     open_track: Option<usize>,
     cursor: usize,
     packet: Vec<u8>,
+    next_control: usize,
 }
 
 /// 运行一个场景。`host` 的缓冲在多个场景间复用。
 pub fn run(host: &mut SimHost, sc: &Scenario) -> Report {
-    // 清理上一场景可能残留的状态：停止核心（旧代次）。
-    let _ = host.core.stop();
+    // 清理上一场景可能残留的状态：停止引擎（旧代次）并丢弃其控制动作。
+    host.engine.stop();
+    while host.engine.take_control().is_some() {}
+    host.engine.set_error_policy(sc.on_error);
     let count = u32::try_from(sc.tracks.len()).unwrap_or(u32::MAX);
-    host.core.play(0, count);
+    host.engine.play(0, count);
     let mut sim = Sim {
         host,
         sc,
@@ -249,13 +295,17 @@ pub fn run(host: &mut SimHost, sc: &Scenario) -> Report {
         report: Report::default(),
         phase: Phase::Prefill,
         device: None,
+        start_requested: false,
         epoch: 0,
         pending: Vec::new(),
         open_track: None,
         cursor: 0,
-        packet: vec![0u8; 2 * 192_000 / 100 * 8 * 2],
+        packet: Vec::new(),
+        next_control: 0,
     };
     sim.main_loop();
+    let stats = sim.host.engine.stats();
+    sim.report.protocol_errors += stats.protocol_errors;
     sim.report
 }
 
@@ -269,13 +319,13 @@ impl Sim<'_> {
             }
             self.inject_events(tick);
             self.deliver_reads(tick);
-            if !matches!(self.phase, Phase::Done) && !self.stalled(tick) {
+            if self.phase != Phase::Done && !self.stalled(tick) {
                 self.produce(tick);
             }
             if tick % DEVICE_PERIOD_TICKS == 0 {
                 self.device_period(tick);
             }
-            if matches!(self.phase, Phase::Done) && self.pending.is_empty() {
+            if self.phase == Phase::Done && self.pending.is_empty() {
                 break;
             }
             tick += TICK_MS;
@@ -290,18 +340,24 @@ impl Sim<'_> {
             .any(|&(start, len)| tick >= start && tick < start.saturating_add(len))
     }
 
+    /// 立即执行引擎排队的控制动作（关闭音源、停止设备等），不推进核心。
+    fn run_controls(&mut self, tick: u64) {
+        while let Some(a) = self.host.engine.take_control() {
+            self.execute(a, tick);
+        }
+    }
+
     fn inject_events(&mut self, tick: u64) {
-        if self.sc.disconnect_at == Some(tick) && !matches!(self.phase, Phase::Done) {
+        if self.sc.disconnect_at == Some(tick) && self.phase != Phase::Done {
             self.report.device_lost = true;
-            if let Some(Action::Close { .. }) = self.host.core.stop() {
-                self.open_track = None;
-            }
+            self.host.engine.device_lost();
+            self.run_controls(tick);
             if let Some(d) = self.device.as_mut() {
                 d.running = false;
             }
             self.phase = Phase::Done;
         }
-        let current = self.host.core.generation();
+        let current = self.host.engine.generation();
         let in_flight = self
             .pending
             .iter()
@@ -311,28 +367,47 @@ impl Sim<'_> {
             && self.report.restarted_at.is_none()
             && tick >= at
             && (in_flight > 0 || tick >= at + 1000)
-            && !matches!(self.phase, Phase::Done)
+            && self.phase != Phase::Done
         {
             self.report.restarted_at = Some(tick);
             self.report.reads_in_flight_at_restart = in_flight;
-            if let Some(Action::Close { .. }) = self.host.core.stop() {
-                self.open_track = None;
-            }
-            // 停止设备并丢弃队列中旧代次的已 pack 数据。
-            if let Some(d) = self.device.take()
-                && self.host.configure_device(&d.format).is_err()
-            {
-                self.report.output_errors += 1;
-            }
+            // 停止：关闭音源、停止设备并丢弃队列中旧代次的已 pack 数据。
+            self.host.engine.stop();
+            self.run_controls(tick);
             self.epoch += 1;
             self.phase = Phase::Prefill;
             let count = u32::try_from(self.sc.tracks.len()).unwrap_or(u32::MAX);
-            self.host.core.play(from, count);
+            self.host.engine.play(from, count);
+        }
+        while let Some(&(at, c)) = self.sc.controls.get(self.next_control) {
+            if at > tick || self.phase == Phase::Done {
+                break;
+            }
+            self.next_control += 1;
+            self.report.controls_done.push((tick, c));
+            let e = &mut self.host.engine;
+            match c {
+                Control::Pause => e.pause(),
+                Control::Resume => e.resume(),
+                Control::Next => e.next(),
+                Control::Prev => e.prev(),
+                Control::Goto(k) => e.skip_to(k),
+                Control::Stop => e.stop(),
+            }
+            self.run_controls(tick);
+            match c {
+                Control::Pause | Control::Resume => {}
+                Control::Next | Control::Prev | Control::Goto(_) => {
+                    self.epoch += 1;
+                    self.phase = Phase::Prefill;
+                }
+                Control::Stop => self.phase = Phase::Done,
+            }
         }
     }
 
-    fn handle(&mut self, event: Event) {
-        match self.host.core.handle(event) {
+    fn handle(&mut self, event: HostEvent) {
+        match self.host.engine.handle(event) {
             Ok(()) => {}
             Err(qy_core::CoreError::Stale) => self.report.stale_rejected += 1,
             Err(_) => self.report.protocol_errors += 1,
@@ -355,21 +430,21 @@ impl Sim<'_> {
         let event = match p.outcome {
             ReadOutcome::Data { offset, len } => {
                 // 旧代次/旧请求没有读取目标：不得写入，回报交核心拒绝。
-                if let Some(dst) = self.host.core.read_target(p.generation, p.request) {
+                if let Some(dst) = self.host.engine.read_target(p.generation, p.request) {
                     let src = &self.sc.tracks[p.track].data[offset..offset + len];
                     dst[..len].copy_from_slice(src);
                 }
-                Event::ReadDone {
+                HostEvent::ReadDone {
                     generation: p.generation,
                     request: p.request,
                     len,
                 }
             }
-            ReadOutcome::Eof => Event::ReadEof {
+            ReadOutcome::Eof => HostEvent::ReadEof {
                 generation: p.generation,
                 request: p.request,
             },
-            ReadOutcome::Error => Event::ReadFailed {
+            ReadOutcome::Error => HostEvent::ReadFailed {
                 generation: p.generation,
                 request: p.request,
             },
@@ -379,102 +454,99 @@ impl Sim<'_> {
 
     fn produce(&mut self, tick: u64) {
         for _ in 0..MAX_POLLS_PER_TICK {
-            let Some(action) = self.host.core.poll() else {
-                break;
-            };
-            if !self.execute(action, tick) {
-                break;
+            match self.host.engine.poll() {
+                Poll::Action(a) => {
+                    if !self.execute(a, tick) {
+                        break;
+                    }
+                }
+                Poll::Yield => {}
+                Poll::Wait(_) => break,
+                // 引擎不再播放（例如在最后一首时“下一首”）：场景结束。
+                Poll::Idle => {
+                    self.phase = Phase::Done;
+                    break;
+                }
             }
         }
         self.maybe_start_device(tick);
     }
 
-    /// 执行动作；返回 false 表示本 tick 生产端应让出（队列满或等待排空）。
-    fn execute(&mut self, action: Action, tick: u64) -> bool {
+    /// 执行引擎动作；返回 false 表示本 tick 生产端应让出。
+    fn execute(&mut self, action: HostAction, tick: u64) -> bool {
         match action {
-            Action::Open { generation, track } => {
+            HostAction::Open { generation, track } => {
                 let t = track as usize;
                 if self.sc.tracks.get(t).is_none_or(|t| t.open_fails) {
-                    self.handle(Event::OpenFailed { generation });
+                    self.handle(HostEvent::OpenFailed { generation });
                 } else {
                     self.open_track = Some(t);
                     self.cursor = 0;
-                    self.handle(Event::Opened { generation });
+                    self.handle(HostEvent::Opened { generation });
                 }
-                true
             }
-            Action::Read {
+            HostAction::Read {
                 generation,
                 request,
                 max,
-            } => {
-                self.issue_read(generation, request, max, tick);
-                true
-            }
-            Action::Configure { generation, format } => {
-                let Some(dev) = choose_device_format(&format, &self.sc.supported) else {
-                    self.handle(Event::ConfigureFailed { generation });
-                    return true;
-                };
-                match &self.device {
-                    Some(d) if d.format == dev => {
-                        self.handle(Event::Configured { generation });
-                        true
-                    }
-                    Some(_) => {
-                        self.phase = Phase::Draining(After::Reconfigure {
-                            format: dev,
-                            generation,
-                        });
-                        false
-                    }
-                    None => {
-                        self.setup_device(dev);
-                        self.handle(Event::Configured { generation });
-                        true
-                    }
+            } => self.issue_read(generation, request, max, tick),
+            HostAction::Close { .. } => self.open_track = None,
+            HostAction::SelectDevice { source } => {
+                match choose_device_format(&source, &self.sc.supported) {
+                    Some(format) => self.handle(HostEvent::DeviceSelected { format }),
+                    None => self.handle(HostEvent::DeviceUnsupported),
                 }
             }
-            Action::Output { generation, .. } => {
-                let pushed = match (self.host.core.pcm(), self.device.as_ref()) {
-                    (Some(pcm), Some(dev)) => {
-                        match self.host.producer.pack_push(
-                            &pcm,
-                            &dev.format,
-                            self.host.pack_scratch,
-                        ) {
-                            Ok(n) => n,
-                            Err(_) => {
-                                self.report.output_errors += 1;
-                                0
-                            }
-                        }
-                    }
-                    _ => {
-                        self.report.output_errors += 1;
-                        0
-                    }
-                };
-                self.handle(Event::Output {
-                    generation,
-                    frames: pushed,
-                });
-                pushed > 0
+            HostAction::OpenDevice { format, .. } => match format {
+                Some(f) if self.setup_device(f) => {
+                    self.handle(HostEvent::DeviceOpened { format: f })
+                }
+                Some(_) => self.handle(HostEvent::DeviceOpenFailed),
+                None => {
+                    self.report.protocol_errors += 1;
+                    self.handle(HostEvent::DeviceOpenFailed);
+                }
+            },
+            HostAction::StartDevice => self.start_requested = true,
+            HostAction::DrainDevice => {
+                self.phase = Phase::Draining;
+                if self.device.as_ref().is_some_and(|d| !d.running) {
+                    self.start_requested = true;
+                }
             }
-            Action::Close { .. } => {
-                self.open_track = None;
-                true
+            HostAction::StopDevice => {
+                // 停止设备并丢弃队列：进入新的队列代次（输出段 epoch 由停止的发起方递增）。
+                if let Some(d) = self.device.take()
+                    && self.host.configure_device(&d.format).is_err()
+                {
+                    self.report.output_errors += 1;
+                }
+                self.start_requested = false;
+                self.phase = Phase::Prefill;
             }
-            Action::Finished { .. } => {
-                self.phase = Phase::Draining(After::Finish);
-                false
+            HostAction::PauseDevice => {
+                if let Some(d) = self.device.as_mut() {
+                    d.paused = true;
+                }
             }
-            Action::Failed { track, fault, .. } => {
+            HostAction::ResumeDevice => {
+                if let Some(d) = self.device.as_mut() {
+                    d.paused = false;
+                }
+            }
+            HostAction::TrackSkipped { track, fault } => self.report.skipped.push((track, fault)),
+            HostAction::Finished => {
+                self.report.finished = true;
+                self.phase = Phase::Done;
+                return false;
+            }
+            HostAction::Failed { track, fault } => {
                 self.report.fault = Some((track, fault));
-                self.phase = Phase::Draining(After::Fail);
-                false
+                self.phase = Phase::Done;
+                return false;
             }
         }
+        true
     }
 
     fn issue_read(&mut self, generation: Generation, request: u32, max: usize, tick: u64) {
@@ -528,15 +600,22 @@ impl Sim<'_> {
         }
     }
 
-    fn setup_device(&mut self, format: DeviceFormat) {
+    /// 按设备格式重配置队列；预算不足时返回 false（明确的打开失败）。
+    fn setup_device(&mut self, format: DeviceFormat) -> bool {
         if self.host.configure_device(&format).is_err() {
-            self.report.output_errors += 1;
+            return false;
         }
         self.device = Some(Device {
             format,
             running: false,
+            paused: false,
             frames_processed: 0,
         });
+        self.start_requested = false;
+        let packet = 2 * (format.sample_rate() / 100) as usize * usize::from(format.block_align());
+        if self.packet.len() < packet {
+            self.packet.resize(packet, 0);
+        }
         self.phase = Phase::Prefill;
         self.report.segments.push(Segment {
             epoch: self.epoch,
@@ -544,34 +623,23 @@ impl Sim<'_> {
             valid: Vec::new(),
             tail_padding_frames: 0,
         });
+        true
     }
 
     fn maybe_start_device(&mut self, tick: u64) {
         let Some(dev) = self.device.as_mut() else {
-            // 从未配置输出就结束或失败：无音频需排空。
-            if let Phase::Draining(after) = self.phase {
-                self.finish_drain(after);
-            }
             return;
         };
-        if dev.running {
+        if dev.running || !self.start_requested {
             return;
         }
-        let ready = match self.phase {
-            Phase::Prefill => {
-                self.host.consumer.available_frames() as u64 >= prefill_frames(&dev.format)
-            }
-            Phase::Draining(_) => true,
-            Phase::Playing | Phase::Done => false,
-        };
-        if ready {
-            dev.running = true;
-            if matches!(self.phase, Phase::Prefill) {
-                self.phase = Phase::Playing;
-            }
-            // 启动前准备初始端点缓冲：立即处理第一个周期。
-            self.device_period(tick);
+        dev.running = true;
+        self.start_requested = false;
+        if self.phase == Phase::Prefill {
+            self.phase = Phase::Playing;
         }
+        // 启动前准备初始端点缓冲：立即处理第一个周期。
+        self.device_period(tick);
     }
 
     fn device_period(&mut self, tick: u64) {
@@ -582,18 +650,30 @@ impl Sim<'_> {
             return;
         }
         let format = dev.format;
+        let paused = dev.paused;
         let fb = usize::from(format.block_align());
         let packet_frames = (format.sample_rate() / 100) as usize;
-        let draining = match self.phase {
-            Phase::Draining(after) => Some(after),
-            _ => None,
-        };
+        let draining = self.phase == Phase::Draining;
+        if paused {
+            // 暂停：整包静音（WASAPI）或不取数（短写），单独计数，不算欠载。
+            if self.sc.device == DeviceModel::Wasapi {
+                self.report.pause_silence_frames += packet_frames as u64;
+                if let Some(d) = self.device.as_mut() {
+                    d.frames_processed += packet_frames as u64;
+                }
+            }
+            return;
+        }
         let available = self.host.consumer.available_frames();
-        if let Some(after) = draining
-            && available == 0
-        {
+        if draining && available == 0 {
             // 上一包有效音频已在上个周期播放完成。
-            self.finish_drain(after);
+            if let Some(d) = self.device.as_mut() {
+                d.running = false;
+            }
+            self.phase = Phase::Prefill;
+            self.handle(HostEvent::DeviceDrained);
+            // 排空后的动作（打开新格式、结束、失败）立即执行。
+            self.run_controls(tick);
             return;
         }
         let want = match self.sc.device {
@@ -617,14 +697,14 @@ impl Sim<'_> {
         let processed = self.device.as_ref().map_or(0, |d| d.frames_processed);
         if missing > 0 {
             match (self.sc.device, draining) {
-                (DeviceModel::Wasapi, Some(_)) => seg.tail_padding_frames += missing,
-                (_, None) => self.report.underruns.push(Underrun {
+                (DeviceModel::Wasapi, true) => seg.tail_padding_frames += missing,
+                (_, false) => self.report.underruns.push(Underrun {
                     tick,
                     device_frame: processed,
                     missing_frames: missing,
                 }),
                 // 短写后端排空时请求未满足不是欠载，也不补零。
-                (DeviceModel::ShortWrite, Some(_)) => {}
+                (DeviceModel::ShortWrite, true) => {}
             }
         }
         if let Some(d) = self.device.as_mut() {
@@ -632,23 +712,6 @@ impl Sim<'_> {
                 DeviceModel::Wasapi => want as u64,
                 DeviceModel::ShortWrite => got as u64,
             };
-        }
-    }
-
-    fn finish_drain(&mut self, after: After) {
-        if let Some(d) = self.device.as_mut() {
-            d.running = false;
-        }
-        match after {
-            After::Reconfigure { format, generation } => {
-                self.setup_device(format);
-                self.handle(Event::Configured { generation });
-            }
-            After::Finish => {
-                self.report.finished = true;
-                self.phase = Phase::Done;
-            }
-            After::Fail => self.phase = Phase::Done,
         }
     }
 }

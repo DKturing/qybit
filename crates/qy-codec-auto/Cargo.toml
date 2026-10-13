@@ -8,10 +8,16 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = ["wav", "flac"]
+# 按需链接解码器（M3 T1）：只开 `wav` 时不链接 FLAC 代码。
+wav = ["dep:qy-codec-wav"]
+flac = ["dep:qy-codec-flac"]
+
 [dependencies]
 qy-core.workspace = true
-qy-codec-wav.workspace = true
-qy-codec-flac.workspace = true
+qy-codec-wav = { workspace = true, optional = true }
+qy-codec-flac = { workspace = true, optional = true }
 
 [lints]
 workspace = true

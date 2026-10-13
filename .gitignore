@@ -1,4 +1,5 @@
 /target
+/crates/qy-mcu-demo/target
 /fuzz/target
 /fuzz/corpus
 /fuzz/artifacts

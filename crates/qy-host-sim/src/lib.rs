@@ -6,15 +6,18 @@
 //!
 //! [`sim`] 执行真实 `qy-core`、自有解码器（按文件头选择 WAV/FLAC，M1 T3）、pack 与
 //! SPSC 队列，只模拟文件、时间与设备（M0 T4）。输入窗口为 FLAC 桌面容量 1 MiB。
+//! 播放规则（预填、换格式排空、背压、暂停、切歌、出错策略）由 `qy_core::engine` 执行（M3 T1）。
 
 pub mod sim;
 
+use qy_codec_auto::profile::Profile;
 use qy_codec_auto::{AutoDecoder, AutoInitError};
 use qy_codec_flac::Capacity;
-use qy_core::{Core, CoreError, DeviceFormat, PCM_WORK_SAMPLES};
+use qy_core::engine::{Capabilities, Engine, EngineConfig, ErrorPolicy, ReusePolicy};
+use qy_core::{Core, CoreError, DeviceFormat, INPUT_WINDOW_BYTES, MAX_CHANNELS, PCM_WORK_SAMPLES};
 use qy_pcm_format::ring::{
-    DEFAULT_CAPACITY_BYTES, FrameConsumer, FrameProducer, PACK_SCRATCH_BYTES, RingError,
-    frame_ring, reconfigure,
+    BUFFER_MILLIS, DEFAULT_CAPACITY_BYTES, FrameConsumer, FrameProducer, PACK_SCRATCH_BYTES,
+    RingError, frame_ring, reconfigure_for,
 };
 
 /// 宿主初始化错误。
@@ -30,12 +33,20 @@ fn leak_zeroed<T: Copy + Default>(len: usize) -> &'static mut [T] {
     Box::leak(vec![T::default(); len].into_boxed_slice())
 }
 
+/// 模拟宿主的能力声明：采样率不设上限，声道为当前实现范围（多声道映射见 F1），
+/// 队列为默认预算，预填 500 ms。
+pub const SIM_CAPABILITIES: Capabilities = Capabilities {
+    max_rate: u32::MAX,
+    max_channels: MAX_CHANNELS,
+    max_bits: 32,
+    queue_bytes: DEFAULT_CAPACITY_BYTES,
+    prefill_ms: BUFFER_MILLIS,
+};
+
 /// 模拟宿主持有的长期资源。
 pub struct SimHost {
-    pub core: Core<AutoDecoder>,
-    /// 生产端 pack 暂存区（启动时分配一次）。
-    pub pack_scratch: &'static mut [u8],
-    pub producer: FrameProducer,
+    /// 播放引擎：持有核心、帧队列生产端与 pack 暂存区（启动时分配一次）。
+    pub engine: Engine<AutoDecoder, FrameProducer>,
     pub consumer: FrameConsumer,
     ring_generation: u64,
     regions: [(usize, usize); 5],
@@ -55,10 +66,29 @@ impl SimHost {
 
     /// 按给定 FLAC 容量一次性分配；每个实例拥有独立、不重叠的工作区。
     pub fn with_capacity(cap: Capacity) -> Result<Self, HostError> {
+        Self::build(Some(cap), SIM_CAPABILITIES, SIM_CAPABILITIES.queue_bytes)
+    }
+
+    /// 按配置档分配：FLAC 容量（未启用时不加入 FLAC 解码器）、能力声明与队列大小取自配置档；
+    /// 队列仍用 `rtrb`。
+    pub fn with_profile(profile: &Profile) -> Result<Self, HostError> {
+        Self::build(
+            profile.flac_capacity(),
+            profile.caps,
+            profile.queue_storage_bytes(),
+        )
+    }
+
+    fn build(
+        cap: Option<Capacity>,
+        caps: Capabilities,
+        queue_bytes: usize,
+    ) -> Result<Self, HostError> {
         let wav_pcm = leak_zeroed::<i32>(PCM_WORK_SAMPLES);
-        let workspace = leak_zeroed::<i64>(cap.workspace_len());
-        let flac_pcm = leak_zeroed::<i32>(cap.pcm_len());
-        let input = leak_zeroed::<u8>(cap.input_window);
+        let workspace = leak_zeroed::<i64>(cap.map_or(0, |c| c.workspace_len()));
+        let flac_pcm = leak_zeroed::<i32>(cap.map_or(0, |c| c.pcm_len()));
+        let window = cap.map_or(0, |c| c.input_window).max(INPUT_WINDOW_BYTES);
+        let input = leak_zeroed::<u8>(window);
         let pack_scratch = leak_zeroed::<u8>(PACK_SCRATCH_BYTES);
         let regions = [
             region(wav_pcm),
@@ -67,15 +97,25 @@ impl SimHost {
             region(input),
             region(pack_scratch),
         ];
-        let decoder =
-            AutoDecoder::new(wav_pcm, cap, workspace, flac_pcm).map_err(HostError::Decoder)?;
+        let decoder = AutoDecoder::empty()
+            .with_wav(wav_pcm)
+            .map_err(HostError::Decoder)?;
+        let decoder = match cap {
+            Some(c) => decoder
+                .with_flac(c, workspace, flac_pcm)
+                .map_err(HostError::Decoder)?,
+            None => decoder,
+        };
         let window = decoder.required_window();
         let core = Core::with_window(input, window, decoder).map_err(HostError::Core)?;
-        let (producer, consumer) = frame_ring(DEFAULT_CAPACITY_BYTES);
+        let (producer, consumer) = frame_ring(queue_bytes);
+        let config = EngineConfig {
+            caps,
+            reuse: ReusePolicy::Identical,
+            on_error: ErrorPolicy::Stop,
+        };
         Ok(Self {
-            core,
-            pack_scratch,
-            producer,
+            engine: Engine::new(core, producer, pack_scratch, config),
             consumer,
             ring_generation: 0,
             regions,
@@ -91,8 +131,15 @@ impl SimHost {
     /// 设备重配置：复用同一队列，核对帧宽/容量，进入新队列代次并丢弃旧数据。
     pub fn configure_device(&mut self, format: &DeviceFormat) -> Result<u64, HostError> {
         let next = self.ring_generation + 1;
-        reconfigure(&mut self.producer, &mut self.consumer, format, next)
-            .map_err(HostError::Ring)?;
+        let millis = self.engine.config().caps.prefill_ms;
+        reconfigure_for(
+            self.engine.sink_mut(),
+            &mut self.consumer,
+            format,
+            millis,
+            next,
+        )
+        .map_err(HostError::Ring)?;
         self.ring_generation = next;
         Ok(next)
     }

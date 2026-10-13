@@ -1,5 +1,5 @@
 result Unsupported
-detail Unsupported
+detail ChannelsNotImplemented
 format none
 frames 0
-origin 手写错误：3 声道（libFLAC 可解）
+origin 手写错误：3 声道：多声道尚未实现（F1，libFLAC 可解）

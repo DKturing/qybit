@@ -11,22 +11,26 @@
 
 #[cfg(feature = "ring")]
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 pub mod alsa;
 pub mod pack;
+pub mod queue;
 #[cfg(feature = "ring")]
 pub mod ring;
+#[cfg(feature = "static-queue")]
+pub mod static_queue;
 pub mod wave;
 
-/// 本阶段支持的最大声道数（M0：单/双声道）。
+/// 当前实现覆盖的声道数（单/双声道）。不是设计上限：多声道（声道映射）见 tasks/FORMATS.md F1，
+/// 在实现前多于 2 声道的源明确报告“尚未实现”。
 pub const MAX_CHANNELS: u16 = 2;
-/// 本阶段支持的最高采样率。
-pub const MAX_SAMPLE_RATE: u32 = 192_000;
 
 /// 格式构造错误。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatError {
-    /// 采样率为 0 或超出支持范围。
+    /// 采样率为 0。
     SampleRate,
     /// 声道数为 0 或超出支持范围。
     Channels,
@@ -67,7 +71,8 @@ pub struct SourceFormat {
 impl SourceFormat {
     /// 构造源格式；N 必须在 1..=32。
     pub const fn new(sample_rate: u32, channels: u16, bits: u8) -> Result<Self, FormatError> {
-        if sample_rate == 0 || sample_rate > MAX_SAMPLE_RATE {
+        // 采样率不设软件上限（AGENTS §3）；只拒绝 0，派生量溢出另行检查。
+        if sample_rate == 0 {
             return Err(FormatError::SampleRate);
         }
         if channels == 0 || channels > MAX_CHANNELS {
@@ -122,7 +127,8 @@ impl DeviceFormat {
         endian: Endian,
         placement: Placement,
     ) -> Result<Self, FormatError> {
-        if sample_rate == 0 || sample_rate > MAX_SAMPLE_RATE {
+        // 采样率不设软件上限（AGENTS §3）；只拒绝 0，派生量溢出另行检查。
+        if sample_rate == 0 {
             return Err(FormatError::SampleRate);
         }
         if channels == 0 || channels > MAX_CHANNELS {
@@ -246,9 +252,12 @@ mod tests {
             DeviceFormat::new(0, 2, 16, 16, le, p),
             Err(FormatError::SampleRate)
         );
+        // 采样率不设软件上限（M3 T1）：只有派生量溢出才拒绝。
+        assert!(DeviceFormat::new(384_000, 2, 16, 16, le, p).is_ok());
+        assert!(DeviceFormat::new(768_000, 2, 32, 32, le, p).is_ok());
         assert_eq!(
-            DeviceFormat::new(384_000, 2, 16, 16, le, p),
-            Err(FormatError::SampleRate)
+            DeviceFormat::new(u32::MAX, 2, 32, 32, le, p),
+            Err(FormatError::Overflow)
         );
         assert_eq!(
             DeviceFormat::new(48_000, 0, 16, 16, le, p),

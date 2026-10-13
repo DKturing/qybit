@@ -32,6 +32,8 @@ jobs:
       - run: cargo test --locked -p qy-codec-flac --features static-cell,test-metrics
       - run: cargo test --locked -p qy-pcm-format
       - run: cargo test --locked -p qy-pcm-format --features ring
+      - run: cargo test --locked -p qy-pcm-format --features ring,static-queue
+      - run: cargo clippy --locked -p qy-pcm-format --features ring,static-queue --all-targets -- -D warnings
       - name: 上传回环 A 层报告（file 插件）
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
@@ -54,9 +56,54 @@ jobs:
       - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-flac --features static-cell
       - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-flac --features test-metrics
       - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-auto
+      # M3 T1：静态帧队列（bbqueue）与按需链接的解码器。
+      - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-pcm-format --features static-queue
+      - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-auto --no-default-features --features wav
+      - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-auto --no-default-features --features flac
+      - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-auto --no-default-features
+      - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-pcm-format --features static-queue -- -D warnings
+      - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-codec-auto --no-default-features --features wav -- -D warnings
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-core -p qy-codec-wav -p qy-pcm-format -p qy-codec-flac -p qy-codec-auto -- -D warnings
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-codec-flac --features static-cell -- -D warnings
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-codec-flac --features test-metrics -- -D warnings
+
+  # M3 T1：MCU 资源演示（thumbv7em，引擎 + 静态队列 + 自有解码器），在 QEMU mps2-an386（Cortex-M4F）
+  # 中运行并按独立参考核对输出、统计栈高水位。这是指令集仿真，不是实机运行。
+  mcu-demo:
+    name: MCU 演示 (QEMU mps2-an386)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: sudo apt-get update && sudo apt-get install -y qemu-system-arm
+      - name: 格式与 Clippy
+        working-directory: crates/qy-mcu-demo
+        run: |
+          cargo fmt -- --check
+          cargo clippy --locked --release --target thumbv7em-none-eabihf -- -D warnings
+          cargo clippy --locked --release --target thumbv7em-none-eabihf --no-default-features --features hold -- -D warnings
+      - name: 构建 Embedded Full 与 Embedded Lite
+        working-directory: crates/qy-mcu-demo
+        run: |
+          cargo build --locked --release --target thumbv7em-none-eabihf --features hold
+          cp target/thumbv7em-none-eabihf/release/qy-mcu-demo target/qy-mcu-demo-full.elf
+          cargo build --locked --release --target thumbv7em-none-eabihf --no-default-features --features hold
+          cp target/thumbv7em-none-eabihf/release/qy-mcu-demo target/qy-mcu-demo-lite.elf
+      - name: QEMU 运行与核对
+        env:
+          QY_MCU_DEMO_REQUIRED: "1"
+          QY_MCU_DEMO_ELF: crates/qy-mcu-demo/target/qy-mcu-demo-full.elf
+          QY_MCU_DEMO_LITE_ELF: crates/qy-mcu-demo/target/qy-mcu-demo-lite.elf
+        run: cargo test --locked -p qy-host-sim --test mcu_demo -- --nocapture
+      - name: 上传 MCU 演示报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: qybit-mcu-demo
+          path: |
+            target/qybit-report/qybit-mcu-demo.txt
+            crates/qy-mcu-demo/target/qy-mcu-demo-full.elf
+            crates/qy-mcu-demo/target/qy-mcu-demo-lite.elf
+          if-no-files-found: error
 
   # Windows 宿主与 CLI 构建、测试。
   windows:

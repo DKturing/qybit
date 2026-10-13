@@ -21,11 +21,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use qy_core::engine::{EngineFault, ErrorPolicy};
 use qy_core::{DecodeError, DeviceFormat, Fault, SourceFormat};
-use qy_host_sim::SimHost;
 use qy_host_sim::sim::{
     DeviceModel, ReadModel, Report, Rng, Scenario, TrackSpec, choose_device_format, run,
 };
+use qy_host_sim::{SIM_CAPABILITIES, SimHost};
 
 const SEEDS: u64 = 1200;
 const SUPPORTED: [(u8, u8); 4] = [(16, 16), (32, 24), (24, 24), (32, 32)];
@@ -226,9 +227,12 @@ fn duration_ms(tracks: &[Track]) -> u64 {
 
 fn build_case(seed: u64, fixtures: &[Fixture]) -> Case {
     let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xF1AC);
+    // 正常曲目池只取模拟宿主能力之内的夹具；超出能力（如 384 kHz 24 位超出默认队列预算）
+    // 的拒绝由 `sim_engine` 的专门场景覆盖。
     let ok: Vec<&Fixture> = fixtures
         .iter()
         .filter(|f| f.result.is_ok() && f.name != MAX_BLOCK)
+        .filter(|f| f.format.is_some_and(|s| SIM_CAPABILITIES.check(&s).is_ok()))
         .collect();
     let errs: Vec<&Fixture> = fixtures.iter().filter(|f| f.result.is_err()).collect();
     let max_block = fixtures.iter().find(|f| f.name == MAX_BLOCK);
@@ -355,6 +359,8 @@ fn build_case(seed: u64, fixtures: &[Fixture]) -> Case {
         disconnect_at,
         restart,
         max_ticks: dur * 3 + stall_total + 100 * tracks.len() as u64 + 5_000,
+        on_error: ErrorPolicy::Stop,
+        controls: Vec::new(),
     };
     Case {
         tracks,
@@ -504,7 +510,7 @@ fn verify(case: &Case, r: &Report) -> Result<(), String> {
             fault,
             partial,
         } => {
-            if r.fault != Some((track, fault)) {
+            if r.fault != Some((track, EngineFault::Core(fault))) {
                 return Err(format!("期望故障 {:?}，实际 {:?}", (track, fault), r.fault));
             }
             if r.finished || r.fidelity_intact() {
@@ -600,6 +606,9 @@ fn flac_seeded_scenarios() {
         let _guard = SeedGuard(seed);
         let case = build_case(seed, &fixtures);
         let report = run(&mut host, &case.scenario);
+        if std::env::var_os("QY_DIGEST").is_some() {
+            println!("DIGEST {seed} {}", report.digest());
+        }
         kinds[(seed % 6) as usize] += 1;
         flac_tracks += case
             .tracks
@@ -608,7 +617,10 @@ fn flac_seeded_scenarios() {
             .count();
         stale += report.stale_rejected;
         lost += u32::from(report.device_lost);
-        if let Some((_, f)) = report.fault {
+        if let Some((_, ef)) = report.fault {
+            let EngineFault::Core(f) = ef else {
+                panic!("种子 {seed} 出现非核心故障 {ef:?}");
+            };
             *faults.entry(format!("{f:?}")).or_default() += 1;
         }
         if let Err(e) = verify(&case, &report) {

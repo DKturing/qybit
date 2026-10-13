@@ -404,7 +404,13 @@ fn decode_fault_drains_and_summary_reports_readback() {
         ..FakeAlsaConfig::default()
     });
     let (r, outs) = run(&mut b, &["err_frame_crc.flac"]);
-    assert_eq!(r.fault, Some((0, Fault::Decode(DecodeError::Malformed))));
+    assert_eq!(
+        r.fault,
+        Some((
+            0,
+            qy_core::engine::EngineFault::Core(Fault::Decode(DecodeError::Malformed))
+        ))
+    );
     assert!(outs[0].rendered == place(&flac_reference("err_frame_crc"), 16, 16));
 
     let mut b = backend(FakeAlsaConfig::default());
