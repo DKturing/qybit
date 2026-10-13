@@ -1,4 +1,4 @@
-//! 测试辅助：用真实 WAV 解码与 pack 向队列供数（仅 `cfg(test)`）。
+//! 测试辅助：夹具路径与独立参考，以及用真实 WAV 解码与 pack 向队列供数。
 
 use std::path::{Path, PathBuf};
 

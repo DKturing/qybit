@@ -240,17 +240,125 @@ impl FrameConsumer {
     }
 }
 
+impl FrameConsumer {
+    /// 短写后端：把队列首部一段连续的完整帧（至多 `max_frames` 帧）交给 `write`，
+    /// 按其返回的帧数提交；未写出的帧留在队列中，下次从同一位置继续，不重复、不丢弃。
+    /// 返回提交的帧数（`write` 返回值超过所给帧数时按所给帧数截断）。
+    ///
+    /// 不拷贝：直接借出环形缓冲的第一段。若回绕点恰好切开一个帧，则把这一帧拼到栈上的
+    /// [`MAX_FRAME_BYTES`] 字节临时区再交出。有界、不分配、不阻塞。
+    pub fn consume_contiguous(
+        &mut self,
+        max_frames: usize,
+        write: impl FnOnce(&[u8]) -> usize,
+    ) -> Result<usize, RingError> {
+        let fb = self.frame_bytes;
+        if fb == 0 {
+            return Err(RingError::NotConfigured);
+        }
+        if fb > MAX_FRAME_BYTES {
+            return Err(RingError::FrameWidth);
+        }
+        let slots = self.inner.slots();
+        let frames = (slots / fb).min(max_frames);
+        if frames == 0 {
+            return Ok(0);
+        }
+        let n = frames * fb;
+        let chunk = self
+            .inner
+            .read_chunk(n)
+            .map_err(|_| RingError::CapacityExceeded {
+                required: n,
+                capacity: slots,
+            })?;
+        let (a, b) = chunk.as_slices();
+        let given = a.len() / fb;
+        let done = if given > 0 {
+            write(&a[..given * fb]).min(given)
+        } else {
+            // 回绕点切开首帧：拼出这一帧。
+            let mut tmp = [0u8; MAX_FRAME_BYTES];
+            let split = a.len();
+            tmp[..split].copy_from_slice(a);
+            tmp[split..fb].copy_from_slice(&b[..fb - split]);
+            write(&tmp[..fb]).min(1)
+        };
+        chunk.commit(done * fb);
+        Ok(done)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Endian, Placement};
     use alloc::vec;
+    use alloc::vec::Vec;
 
     fn fmt(rate: u32, ch: u16, c: u8, v: u8) -> DeviceFormat {
         match DeviceFormat::new(rate, ch, c, v, Endian::Little, Placement::MsbAligned) {
             Ok(f) => f,
             Err(e) => panic!("{e:?}"),
         }
+    }
+
+    /// 短写：部分提交保留余下帧；回绕切开帧时拼帧交出；字节序列与入队完全一致。
+    #[test]
+    fn consume_contiguous_partial_commit_and_split_frame() {
+        // 24000 字节容量（8 kHz 双声道 C24 的 500 ms）：把读位置推进到 23998，再换 6 字节帧，
+        // 首帧被回绕切开。
+        let (mut p, mut c) = frame_ring(24_000);
+        let f4 = fmt(8_000, 2, 16, 16);
+        let f6 = fmt(8_000, 2, 24, 24);
+        assert_eq!(reconfigure(&mut p, &mut c, &f4, 1), Ok(()));
+        assert_eq!(c.consume_contiguous(1, |_| 1), Ok(0));
+        let filler = vec![0u8; 23_996];
+        assert_eq!(p.push_frames(&filler), Ok(5_999));
+        let mut sink = vec![0u8; 23_996];
+        assert_eq!(c.pop_frames(&mut sink), Ok(5_999));
+        // 读位置 23996：以 2 字节单声道帧再推进 2 字节。
+        assert_eq!(
+            reconfigure(&mut p, &mut c, &fmt(8_000, 1, 16, 16), 2),
+            Ok(())
+        );
+        assert_eq!(p.push_frames(&[0, 0]), Ok(1));
+        assert_eq!(c.pop_frames(&mut [0u8; 2]), Ok(1));
+        // 位置 23998：6 字节帧跨越回绕点（2 + 4）。
+        assert_eq!(reconfigure(&mut p, &mut c, &f6, 3), Ok(()));
+        let data: Vec<u8> = (0..60u8).collect();
+        assert_eq!(p.push_frames(&data), Ok(10));
+        let mut out = Vec::new();
+        // 第一次：首帧被切开，只交出 1 帧。
+        let n = c.consume_contiguous(10, |bytes| {
+            assert_eq!(bytes.len(), 6);
+            out.extend_from_slice(bytes);
+            1
+        });
+        assert_eq!(n, Ok(1));
+        // 第二次：连续 9 帧，只“写出” 4 帧，其余保留。
+        let n = c.consume_contiguous(10, |bytes| {
+            assert_eq!(bytes.len(), 54);
+            out.extend_from_slice(&bytes[..24]);
+            4
+        });
+        assert_eq!(n, Ok(4));
+        assert_eq!(c.available_frames(), 5);
+        // 写出 0 帧：不提交。
+        assert_eq!(c.consume_contiguous(10, |_| 0), Ok(0));
+        // 返回值超出所给帧数时截断。
+        let n = c.consume_contiguous(2, |bytes| {
+            out.extend_from_slice(bytes);
+            99
+        });
+        assert_eq!(n, Ok(2));
+        let n = c.consume_contiguous(usize::MAX, |bytes| {
+            out.extend_from_slice(bytes);
+            bytes.len() / 6
+        });
+        assert_eq!(n, Ok(3));
+        assert_eq!(out, data);
+        assert_eq!(c.available_frames(), 0);
     }
 
     #[test]

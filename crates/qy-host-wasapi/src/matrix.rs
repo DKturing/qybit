@@ -14,9 +14,10 @@ use std::path::{Path, PathBuf};
 use qy_core::DeviceFormat;
 use qy_pcm_format::wave::{WaveFormatEx, WaveFormatExtensible};
 
-use crate::HostResources;
-use crate::player::{Backend, Descriptor, Negotiation, PlaybackReport, play};
-use crate::render::{MmcssRecord, RenderEnd};
+use qy_player::render::{ErrorCode, PriorityRecord, RenderEnd};
+use qy_player::{Backend, HostResources, play};
+
+use crate::attempt::{Attempt, Descriptor, Negotiation, PlaybackReport};
 
 pub const RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
 pub const LAYOUTS: [(u8, u8); 4] = [(16, 16), (24, 24), (32, 24), (32, 32)];
@@ -176,7 +177,7 @@ pub struct MatrixEntry {
     pub aligned_retry: Option<i32>,
     pub buffer_frames: Option<u32>,
     pub period_hns: Option<i64>,
-    pub mmcss: Option<MmcssRecord>,
+    pub mmcss: Option<PriorityRecord>,
     pub playback: Playback,
     pub errors: Vec<String>,
 }
@@ -262,7 +263,7 @@ pub fn write_test_wav(
     Ok(frames)
 }
 
-fn first_attempt(n: &Negotiation) -> Option<&crate::player::Attempt> {
+fn first_attempt(n: &Negotiation) -> Option<&Attempt> {
     n.chosen
         .and_then(|i| n.attempts.get(i))
         .or(n.attempts.first())
@@ -289,10 +290,7 @@ pub fn entry_from_playback(
     if let Some(rr) = &render
         && let RenderEnd::Error(e) = rr.end
     {
-        errors.push(format!(
-            "渲染错误 {:?} HRESULT 0x{:08X}",
-            e.op, e.hresult as u32
-        ));
+        errors.push(format!("渲染错误 {:?} {}", e.op, e.code));
     }
     let playback = match render {
         Some(rr) => Playback::Played {
@@ -318,14 +316,14 @@ pub fn entry_from_playback(
         aligned_retry: attempt.and_then(|a| a.aligned_retry),
         buffer_frames: attempt.and_then(|a| a.buffer_frames),
         period_hns: attempt.and_then(|a| a.period_hns),
-        mmcss: render.map(|rr| rr.mmcss),
+        mmcss: render.map(|rr| rr.priority),
         playback,
         errors,
     }
 }
 
 /// 逐项运行矩阵。`backend_for` 为每项构造只尝试该格式与描述的后端。
-pub fn run_matrix<B: Backend>(
+pub fn run_matrix<B: Backend<Attempt = Attempt>>(
     items: &[MatrixItem],
     res: &mut HostResources,
     dir: &Path,
@@ -354,7 +352,7 @@ pub fn run_matrix<B: Backend>(
 
 /// 顺序换曲：取两个不同采样率、均已播放成功的 EXTENSIBLE 项，连续播放两首，检查
 /// 重开设备（两个流）、各流有效帧完整（无旧 PCM、尾帧不截断）、无欠载。
-pub fn run_sequential<B: Backend>(
+pub fn run_sequential<B: Backend<Attempt = Attempt>>(
     entries: &[MatrixEntry],
     res: &mut HostResources,
     dir: &Path,
@@ -464,18 +462,20 @@ fn descriptor_name(d: Descriptor) -> &'static str {
     }
 }
 
-fn mmcss_text(m: Option<MmcssRecord>) -> (Option<String>, Option<String>) {
+fn priority_code(r: Result<(), ErrorCode>) -> String {
+    match r {
+        Ok(()) => "ok".into(),
+        Err(ErrorCode::Win32(code)) => format!("error {code}"),
+        Err(other) => format!("error {other}"),
+    }
+}
+
+fn mmcss_text(m: Option<PriorityRecord>) -> (Option<String>, Option<String>) {
     match m {
         None => (None, None),
         Some(m) => (
-            Some(match m.registered {
-                Ok(()) => "ok".into(),
-                Err(code) => format!("error {code}"),
-            }),
-            m.reverted.map(|r| match r {
-                Ok(()) => "ok".into(),
-                Err(code) => format!("error {code}"),
-            }),
+            Some(priority_code(m.registered)),
+            m.reverted.map(priority_code),
         ),
     }
 }
@@ -699,7 +699,7 @@ impl MatrixReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fake::FakeBackend;
+    use crate::fake::fake_backend;
 
     fn work_dir(tag: &str) -> PathBuf {
         let d =
@@ -806,8 +806,8 @@ mod tests {
         let supported = [(16u8, 16u8), (32, 24)];
         let items = matrix_items();
         let entries = match run_matrix(&items, &mut res, &dir, |item| {
-            let mut b = FakeBackend::new(if item.rate <= 96_000 { &supported } else { &[] });
-            b.forced = Some(((item.container_bits, item.valid_bits), item.descriptor));
+            let mut b = fake_backend(if item.rate <= 96_000 { &supported } else { &[] });
+            b.negotiator.forced = Some(((item.container_bits, item.valid_bits), item.descriptor));
             b
         }) {
             Ok(e) => e,
@@ -831,7 +831,7 @@ mod tests {
                 assert!(!e.errors.is_empty());
             }
         }
-        let mut b = FakeBackend::new(&supported);
+        let mut b = fake_backend(&supported);
         let seq = match run_sequential(&entries, &mut res, &dir, &mut b) {
             Ok(Some(s)) => s,
             other => panic!("{other:?}"),
@@ -871,7 +871,8 @@ mod tests {
                     aligned_retry: None,
                     buffer_frames: Some(480),
                     period_hns: Some(100_000),
-                    mmcss: Some(MmcssRecord {
+                    mmcss: Some(PriorityRecord {
+                        label: crate::MMCSS_LABEL,
                         registered: Ok(()),
                         reverted: Some(Ok(())),
                     }),

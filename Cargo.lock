@@ -140,11 +140,9 @@ dependencies = [
 name = "qy-host-wasapi"
 version = "0.0.0"
 dependencies = [
- "qy-codec-auto",
- "qy-codec-flac",
- "qy-codec-wav",
  "qy-core",
  "qy-pcm-format",
+ "qy-player",
  "windows",
 ]
 
@@ -156,10 +154,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "qy-player"
+version = "0.0.0"
+dependencies = [
+ "qy-codec-auto",
+ "qy-codec-flac",
+ "qy-codec-wav",
+ "qy-core",
+ "qy-pcm-format",
+]
+
+[[package]]
 name = "qybit"
 version = "0.0.0"
 dependencies = [
  "qy-host-wasapi",
+ "qy-player",
 ]
 
 [[package]]

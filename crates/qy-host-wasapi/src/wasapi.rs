@@ -37,14 +37,16 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::{HRESULT, HSTRING, w};
 
-use crate::player::{
-    Attempt, Backend, Descriptor, Negotiation, OpenFailure, PendingStream, RunningStream,
-    candidates,
+use qy_player::render::packet::{PacketApi, PacketConfig, render};
+use qy_player::render::{
+    ApiError, ApiOp, ErrorCode, RenderControl, RenderReport, ThreadPriority, WaitResult,
 };
-use crate::render::{
-    ApiError, ApiOp, RenderApi, RenderConfig, RenderControl, RenderReport, ThreadPriority,
-    WaitResult, render,
-};
+use qy_player::{Backend, PendingStream, RunningStream, Submission};
+
+use crate::attempt::{Attempt, Descriptor, Negotiation, OpenFailure, candidates};
+
+/// `E_UNEXPECTED`：`GetBuffer` 成功却返回空指针时报告。
+const E_UNEXPECTED: i32 = 0x8000_FFFF_u32 as i32;
 
 /// 事件等待超时：远大于任何设备周期，超时视为设备停止送出事件。
 const EVENT_TIMEOUT_MS: u32 = 2000;
@@ -117,6 +119,7 @@ type ThreadOut = Option<(FrameConsumer, RenderReport)>;
 
 pub struct WasapiPending {
     format: DeviceFormat,
+    buffer_frames: u32,
     negotiation: Negotiation,
     go: Sender<Go>,
     handle: JoinHandle<ThreadOut>,
@@ -125,6 +128,7 @@ pub struct WasapiPending {
 pub struct WasapiRunning(JoinHandle<ThreadOut>);
 
 impl Backend for WasapiBackend {
+    type Attempt = Attempt;
     type Pending = WasapiPending;
 
     fn open(&mut self, source: &SourceFormat) -> Result<WasapiPending, OpenFailure> {
@@ -150,16 +154,16 @@ impl Backend for WasapiBackend {
         let handle =
             std::thread::spawn(move || stream_thread(&id, &source, &list, &info_tx, &go_rx));
         let failure = |message: String| OpenFailure {
-            negotiation: Negotiation {
-                source,
-                attempts: Vec::new(),
-                chosen: None,
-            },
+            negotiation: Negotiation::new(source),
             message,
         };
         match info_rx.recv() {
             Ok(Ok((format, negotiation))) => Ok(WasapiPending {
                 format,
+                buffer_frames: negotiation
+                    .chosen_attempt()
+                    .and_then(|a| a.buffer_frames)
+                    .unwrap_or(0),
                 negotiation,
                 go: go_tx,
                 handle,
@@ -177,6 +181,7 @@ impl Backend for WasapiBackend {
 }
 
 impl PendingStream for WasapiPending {
+    type Attempt = Attempt;
     type Running = WasapiRunning;
 
     fn format(&self) -> DeviceFormat {
@@ -185,6 +190,12 @@ impl PendingStream for WasapiPending {
 
     fn negotiation(&self) -> &Negotiation {
         &self.negotiation
+    }
+
+    fn submission(&self) -> Submission {
+        Submission::Packet {
+            frames: self.buffer_frames,
+        }
     }
 
     fn start(self, consumer: FrameConsumer, ctl: Arc<RenderControl>) -> WasapiRunning {
@@ -227,11 +238,7 @@ fn stream_thread(
         Ok(g) => g,
         Err(e) => {
             let _ = info.send(Err(OpenFailure {
-                negotiation: Negotiation {
-                    source: *source,
-                    attempts: Vec::new(),
-                    chosen: None,
-                },
+                negotiation: Negotiation::new(*source),
                 message: format!("CoInitializeEx 失败: {e}"),
             }));
             return None;
@@ -249,7 +256,7 @@ fn stream_thread(
     }
     // 生产端预填完成后移交消费端；若生产端放弃（通道关闭），释放流并退出。
     let (mut consumer, ctl) = go.recv().ok()?;
-    let cfg = RenderConfig {
+    let cfg = PacketConfig {
         buffer_frames: stream.buffer_frames,
         block_align: usize::from(stream.format.block_align()),
         drain_packets: DRAIN_PACKETS,
@@ -428,12 +435,12 @@ struct WasapiApi<'a> {
     block_align: usize,
 }
 
-impl RenderApi for WasapiApi<'_> {
+impl PacketApi for WasapiApi<'_> {
     fn start(&mut self) -> Result<(), ApiError> {
         // SAFETY: 客户端已初始化。
         unsafe { self.stream.client.Start() }.map_err(|e| ApiError {
             op: ApiOp::Start,
-            hresult: hr(&e),
+            code: ErrorCode::Hresult(hr(&e)),
         })
     }
 
@@ -441,7 +448,7 @@ impl RenderApi for WasapiApi<'_> {
         // SAFETY: 客户端已初始化。
         unsafe { self.stream.client.Stop() }.map_err(|e| ApiError {
             op: ApiOp::Stop,
-            hresult: hr(&e),
+            code: ErrorCode::Hresult(hr(&e)),
         })
     }
 
@@ -455,7 +462,7 @@ impl RenderApi for WasapiApi<'_> {
         } else {
             Err(ApiError {
                 op: ApiOp::Wait,
-                hresult: windows::core::Error::from_thread().code().0,
+                code: ErrorCode::Hresult(windows::core::Error::from_thread().code().0),
             })
         }
     }
@@ -467,12 +474,12 @@ impl RenderApi for WasapiApi<'_> {
         unsafe {
             let ptr = self.stream.render.GetBuffer(frames).map_err(|e| ApiError {
                 op: ApiOp::GetBuffer,
-                hresult: hr(&e),
+                code: ErrorCode::Hresult(hr(&e)),
             })?;
             if ptr.is_null() {
                 return Err(ApiError {
                     op: ApiOp::GetBuffer,
-                    hresult: crate::render::HRESULT_UNEXPECTED,
+                    code: ErrorCode::Hresult(E_UNEXPECTED),
                 });
             }
             Ok(std::slice::from_raw_parts_mut(
@@ -486,7 +493,7 @@ impl RenderApi for WasapiApi<'_> {
         // SAFETY: 与本线程上一次 GetBuffer 配对，帧数相同。
         unsafe { self.stream.render.ReleaseBuffer(frames, flags) }.map_err(|e| ApiError {
             op: ApiOp::ReleaseBuffer,
-            hresult: hr(&e),
+            code: ErrorCode::Hresult(hr(&e)),
         })
     }
 }
@@ -495,7 +502,11 @@ impl RenderApi for WasapiApi<'_> {
 struct Mmcss(Option<HANDLE>);
 
 impl ThreadPriority for Mmcss {
-    fn register(&mut self) -> Result<(), u32> {
+    fn label(&self) -> &'static str {
+        crate::MMCSS_LABEL
+    }
+
+    fn register(&mut self) -> Result<(), ErrorCode> {
         let mut task_index = 0u32;
         // SAFETY: 任务名为静态宽字符串，task_index 指向本地变量。
         match unsafe { AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index) } {
@@ -503,16 +514,17 @@ impl ThreadPriority for Mmcss {
                 self.0 = Some(h);
                 Ok(())
             }
-            Err(e) => Err(win32_code(e.code())),
+            Err(e) => Err(ErrorCode::Win32(win32_code(e.code()))),
         }
     }
 
-    fn revert(&mut self) -> Result<(), u32> {
+    fn revert(&mut self) -> Result<(), ErrorCode> {
         let Some(h) = self.0.take() else {
             return Ok(());
         };
         // SAFETY: 句柄来自本线程的 AvSetMmThreadCharacteristicsW。
-        unsafe { AvRevertMmThreadCharacteristics(h) }.map_err(|e| win32_code(e.code()))
+        unsafe { AvRevertMmThreadCharacteristics(h) }
+            .map_err(|e| ErrorCode::Win32(win32_code(e.code())))
     }
 }
 
@@ -526,7 +538,7 @@ pub fn device_matrix(
     use crate::matrix::{DeviceMeta, MatrixReport, matrix_items, run_matrix, run_sequential};
     let info = crate::endpoints::endpoint_info(device_id)
         .map_err(|e| format!("找不到设备 {device_id}: {e}"))?;
-    let mut res = crate::HostResources::new().map_err(|e| format!("资源分配失败: {e:?}"))?;
+    let mut res = qy_player::HostResources::new().map_err(|e| format!("资源分配失败: {e:?}"))?;
     std::fs::create_dir_all(work_dir).map_err(|e| e.to_string())?;
     let items = matrix_items();
     let entries = run_matrix(&items, &mut res, work_dir, |item| WasapiBackend {

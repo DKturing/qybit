@@ -8,10 +8,10 @@
 
 use std::path::PathBuf;
 
-use qy_host_wasapi::HostResources;
-use qy_host_wasapi::player::play;
-use qy_host_wasapi::render::RenderEnd;
 use qy_host_wasapi::wasapi::WasapiBackend;
+use qy_player::HostResources;
+use qy_player::play;
+use qy_player::render::RenderEnd;
 
 fn device_id() -> String {
     match std::env::var("QYBIT_DEVICE_ID") {
@@ -73,7 +73,7 @@ fn exclusive_playback_48k_16bit() {
     let Some(render) = stream.render else {
         panic!("渲染线程未返回报告");
     };
-    println!("MMCSS: {:?}", render.mmcss);
+    println!("MMCSS: {:?}", render.priority);
     assert_eq!(render.end, RenderEnd::Drained);
     assert_eq!(render.valid_frames, 48_000);
     assert_eq!(render.underrun_events, 0, "出现欠载: {render:?}");

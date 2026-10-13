@@ -13,6 +13,7 @@ name = "qybit"
 path = "src/main.rs"
 
 [dependencies]
+qy-player.workspace = true
 qy-host-wasapi.workspace = true
 
 [lints]

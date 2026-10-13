@@ -1,6 +1,7 @@
 //! QyBit 命令行入口（M0 T6）。
 //!
-//! 播放与矩阵只在 Windows（WASAPI 独占）上运行；其他平台明确报错，不做任何回退。
+//! 后端按目标平台选择：Windows 为 WASAPI 独占；Linux ALSA 在 M2 T3 加入，
+//! 在此之前其他平台明确报错，不做任何回退。播放驱动与报告来自 `qy-player`。
 //! 输出只陈述源格式、请求格式、独占协商结果、MMCSS、欠载与错误，
 //! 不宣称设备端 bit-perfect。
 
@@ -61,7 +62,7 @@ fn run(cmd: Command) -> ExitCode {
                 info.id,
                 info.name.as_deref().unwrap_or("名称未知")
             );
-            let mut res = match qy_host_wasapi::HostResources::new() {
+            let mut res = match qy_player::HostResources::new() {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("错误：资源分配失败：{e:?}");
@@ -69,7 +70,7 @@ fn run(cmd: Command) -> ExitCode {
                 }
             };
             let mut backend = qy_host_wasapi::wasapi::WasapiBackend::new(device);
-            let report = qy_host_wasapi::player::play(&mut backend, &mut res, &files);
+            let report = qy_player::play(&mut backend, &mut res, &files);
             print!("{}", report.summary());
             ExitCode::from(report.exit_code())
         }
@@ -115,6 +116,8 @@ fn run(cmd: Command) -> ExitCode {
 
 #[cfg(not(windows))]
 fn run(_cmd: Command) -> ExitCode {
-    eprintln!("错误：当前只支持 Windows WASAPI 独占输出（ALSA 在 M2 实现），本平台不播放。");
+    eprintln!(
+        "错误：当前只支持 Windows WASAPI 独占输出（Linux ALSA 在 M2 T3 实现），本平台不播放。"
+    );
     ExitCode::FAILURE
 }

@@ -21,9 +21,10 @@ jobs:
       - name: 安装工具链（rust-toolchain.toml）
         run: rustup show
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked -p qy-core -p qy-codec-wav -p qy-codec-flac -p qy-codec-auto -p qy-pcm-format -p qy-host-sim -p qy-gen-fixtures --all-targets -- -D warnings
+      - run: cargo clippy --locked -p qy-core -p qy-codec-wav -p qy-codec-flac -p qy-codec-auto -p qy-pcm-format -p qy-host-sim -p qy-player -p qy-gen-fixtures --all-targets -- -D warnings
+      - run: cargo clippy --locked -p qy-player --features test-support --all-targets -- -D warnings
       - run: cargo clippy --locked -p qy-codec-flac --features static-cell,test-metrics --all-targets -- -D warnings
-      - run: cargo test --locked -p qy-core -p qy-codec-wav -p qy-codec-auto -p qy-host-sim
+      - run: cargo test --locked -p qy-core -p qy-codec-wav -p qy-codec-auto -p qy-host-sim -p qy-player
       - run: cargo test --locked -p qy-codec-flac
       - run: cargo test --locked -p qy-codec-flac --features static-cell,test-metrics
       - run: cargo test --locked -p qy-pcm-format

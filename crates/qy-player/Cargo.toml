@@ -1,0 +1,23 @@
+[package]
+name = "qy-player"
+description = "QyBit 平台无关播放器层：宿主资源、播放驱动、整包/短写渲染循环与报告"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# 测试设施（夹具读取、独立参考、假平台 API 与假后端）；供本 crate 与各平台宿主的测试使用。
+test-support = []
+
+[dependencies]
+qy-core.workspace = true
+qy-codec-wav.workspace = true
+qy-codec-flac.workspace = true
+qy-codec-auto.workspace = true
+qy-pcm-format = { workspace = true, features = ["ring"] }
+
+[lints]
+workspace = true

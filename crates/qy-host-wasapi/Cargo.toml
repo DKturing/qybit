@@ -10,9 +10,7 @@ publish.workspace = true
 
 [dependencies]
 qy-core.workspace = true
-qy-codec-wav.workspace = true
-qy-codec-flac.workspace = true
-qy-codec-auto.workspace = true
+qy-player.workspace = true
 qy-pcm-format = { workspace = true, features = ["ring"] }
 
 # Windows SDK 绑定仅在 Windows 目标编译。
@@ -31,6 +29,9 @@ windows = { workspace = true, features = [
     "Win32_System_Variant",
     "Win32_UI_Shell_PropertiesSystem",
 ] }
+
+[dev-dependencies]
+qy-player = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true
