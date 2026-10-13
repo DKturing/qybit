@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/qy-core",
+    "crates/qy-codec-wav",
+    "crates/qy-pcm-format",
+    "crates/qy-host-sim",
+    "crates/qy-host-wasapi",
+    "crates/qyfi",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/DKturing/qybit"
+publish = false
+
+[workspace.dependencies]
+qy-core = { path = "crates/qy-core" }
+qy-codec-wav = { path = "crates/qy-codec-wav" }
+qy-pcm-format = { path = "crates/qy-pcm-format" }
+qy-host-sim = { path = "crates/qy-host-sim" }
+qy-host-wasapi = { path = "crates/qy-host-wasapi" }
+# 成熟 SPSC 环形队列：存放已 pack 的完整设备帧字节（AGENTS §2，不自行编写无锁缓冲）。
+rtrb = { version = "=0.4.0", default-features = false }
+# Windows SDK 绑定（WASAPI / COM），仅 Windows 目标使用。
+windows = { version = "=0.62.2", default-features = false }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

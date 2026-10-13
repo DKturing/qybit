@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 通用模块：Linux 与 Windows 均执行格式检查、Clippy 与测试。
+  generic:
+    name: 通用模块 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装工具链（rust-toolchain.toml）
+        run: rustup show
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked -p qy-core -p qy-codec-wav -p qy-pcm-format -p qy-host-sim --all-targets -- -D warnings
+      - run: cargo test --locked -p qy-core -p qy-codec-wav -p qy-host-sim
+      - run: cargo test --locked -p qy-pcm-format
+      - run: cargo test --locked -p qy-pcm-format --features ring
+
+  # 精简 crate 的 no_std 目标编译。
+  no-std:
+    name: no_std (thumbv7em-none-eabihf)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-core
+      - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-wav
+      - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-pcm-format
+      - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-core -p qy-codec-wav -p qy-pcm-format -- -D warnings
+
+  # Windows 宿主与 CLI 构建、测试。
+  windows:
+    name: Windows 宿主
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: cargo clippy --locked -p qy-host-wasapi -p qyfi --all-targets -- -D warnings
+      - run: cargo build --locked -p qy-host-wasapi -p qyfi
+      - run: cargo test --locked -p qy-host-wasapi -p qyfi

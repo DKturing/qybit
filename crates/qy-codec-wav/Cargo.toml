@@ -1,0 +1,15 @@
+[package]
+name = "qy-codec-wav"
+description = "QyFi 自有推送式 WAV 解码器（no_std，无 alloc）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+qy-core.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "qy-host-sim"
+description = "QyFi 模拟宿主：执行真实核心/解码/pack，仅模拟文件、时间与设备"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+qy-core.workspace = true
+qy-codec-wav.workspace = true
+qy-pcm-format = { workspace = true, features = ["ring"] }
+
+[lints]
+workspace = true

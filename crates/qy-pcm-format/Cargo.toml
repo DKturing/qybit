@@ -1,0 +1,20 @@
+[package]
+name = "qy-pcm-format"
+description = "QyFi 与平台 SDK 无关的 PCM 格式字段与纯构造函数"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# 生产端/消费端之间的设备帧字节 SPSC 队列；需要 alloc，仅宿主启用。
+ring = ["dep:rtrb"]
+
+[dependencies]
+rtrb = { workspace = true, optional = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "qyfi"
+description = "QyFi 极简本地音频播放器命令行"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "qyfi"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+qy-host-wasapi.workspace = true
+
+[lints]
+workspace = true

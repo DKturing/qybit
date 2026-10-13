@@ -1,0 +1,26 @@
+[package]
+name = "qy-host-wasapi"
+description = "QyFi Windows WASAPI 独占宿主"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+qy-core.workspace = true
+qy-codec-wav.workspace = true
+qy-pcm-format = { workspace = true, features = ["ring"] }
+
+# Windows SDK 绑定仅在 Windows 目标编译。
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "std",
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+] }
+
+[lints]
+workspace = true
