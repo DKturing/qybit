@@ -2,6 +2,8 @@
 
 QyBit Core：Rust 编写的 `no_std`、无 alloc 本地音频播放引擎，桌面播放器、CLI 与嵌入式播放器共用同一核心（定位与 MCU 缺口分析见 [docs/arch-core-mcu.md](docs/arch-core-mcu.md)）。纯本地、严格保真：不重采样、不降精度、不混音，设备不支持源格式时明确报错。
 
+软件不设人为上限：采样率、声道、位深只受格式规范、设备能力与宿主资源限制，并在播放前说明原因。当前支持无损格式 WAV、FLAC，后续无损格式路线见 [tasks/FORMATS.md](tasks/FORMATS.md)；有损格式以后以插件形式另行设计。
+
 长期规则见 [AGENTS.md](AGENTS.md)，阶段任务卡见 [tasks/](tasks/)。
 
 ## 当前状态
