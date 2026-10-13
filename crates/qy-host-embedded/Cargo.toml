@@ -1,0 +1,22 @@
+[package]
+name = "qy-host-embedded"
+description = "QyBit 通用嵌入式宿主（M3 T2）：与开发板无关，SD 卡 FAT 读取、I²S DMA 喂数、串口命令（no_std，无 alloc）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+qy-core.workspace = true
+qy-pcm-format = { workspace = true, features = ["static-queue"] }
+embedded-sdmmc.workspace = true
+
+[dev-dependencies]
+qy-codec-auto.workspace = true
+qy-codec-flac.workspace = true
+qy-fat-image = { path = "../../tools/qy-fat-image" }
+
+[lints]
+workspace = true

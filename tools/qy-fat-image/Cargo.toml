@@ -1,0 +1,17 @@
+[package]
+name = "qy-fat-image"
+description = "QyBit 测试工具：生成带 MBR 分区表的 FAT16 磁盘镜像（模拟 SD 卡），只用于测试与构建脚本"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 成熟的 FAT 格式化与写入实现（std），只用于生成测试镜像；与被测的读取路径（embedded-sdmmc）
+# 相互独立。关闭默认的 chrono 特性（时间戳写为固定值）。
+fatfs = { version = "=0.3.6", default-features = false, features = ["std", "alloc"] }
+
+[lints]
+workspace = true
