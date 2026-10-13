@@ -13,7 +13,7 @@
 //! SD 卡最坏读取延迟加余量推出后回写。
 
 use qy_core::engine::{BIP_MARGIN_FRAMES, Capabilities, PACK_SCRATCH_BYTES, queue_bytes};
-use qy_core::{INPUT_WINDOW_BYTES, MAX_CHANNELS, PCM_WORK_SAMPLES};
+use qy_core::{INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES};
 
 #[cfg(feature = "flac")]
 use qy_codec_flac::Capacity;
@@ -180,7 +180,7 @@ impl Profile {
 pub const DESKTOP: Profile =
     Profile::new("Desktop", u32::MAX, 768_000, 2, 32, 4, 500, QueueKind::Ring)
         .with_flac(Capacity::DESKTOP_MULTICHANNEL)
-        .with_max_channels(MAX_CHANNELS);
+        .with_max_channels(qy_core::MAX_CHANNELS);
 
 /// 嵌入式完整版：WAV + FLAC，≤ 96 kHz、双声道、≤ 24 位（I²S 32 位槽位），
 /// FLAC 块 ≤ 4608（[`Capacity::MCU`]），预填 250 ms（暂定），静态队列。

@@ -8,7 +8,7 @@ QyBit Core：Rust 编写的 `no_std`、无 alloc 本地音频播放引擎，桌�
 
 ## 当前状态
 
-M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wav.md)），pack 与 Windows 纯格式描述（[docs/m0-t3-pack.md](docs/m0-t3-pack.md)），真实路径模拟（[docs/m0-t4-sim.md](docs/m0-t4-sim.md)，`Action`/`Event`/`Decoder` 自此冻结），WASAPI 独占宿主（[docs/m0-t5-wasapi.md](docs/m0-t5-wasapi.md)），CLI 与真机矩阵（[docs/m0-t6-cli.md](docs/m0-t6-cli.md)）。M1 T1–T3 已实现：自有 FLAC 解码（[docs/m1-t2-flac.md](docs/m1-t2-flac.md)），libFLAC 参考核对、按文件头识别 WAV/FLAC 并接入模拟与桌面播放（[docs/m1-t3-integration.md](docs/m1-t3-integration.md)）。M2 进行中：T1 平台无关播放器层（[docs/m2-t1-player.md](docs/m2-t1-player.md)）、T2 ALSA 格式映射与参数确认（[docs/m2-t2-alsa-format.md](docs/m2-t2-alsa-format.md)）、T3 ALSA 渲染后端与 Linux CLI（[docs/m2-t3-alsa-backend.md](docs/m2-t3-alsa-backend.md)）、T4 两层数字回环（[docs/m2-t4-loopback.md](docs/m2-t4-loopback.md)：A 层 file 插件在 CI 运行；B 层 snd-aloop 未运行，CI runner 内核不含该模块）已完成；验证加强见 [tasks/M2.md](tasks/M2.md)。M3 T1 核心下沉已完成（[docs/m3-t1-engine.md](docs/m3-t1-engine.md)）：`no_std` 播放引擎（预填、换格式排空、暂停、上一首/下一首、出错跳过、能力检查）由模拟、桌面与 MCU 宿主共用，静态帧队列（bbqueue），Desktop / Embedded 配置档与 RAM 预算公式，解码器按需链接，thumbv7em 演示程序在 QEMU 中按独立参考核对通过（指令集仿真，不是实机）。M3 T2 为不绑定开发板的通用嵌入式宿主；实物验证需要用户在任一满足最低要求的板上运行，尚未运行。**真机测试尚未运行**，见下方手动步骤。GUI 见 [tasks/GUI.md](tasks/GUI.md)，在 M3 之后再做。
+M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wav.md)），pack 与 Windows 纯格式描述（[docs/m0-t3-pack.md](docs/m0-t3-pack.md)），真实路径模拟（[docs/m0-t4-sim.md](docs/m0-t4-sim.md)，`Action`/`Event`/`Decoder` 自此冻结），WASAPI 独占宿主（[docs/m0-t5-wasapi.md](docs/m0-t5-wasapi.md)），CLI 与真机矩阵（[docs/m0-t6-cli.md](docs/m0-t6-cli.md)）。M1 T1–T3 已实现：自有 FLAC 解码（[docs/m1-t2-flac.md](docs/m1-t2-flac.md)），libFLAC 参考核对、按文件头识别 WAV/FLAC 并接入模拟与桌面播放（[docs/m1-t3-integration.md](docs/m1-t3-integration.md)）。M2 进行中：T1 平台无关播放器层（[docs/m2-t1-player.md](docs/m2-t1-player.md)）、T2 ALSA 格式映射与参数确认（[docs/m2-t2-alsa-format.md](docs/m2-t2-alsa-format.md)）、T3 ALSA 渲染后端与 Linux CLI（[docs/m2-t3-alsa-backend.md](docs/m2-t3-alsa-backend.md)）、T4 两层数字回环（[docs/m2-t4-loopback.md](docs/m2-t4-loopback.md)：A 层 file 插件在 CI 运行；B 层 snd-aloop 未运行，CI runner 内核不含该模块）已完成；验证加强见 [tasks/M2.md](tasks/M2.md)。M3 T1 核心下沉已完成（[docs/m3-t1-engine.md](docs/m3-t1-engine.md)）：`no_std` 播放引擎（预填、换格式排空、暂停、上一首/下一首、出错跳过、能力检查）由模拟、桌面与 MCU 宿主共用，静态帧队列（bbqueue），Desktop / Embedded 配置档与 RAM 预算公式，解码器按需链接，thumbv7em 演示程序在 QEMU 中按独立参考核对通过（指令集仿真，不是实机）。F1 多声道已完成软件部分（[docs/f1-multichannel.md](docs/f1-multichannel.md)）：WAV EXTENSIBLE 声道掩码与 FLAC 1–8 声道（含 `WAVEFORMATEXTENSIBLE_CHANNEL_MASK` 标签）按扬声器位置保真送到设备，WASAPI 声道掩码、ALSA 声道映射设置与读回，设备顺序不同时纯置换，布局无法确认时明确拒绝；Embedded 配置档仍为双声道；真实多声道设备未运行。M3 T2 为不绑定开发板的通用嵌入式宿主；实物验证需要用户在任一满足最低要求的板上运行，尚未运行。**真机测试尚未运行**，见下方手动步骤。GUI 见 [tasks/GUI.md](tasks/GUI.md)，在 M3 之后再做。
 
 ## 工程结构
 
@@ -18,7 +18,7 @@ M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-
 | `qy-codec-wav` | 自有推送式 WAV 解码器，`no_std`、无 alloc |
 | `qy-codec-flac` | 自有推送式 FLAC 解码器（见 [docs/m1-t2-flac.md](docs/m1-t2-flac.md)），`no_std`、无 alloc；`static-cell` 特性提供 MCU 静态缓冲，`test-metrics` 特性仅供测试统计 |
 | `qy-codec-auto` | 按文件头（`RIFF`/`fLaC`）选择自有 WAV/FLAC 解码器，静态分发，`no_std`、无 alloc；`wav`/`flac` 特性按需链接；`profile` 提供 Desktop / Embedded Full / Embedded Lite 配置档与 RAM 预算 |
-| `qy-pcm-format` | 与平台 SDK 无关的格式字段、WAVEFORMATEX/EXTENSIBLE 纯描述、ALSA 格式映射/设备名/参数确认与 pack，`no_std`；设备帧队列接口与预算公式；`ring` 特性提供桌面用的 `rtrb` 队列，`static-queue` 特性提供 MCU 用的静态 `bbqueue` 队列 |
+| `qy-pcm-format` | 与平台 SDK 无关的格式字段与声道布局、WAVEFORMATEX/EXTENSIBLE 纯描述、ALSA 格式映射/设备名/参数确认/声道映射与 pack（按扬声器位置纯置换），`no_std`；设备帧队列接口与预算公式；`ring` 特性提供桌面用的 `rtrb` 队列，`static-queue` 特性提供 MCU 用的静态 `bbqueue` 队列 |
 | `qy-host-sim` | 模拟宿主：真实核心/解码/pack/队列，模拟文件、时间与设备；WAV 1000 种子与 FLAC 1200 种子场景、并发实例测试 |
 | `qy-player` | 平台无关播放器层：宿主资源、播放驱动、整包（WASAPI）与短写（ALSA）两种渲染循环、协商与播放报告；`test-support` 特性提供假平台 API 与假后端 |
 | `qy-host-wasapi` | WASAPI 独占宿主：协商记录（HRESULT）、格式矩阵，Windows 绑定仅在 Windows 目标编译；真机测试见 `tests/device.rs`（默认忽略） |
@@ -114,6 +114,6 @@ cargo test -p qy-host-wasapi --test device -- --ignored --test-threads=1 --nocap
 
 - `exclusive_playback_48k_16bit`：48 kHz/16 位双声道 1 秒独占播放。
 - `exclusive_playback_flac_44k_16bit`：自有 FLAC 解码，libFLAC 生成的 44.1 kHz/16 位双声道夹具（20000 帧）独占播放。
-- `format_matrix_and_sequential`：44.1–192 kHz × 16/16、24/24、32/24、32/32 × 单/双声道（EXTENSIBLE），16/16 另测 WAVEFORMATEX，共 60 项；再用两个不同采样率顺序换曲。生成 `qybit-device-matrix.json` / `.csv`。
+- `format_matrix_and_sequential`：44.1–192 kHz × 16/16、24/24、32/24、32/32 × 单/双声道（EXTENSIBLE），16/16 另测 WAVEFORMATEX，再加 48 kHz 多声道 3.0/4.0/5.1/5.1 侧/7.1 × 16/16、32/24（F1），共 70 项；再用两个不同采样率顺序换曲。生成 `qybit-device-matrix.json` / `.csv`。
 
 未设置 `QYBIT_DEVICE_ID` 或设备不存在时测试明确失败，不跳过。接口成功与播放统计只证明兼容与运行，不证明 DAC 输入样本逐位一致。
