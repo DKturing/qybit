@@ -89,6 +89,8 @@ const FULL: Expect = Expect {
         "pcm16_stereo_44k.wav",
         "cli_16_stereo_44k_default.flac",
         "err_frame_crc.flac",
+        "ext24in32_6ch_51.wav",
+        "cli_16_6ch_48k_51_side.flac",
         "cli_32_stereo_192k.flac",
         "cli_24_mono_96k_lpc12.flac",
         "fixed_orders_and_lpc32.flac",
@@ -122,7 +124,11 @@ const FULL: Expect = Expect {
     ],
     skipped: &[
         (2, "Core(Decode(Malformed))"),
-        (3, "Capability(Rate { rate: 192000, max: 96000 })"),
+        // F1：Embedded 为双声道。6 声道 WAV 由引擎按能力不足拒绝；6 声道 FLAC 在 STREAMINFO 处
+        // 即超出解码器的双声道容量。都不打开设备。
+        (3, "Capability(Channels { channels: 6, max: 2 })"),
+        (4, "Core(Decode(CapacityExceeded))"),
+        (5, "Capability(Rate { rate: 192000, max: 96000 })"),
     ],
     pause_periods: 50,
     has_flac: true,
@@ -132,6 +138,7 @@ const LITE: Expect = Expect {
     tracks: &[
         "pcm16_stereo_44k.wav",
         "cli_16_stereo_44k_default.flac",
+        "ext16_6ch_51_side.wav",
         "pcm24_mono_48k_odd_list.wav",
         "pcm32_stereo_96k.wav",
         "pcm16_mono_8k_fmt18.wav",
@@ -143,8 +150,9 @@ const LITE: Expect = Expect {
     skipped: &[
         // 未链接 FLAC：按 Unsupported 拒绝。
         (1, "Core(Decode(Unsupported))"),
-        (2, "Capability(Bits { bits: 24, max: 16 })"),
-        (3, "Capability(Rate { rate: 96000, max: 48000 })"),
+        (2, "Capability(Channels { channels: 6, max: 2 })"),
+        (3, "Capability(Bits { bits: 24, max: 16 })"),
+        (4, "Capability(Rate { rate: 96000, max: 48000 })"),
     ],
     pause_periods: 2,
     has_flac: false,

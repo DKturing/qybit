@@ -2,7 +2,8 @@
 //!
 //! 输入首字节作为分块/取出种子，其余为文件内容。检查：不 panic；消耗量不越界；
 //! EOF 后不返回 NeedInput；输出样本均在 N 位有符号范围内；分块输入与一次性输入的结果、
-//! 错误明细、格式与样本完全一致。工作区为桌面容量（泄漏一次，跨输入复用）。
+//! 错误明细、格式（含声道布局）与样本完全一致。工作区为桌面多声道容量（F1：最多 8 声道；
+//! 泄漏一次，跨输入复用）。
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -42,6 +43,7 @@ fn run(
                         let ch = usize::from(f.channels());
                         let avail = dec.pcm().len() / ch;
                         assert!(avail > 0 && dec.pcm().len() % ch == 0);
+                        assert_eq!(usize::from(f.layout().channels()), ch);
                         let lim = 1i64 << (f.bits() - 1);
                         let k = take(avail).clamp(1, avail);
                         for &s in &dec.pcm()[..k * ch] {
@@ -52,7 +54,7 @@ fn run(
                     }
                     Status::NeedInput => {
                         assert!(!eof, "EOF 后不得返回 NeedInput");
-                        assert!(window.len() < Capacity::DESKTOP.input_window);
+                        assert!(window.len() < Capacity::DESKTOP_MULTICHANNEL.input_window);
                         let n = chunk().clamp(1, data.len() - fed);
                         window.extend_from_slice(&data[fed..fed + n]);
                         fed += n;
@@ -67,7 +69,7 @@ fn run(
 fn decoder() -> &'static Mutex<FlacDecoder> {
     static DEC: OnceLock<Mutex<FlacDecoder>> = OnceLock::new();
     DEC.get_or_init(|| {
-        let cap = Capacity::DESKTOP;
+        let cap = Capacity::DESKTOP_MULTICHANNEL;
         let ws = Box::leak(vec![0i64; cap.workspace_len()].into_boxed_slice());
         let pcm = Box::leak(vec![0i32; cap.pcm_len()].into_boxed_slice());
         match FlacDecoder::new(cap, ws, pcm) {
@@ -101,7 +103,11 @@ fuzz_target!(|input: &[u8]| {
         },
         |n| {
             t = t.wrapping_mul(1_103_515_245).wrapping_add(12345);
-            if seed & 0x80 == 0 { n } else { (t >> 16) as usize % n + 1 }
+            if seed & 0x80 == 0 {
+                n
+            } else {
+                (t >> 16) as usize % n + 1
+            }
         },
     );
     assert_eq!(one, chunked);

@@ -108,7 +108,7 @@ fn exclusive_playback_flac_44k_16bit() {
     assert!(report.finished && report.software_path_intact());
 }
 
-/// 设备格式矩阵（60 项）与顺序换曲。报告写入 `QYBIT_REPORT_DIR`（默认 `target/qybit-report`）。
+/// 设备格式矩阵（70 项，含 F1 多声道 10 项）与顺序换曲。报告写入 `QYBIT_REPORT_DIR`（默认 `target/qybit-report`）。
 /// 设备不支持某格式是正常能力结果；凡独占初始化成功的项都必须完整播放（排空、帧数一致、无欠载）。
 #[test]
 #[ignore = "需要真实音频设备与 QYBIT_DEVICE_ID"]

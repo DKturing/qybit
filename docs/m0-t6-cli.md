@@ -6,7 +6,7 @@
 | --- | --- |
 | `qybit list-devices` | 列出活动渲染端点：每行一个 `端点ID<TAB>友好名` |
 | `qybit --device <端点ID> <文件.wav>...` | 先查询设备，不存在则明确失败；然后以 WASAPI 独占模式顺序播放并打印摘要 |
-| `qybit matrix --device <端点ID> [--out <目录>]` | 运行 60 项格式矩阵和顺序换曲，写出 JSON/CSV |
+| `qybit matrix --device <端点ID> [--out <目录>]` | 运行 60 项格式矩阵（F1 起另加 10 项多声道，共 70 项，见 docs/f1-multichannel.md）和顺序换曲，写出 JSON/CSV |
 
 - 播放必须用 `--device` 显式给出设备，不支持交互选择（AGENTS M0 范围）。
 - 退出码：0 完整播放；2 播放完成但有欠载；1 失败（设备不存在、不支持该格式、独占打开失败、设备错误、文件错误）。

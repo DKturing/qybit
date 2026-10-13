@@ -23,8 +23,8 @@ use static_cell::ConstStaticCell;
 use qy_codec_auto::AutoDecoder;
 use qy_codec_auto::profile::{Budget, Profile};
 use qy_core::engine::{
-    Engine, EngineConfig, EngineFault, ErrorPolicy, FrameSource, HostAction, HostEvent,
-    MAX_FRAME_BYTES, Poll, ReusePolicy, Wait,
+    Engine, EngineConfig, EngineFault, ErrorPolicy, FrameSource, HostAction, HostEvent, Poll,
+    ReusePolicy, Wait,
 };
 use qy_core::{Core, DeviceFormat, PCM_WORK_SAMPLES, SourceFormat};
 use qy_pcm_format::static_queue::{StaticConsumer, StaticFrameQueue, StaticProducer, reconfigure};
@@ -42,6 +42,8 @@ const WINDOW: usize = BUDGET.input_window;
 const SECTOR: usize = 512;
 /// 每个 DMA 半缓冲的帧数。
 const DMA_FRAMES: usize = 256;
+/// 本机最大设备帧字节数：配置档最多声道 × C32（F1：缓冲按配置档推出，不按布局上限 18 声道）。
+const FRAME_BYTES: usize = PROFILE.caps.max_channels as usize * 4;
 /// 串口命令脚本：在第几个时钟周期（一个 DMA 半缓冲时长）暂停、恢复（Lite 的播放列表很短，
 /// 提前暂停）。
 #[cfg(feature = "full")]
@@ -57,8 +59,8 @@ static QUEUE: StaticFrameQueue<QUEUE_BYTES> = StaticFrameQueue::new();
 static INPUT: ConstStaticCell<[u8; WINDOW]> = ConstStaticCell::new([0; WINDOW]);
 static WAV_PCM: ConstStaticCell<[i32; PCM_WORK_SAMPLES]> =
     ConstStaticCell::new([0; PCM_WORK_SAMPLES]);
-static DMA_BUF: ConstStaticCell<[u8; DMA_FRAMES * MAX_FRAME_BYTES]> =
-    ConstStaticCell::new([0; DMA_FRAMES * MAX_FRAME_BYTES]);
+static DMA_BUF: ConstStaticCell<[u8; DMA_FRAMES * FRAME_BYTES]> =
+    ConstStaticCell::new([0; DMA_FRAMES * FRAME_BYTES]);
 
 #[cfg(feature = "full")]
 mod flac_buffers {
@@ -81,6 +83,8 @@ static CARD: &[(&str, &[u8])] = card![
     "qy-codec-wav" / "pcm16_stereo_44k.wav",
     "qy-codec-flac" / "cli_16_stereo_44k_default.flac",
     "qy-codec-flac" / "err_frame_crc.flac",
+    "qy-codec-wav" / "ext24in32_6ch_51.wav",
+    "qy-codec-flac" / "cli_16_6ch_48k_51_side.flac",
     "qy-codec-flac" / "cli_32_stereo_192k.flac",
     "qy-codec-flac" / "cli_24_mono_96k_lpc12.flac",
     "qy-codec-flac" / "fixed_orders_and_lpc32.flac",
@@ -90,6 +94,7 @@ static CARD: &[(&str, &[u8])] = card![
 static CARD: &[(&str, &[u8])] = card![
     "qy-codec-wav" / "pcm16_stereo_44k.wav",
     "qy-codec-flac" / "cli_16_stereo_44k_default.flac",
+    "qy-codec-wav" / "ext16_6ch_51_side.wav",
     "qy-codec-wav" / "pcm24_mono_48k_odd_list.wav",
     "qy-codec-wav" / "pcm32_stereo_96k.wav",
     "qy-codec-wav" / "pcm16_mono_8k_fmt18.wav",
@@ -126,7 +131,7 @@ const MAX_SKIPPED: usize = 8;
 struct Host {
     engine: Engine<AutoDecoder, StaticProducer<QUEUE_BYTES>>,
     consumer: StaticConsumer<QUEUE_BYTES>,
-    dma: &'static mut [u8; DMA_FRAMES * MAX_FRAME_BYTES],
+    dma: &'static mut [u8; DMA_FRAMES * FRAME_BYTES],
     open: Option<usize>,
     cursor: usize,
     ring_generation: u64,

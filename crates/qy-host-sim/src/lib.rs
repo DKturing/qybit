@@ -33,8 +33,8 @@ fn leak_zeroed<T: Copy + Default>(len: usize) -> &'static mut [T] {
     Box::leak(vec![T::default(); len].into_boxed_slice())
 }
 
-/// 模拟宿主的能力声明：采样率不设上限，声道为当前实现范围（多声道映射见 F1），
-/// 队列为默认预算，预填 500 ms。
+/// 模拟宿主回归场景的能力声明：采样率不设上限，双声道（多声道场景见
+/// `tests/sim_multichannel.rs`，用配置档声明能力），队列为默认预算，预填 500 ms。
 pub const SIM_CAPABILITIES: Capabilities = Capabilities {
     max_rate: u32::MAX,
     // 回归场景的能力保持双声道（F1 前的种子结果逐种子可比）；多声道场景用 `with_profile`。

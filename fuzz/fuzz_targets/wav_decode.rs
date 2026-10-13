@@ -1,16 +1,22 @@
 //! WAV 解码 fuzz 目标（M0 T2）。
 //!
 //! 输入首字节作为分块种子，其余为文件内容。检查：不 panic；消耗量不越界；
-//! EOF 后不返回 NeedInput；分块输入与一次性输入的样本、结果、格式完全一致。
+//! EOF 后不返回 NeedInput；分块输入与一次性输入的样本、结果、拒绝明细、格式（含声道布局，F1）
+//! 完全一致。
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use qy_codec_wav::WavDecoder;
+use qy_codec_wav::{WavDecoder, WavDetail};
 use qy_core::{DecodeError, Decoder, PCM_WORK_SAMPLES, SourceFormat, Status};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
-type Outcome = (Result<(), DecodeError>, Option<SourceFormat>, Vec<i32>);
+type Outcome = (
+    Result<(), DecodeError>,
+    Option<WavDetail>,
+    Option<SourceFormat>,
+    Vec<i32>,
+);
 
 fn run(dec: &mut WavDecoder, data: &[u8], mut chunk: impl FnMut() -> usize) -> Outcome {
     dec.reset();
@@ -20,7 +26,7 @@ fn run(dec: &mut WavDecoder, data: &[u8], mut chunk: impl FnMut() -> usize) -> O
     loop {
         let eof = fed == data.len();
         match dec.decode(&window, eof) {
-            Err(e) => return (Err(e), dec.format(), out),
+            Err(e) => return (Err(e), dec.last_detail(), dec.format(), out),
             Ok(p) => {
                 assert!(p.consumed <= window.len());
                 window.drain(..p.consumed);
@@ -28,6 +34,14 @@ fn run(dec: &mut WavDecoder, data: &[u8], mut chunk: impl FnMut() -> usize) -> O
                     Status::Frames(_) | Status::NeedOutput => {
                         let n = dec.pcm().len();
                         assert!(n > 0);
+                        let Some(f) = dec.format() else {
+                            panic!("有 PCM 却无格式");
+                        };
+                        assert_eq!(n % usize::from(f.channels()), 0);
+                        assert_eq!(
+                            usize::from(f.layout().channels()),
+                            usize::from(f.channels())
+                        );
                         out.extend_from_slice(dec.pcm());
                         dec.release(usize::MAX);
                     }
@@ -37,7 +51,7 @@ fn run(dec: &mut WavDecoder, data: &[u8], mut chunk: impl FnMut() -> usize) -> O
                         window.extend_from_slice(&data[fed..fed + n]);
                         fed += n;
                     }
-                    Status::End => return (Ok(()), dec.format(), out),
+                    Status::End => return (Ok(()), dec.last_detail(), dec.format(), out),
                 }
             }
         }
