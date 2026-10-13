@@ -9,7 +9,7 @@
 //! 在 T4 验收前仍可调整。
 #![no_std]
 
-pub use qy_pcm_format::{DeviceFormat, SourceFormat};
+pub use qy_pcm_format::{DeviceFormat, MAX_CHANNELS, MAX_SAMPLE_RATE, SourceFormat};
 
 /// M0 默认输入窗口字节数。
 pub const INPUT_WINDOW_BYTES: usize = 8192;
@@ -177,6 +177,23 @@ impl<D: Decoder> Core<D> {
 
     pub fn source_eof(&self) -> bool {
         self.source_eof
+    }
+
+    pub fn decoder_mut(&mut self) -> &mut D {
+        &mut self.decoder
+    }
+
+    /// 用已缓冲输入驱动解码器一次，并从窗口头部移除已消耗字节。
+    /// 源 EOF 已确认时以 `eof = true` 调用，解码器据此区分截断与缺输入。
+    pub fn decode(&mut self) -> Result<Progress, DecodeError> {
+        let progress = self
+            .decoder
+            .decode(&self.input[..self.filled], self.source_eof)?;
+        debug_assert!(progress.consumed <= self.filled, "解码器消耗超出输入");
+        let consumed = progress.consumed.min(self.filled);
+        self.input.copy_within(consumed..self.filled, 0);
+        self.filled -= consumed;
+        Ok(progress)
     }
 
     /// 开始播放第 `track` 首：进入新代次，复用输入窗口和解码器。

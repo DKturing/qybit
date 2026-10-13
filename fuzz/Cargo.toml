@@ -1,0 +1,24 @@
+[package]
+name = "qy-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# 独立 workspace：fuzz 需要 nightly 与 libFuzzer，不进入主 workspace 的常规检查。
+[workspace]
+
+[dependencies]
+# libFuzzer 绑定，仅用于 fuzz。
+libfuzzer-sys = "=0.4.10"
+qy-core = { path = "../crates/qy-core" }
+qy-codec-wav = { path = "../crates/qy-codec-wav" }
+
+[[bin]]
+name = "wav_decode"
+path = "fuzz_targets/wav_decode.rs"
+test = false
+doc = false
+bench = false

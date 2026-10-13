@@ -48,3 +48,22 @@ jobs:
       - run: cargo clippy --locked -p qy-host-wasapi -p qyfi --all-targets -- -D warnings
       - run: cargo build --locked -p qy-host-wasapi -p qyfi
       - run: cargo test --locked -p qy-host-wasapi -p qyfi
+
+  # WAV 解码 fuzz 冒烟（60 秒，以夹具为初始语料）。正式 10 分钟记录见 docs/m0-t2-wav.md。
+  fuzz-smoke:
+    name: fuzz 冒烟 (wav_decode)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly-2026-10-12 --profile minimal
+      - run: cargo +nightly-2026-10-12 install cargo-fuzz --version 0.13.2 --locked
+      - name: 生成初始语料
+        run: |
+          mkdir -p fuzz/corpus/wav_decode
+          for f in crates/qy-codec-wav/tests/fixtures/*.wav; do
+            n=$(basename "$f")
+            (printf '\x00'; cat "$f") > "fuzz/corpus/wav_decode/$n.s0"
+            (printf '\x07'; cat "$f") > "fuzz/corpus/wav_decode/$n.s7"
+          done
+      - working-directory: fuzz
+        run: cargo +nightly-2026-10-12 fuzz run wav_decode -- -max_total_time=60 -max_len=65536 -seed=1

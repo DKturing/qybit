@@ -1,0 +1,14 @@
+result Truncated
+format 44100 1 16
+mask none
+samples 10
+32767
+-32768
+0
+-1
+1
+32766
+-32767
+30046
+12406
+-4133

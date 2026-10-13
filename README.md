@@ -6,7 +6,7 @@ Rust 极简本地音频播放器。纯本地、严格保真：不重采样、不
 
 ## 当前状态
 
-M0 T1（工程骨架）。尚不能播放音频：WAV 解码（T2）、pack 与 Windows 格式描述（T3）、模拟验证（T4）、WASAPI 独占播放（T5）、CLI 播放（T6）均未实现。
+M0 T2 已完成：自有推送式 WAV 解码（见 [docs/m0-t2-wav.md](docs/m0-t2-wav.md)）。尚不能播放音频：pack 与 Windows 格式描述（T3）、模拟验证（T4）、WASAPI 独占播放（T5）、CLI 播放（T6）均未实现。
 
 ## 工程结构
 
@@ -34,3 +34,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --target thumbv7em-none-eabihf -p qy-core -p qy-codec-wav -p qy-pcm-format
 ```
+
+WAV 测试夹具由 `python3 tools/gen_wav_fixtures.py` 生成（需要 ffmpeg），fuzz 步骤见 [docs/m0-t2-wav.md](docs/m0-t2-wav.md)。
+
+| fuzz 依赖 | 版本 | 用途 |
+| --- | --- | --- |
+| `libfuzzer-sys` | =0.4.10 | libFuzzer 绑定，仅 `fuzz/`（独立 workspace，nightly） |
