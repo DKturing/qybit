@@ -148,6 +148,15 @@ impl FrameProducer {
         self.frame_bytes
     }
 
+    /// 生产端视角的已入队完整帧数（消费端可能同时取走，结果只会偏大）。
+    pub fn queued_frames_hint(&self) -> usize {
+        let capacity = self.inner.buffer().capacity();
+        capacity
+            .saturating_sub(self.inner.slots())
+            .checked_div(self.frame_bytes)
+            .unwrap_or(0)
+    }
+
     /// 可写入的完整帧数。
     pub fn free_frames(&self) -> usize {
         self.inner
