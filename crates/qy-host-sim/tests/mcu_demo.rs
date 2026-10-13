@@ -1,5 +1,6 @@
-//! M3 T1：MCU 资源演示程序（`crates/qy-mcu-demo`，thumbv7em）在 QEMU `mps2-an386`（Cortex-M4F）中
-//! 运行的结果核对。这是指令集仿真，不是实机运行。
+//! M3 T1/T2：MCU 演示程序（`crates/qy-mcu-demo`，thumbv7em：通用嵌入式宿主 `qy-host-embedded`、
+//! 闪存中的 FAT16 “SD 卡”镜像、软件模拟 DMA 与串口命令脚本）在 QEMU `mps2-an386`（Cortex-M4F）
+//! 中运行的结果核对。这是指令集仿真，不是实机运行。
 //!
 //! 需要先构建带 `hold` 特性的演示程序，并通过环境变量给出 ELF 路径：
 //! - `QY_MCU_DEMO_ELF`：Embedded Full（默认特性 + `hold`）；
@@ -77,7 +78,8 @@ fn fnv(bytes: &[u8]) -> u64 {
 type SegSpec = (u32, u16, u32, u32, &'static [(&'static str, u32)]);
 
 struct Expect {
-    tracks: &'static [&'static str],
+    /// （FAT 短文件名，夹具文件）：播放列表由 `ls` 命令的回应核对。
+    tracks: &'static [(&'static str, &'static str)],
     segments: &'static [SegSpec],
     skipped: &'static [(u32, &'static str)],
     pause_periods: u32,
@@ -86,15 +88,15 @@ struct Expect {
 
 const FULL: Expect = Expect {
     tracks: &[
-        "pcm16_stereo_44k.wav",
-        "cli_16_stereo_44k_default.flac",
-        "err_frame_crc.flac",
-        "ext24in32_6ch_51.wav",
-        "cli_16_6ch_48k_51_side.flac",
-        "cli_32_stereo_192k.flac",
-        "cli_24_mono_96k_lpc12.flac",
-        "fixed_orders_and_lpc32.flac",
-        "pcm24_mono_48k_odd_list.wav",
+        ("T01.WAV", "pcm16_stereo_44k.wav"),
+        ("T02.FLA", "cli_16_stereo_44k_default.flac"),
+        ("T03.FLA", "err_frame_crc.flac"),
+        ("T04.WAV", "ext24in32_6ch_51.wav"),
+        ("T05.FLA", "cli_16_6ch_48k_51_side.flac"),
+        ("T06.FLA", "cli_32_stereo_192k.flac"),
+        ("T07.FLA", "cli_24_mono_96k_lpc12.flac"),
+        ("T08.FLA", "fixed_orders_and_lpc32.flac"),
+        ("T09.WAV", "pcm24_mono_48k_odd_list.wav"),
     ],
     segments: &[
         // WAV 16 → FLAC 16 → CRC 错误前已校验的 512 帧：同格式共用一个设备段。
@@ -136,12 +138,12 @@ const FULL: Expect = Expect {
 
 const LITE: Expect = Expect {
     tracks: &[
-        "pcm16_stereo_44k.wav",
-        "cli_16_stereo_44k_default.flac",
-        "ext16_6ch_51_side.wav",
-        "pcm24_mono_48k_odd_list.wav",
-        "pcm32_stereo_96k.wav",
-        "pcm16_mono_8k_fmt18.wav",
+        ("T01.WAV", "pcm16_stereo_44k.wav"),
+        ("T02.FLA", "cli_16_stereo_44k_default.flac"),
+        ("T03.WAV", "ext16_6ch_51_side.wav"),
+        ("T04.WAV", "pcm24_mono_48k_odd_list.wav"),
+        ("T05.WAV", "pcm32_stereo_96k.wav"),
+        ("T06.WAV", "pcm16_mono_8k_fmt18.wav"),
     ],
     segments: &[
         (44_100, 2, 16, 16, &[("pcm16_stereo_44k.wav", 16)]),
@@ -363,12 +365,42 @@ fn check(tag: &str, elf: &Path, e: &Expect, report: &mut String) {
         lines.iter().any(|l| l == "QYBIT-DONE code=0"),
         "{tag}: {lines:#?}"
     );
-    let tracks: Vec<&str> = lines
+    // 播放列表：`ls` 命令回应的 `TRACK i 名称` 行（FAT 根目录按短文件名排序）。
+    assert!(
+        lines
+            .iter()
+            .any(|l| *l == format!("OK ls tracks={}", e.tracks.len())),
+        "{tag}: ls 回应"
+    );
+    let tracks: Vec<String> = lines
         .iter()
-        .filter_map(|l| l.strip_prefix("QYBIT-TRACK "))
-        .filter_map(|l| l.split(" name=").nth(1))
+        .filter_map(|l| l.strip_prefix("TRACK "))
+        .map(str::to_owned)
         .collect();
-    assert_eq!(tracks, e.tracks, "{tag}: 播放列表");
+    let want_tracks: Vec<String> = e
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(i, (fat, _))| format!("{i} {fat}"))
+        .collect();
+    assert_eq!(tracks, want_tracks, "{tag}: 播放列表");
+    for cmd in ["OK play from=0", "OK pause", "OK resume"] {
+        assert!(lines.iter().any(|l| l == cmd), "{tag}: 缺少回应 {cmd}");
+    }
+    let Some(status) = lines.iter().find(|l| l.starts_with("STATUS ")) else {
+        panic!("{tag}: 缺少状态行");
+    };
+    for want in [
+        "state=stopped",
+        "underruns=0",
+        "read_errors=0",
+        "open_errors=0",
+        "output_errors=0",
+        "feeder_errors=0",
+        "protocol_errors=0",
+    ] {
+        assert!(status.contains(want), "{tag}: {status}");
+    }
     let segs: Vec<&String> = lines
         .iter()
         .filter(|l| l.starts_with("QYBIT-SEG"))
@@ -431,7 +463,8 @@ fn check(tag: &str, elf: &Path, e: &Expect, report: &mut String) {
 fn mcu_demo_in_qemu() {
     let required = std::env::var_os("QY_MCU_DEMO_REQUIRED").is_some();
     let mut report = String::from(
-        "QyBit MCU 演示（M3 T1）：QEMU mps2-an386（Cortex-M4F）指令集仿真结果，不是实机运行。\n\n",
+        "QyBit MCU 演示（M3 T1/T2）：QEMU mps2-an386（Cortex-M4F）指令集仿真结果，不是实机运行；\
+         读卡与解码时序为名义值，不是实测。\n\n",
     );
     let mut ran = 0;
     for (tag, var, e) in [

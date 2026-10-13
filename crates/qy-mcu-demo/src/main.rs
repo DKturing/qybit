@@ -1,34 +1,44 @@
-//! QyBit MCU 资源演示（M3 T1）。
+//! QyBit MCU 演示（M3 T1/T2）。
 //!
-//! thumbv7em（Cortex-M4F/M7）上的 `no_std` 纯软件宿主，与桌面/模拟宿主共用同一个播放引擎
-//! （`qy_core::engine`）、自有解码器与 pack，只把 I/O 换成：
-//! - **“SD 卡”**：编译进闪存的测试夹具，每次读取至多 512 字节（一个扇区）；
-//! - **“I²S DMA”**：每个 DMA 半缓冲周期从静态帧队列（`bbqueue`）取出至多 256 帧并累加校验和，
-//!   只做有界搬运；设备格式为 I²S 32 位槽位：N ≤ 16 用 16/16，否则 32/24（左对齐）。
+//! thumbv7em（Cortex-M4F/M7）上运行通用嵌入式宿主 `qy-host-embedded`，与桌面/模拟宿主共用同一个
+//! 播放引擎（`qy_core::engine`）、自有解码器与 pack。本程序就是一个“板级适配”，只是外设是软件模拟的：
+//! - **SD 卡**：构建时生成的 FAT16 镜像（MBR + 分区，`build.rs`），编进闪存，实现
+//!   `embedded_sdmmc::BlockDevice`；播放列表由 `embedded-sdmmc` 扫描根目录得到；
+//! - **I²S DMA**：主循环空闲时推进一个 DMA 缓冲周期，在临界区里调用 `Feeder::fill`（与真实板子
+//!   在 DMA 完成中断里调用的是同一个函数），对每个缓冲的有效数据累加校验和；
+//!   设备格式为 I²S 32 位槽位：N ≤ 16 用 16/16，否则 32/24（左对齐）；
+//! - **串口**：按时钟周期把命令脚本（`ls`、`play`、`pause`、`resume`、`status`）逐字节送入行缓冲，
+//!   回应经半主机打印。
 //!
 //! 所有大缓冲都是静态分配（`ConstStaticCell` 与静态队列，位于 `.bss`），容量由配置档按公式算出：
 //! 默认 `full` 特性为 Embedded Full（WAV + FLAC，≤ 96 kHz / 24 位），关闭后为 Embedded Lite
-//! （只链接 WAV，≤ 48 kHz / 16 位）。播放中按脚本暂停/恢复一次，出错的曲目按策略跳过。
+//! （只链接 WAV，≤ 48 kHz / 16 位）。
 //!
 //! 结果经半主机打印：每个设备段的格式、帧数与 FNV-1a 64 校验和，跳过的曲目及原因，统计与预算。
 //! 宿主测试 `qy-host-sim/tests/mcu_demo.rs` 在 QEMU 中运行本程序，按独立参考核对校验和，
-//! 并读取内存统计栈用量。这是指令集仿真，不是实机运行。
+//! 并读取内存统计栈用量。这是指令集仿真，不是实机运行；读卡与解码时序是名义值，不是实测。
 #![no_std]
 #![no_main]
 
+use core::cell::{Cell, RefCell};
+use core::fmt;
+
+use cortex_m::interrupt::{self, Mutex};
 use cortex_m_rt::entry;
-use cortex_m_semihosting::{debug, hprintln};
+use cortex_m_semihosting::{debug, hprint, hprintln};
+use embedded_sdmmc::{Block, BlockCount, BlockDevice, BlockIdx};
 use static_cell::ConstStaticCell;
 
 use qy_codec_auto::AutoDecoder;
 use qy_codec_auto::profile::{Budget, Profile};
-use qy_core::engine::{
-    Engine, EngineConfig, EngineFault, ErrorPolicy, FrameSource, HostAction, HostEvent, Poll,
-    ReusePolicy, Wait,
-};
-use qy_core::{Core, DeviceFormat, PCM_WORK_SAMPLES, SourceFormat};
-use qy_pcm_format::static_queue::{StaticConsumer, StaticFrameQueue, StaticProducer, reconfigure};
-use qy_pcm_format::{Endian, Placement, frames_for_millis};
+use qy_core::engine::{Engine, EngineConfig, ErrorPolicy, ReusePolicy};
+use qy_core::{Core, DeviceFormat, PCM_WORK_SAMPLES};
+use qy_host_embedded::budget::{Demand, Load};
+use qy_host_embedded::output::{AudioOutput, OutputCaps, SlotFormat};
+use qy_host_embedded::player::{Notice, Player, Step, write_parse_error, write_status};
+use qy_host_embedded::{FatStorage, Feeder, FeederAccess, LineBuffer, NoClock};
+use qy_pcm_format::static_queue::StaticFrameQueue;
+use qy_pcm_format::{Endian, Placement};
 
 #[cfg(feature = "full")]
 const PROFILE: Profile = qy_codec_auto::profile::EMBEDDED_FULL;
@@ -38,22 +48,30 @@ const BUDGET: Budget = PROFILE.budget();
 
 const QUEUE_BYTES: usize = BUDGET.queue;
 const WINDOW: usize = BUDGET.input_window;
-/// “SD 卡”每次读取的最大字节数。
-const SECTOR: usize = 512;
-/// 每个 DMA 半缓冲的帧数。
+/// 主循环每步至多读取的字节数（一个扇区）。
+const READ_CHUNK: u32 = 512;
+/// 每个 DMA 缓冲的帧数。
 const DMA_FRAMES: usize = 256;
-/// 本机最大设备帧字节数：配置档最多声道 × C32（F1：缓冲按配置档推出，不按布局上限 18 声道）。
+/// 本机最大设备帧字节数：配置档最多声道 × C32。
 const FRAME_BYTES: usize = PROFILE.caps.max_channels as usize * 4;
-/// 串口命令脚本：在第几个时钟周期（一个 DMA 半缓冲时长）暂停、恢复（Lite 的播放列表很短，
-/// 提前暂停）。
+/// 播放列表上限。
+const MAX_TRACKS: usize = 16;
+
+/// 串口命令脚本：（时钟周期，命令行）。时钟为 DMA 缓冲周期（含设备空闲时的等待）。
 #[cfg(feature = "full")]
-const PAUSE_AT: u32 = 100;
-#[cfg(feature = "full")]
-const RESUME_AT: u32 = 150;
+const SCRIPT: [(u32, &[u8]); 4] = [
+    (0, b"ls\r\n"),
+    (0, b"play\r\n"),
+    (100, b"pause\r\n"),
+    (150, b"resume\r\n"),
+];
 #[cfg(not(feature = "full"))]
-const PAUSE_AT: u32 = 2;
-#[cfg(not(feature = "full"))]
-const RESUME_AT: u32 = 4;
+const SCRIPT: [(u32, &[u8]); 4] = [
+    (0, b"ls\r\n"),
+    (0, b"play\r\n"),
+    (2, b"pause\r\n"),
+    (4, b"resume\r\n"),
+];
 
 static QUEUE: StaticFrameQueue<QUEUE_BYTES> = StaticFrameQueue::new();
 static INPUT: ConstStaticCell<[u8; WINDOW]> = ConstStaticCell::new([0; WINDOW]);
@@ -71,34 +89,76 @@ mod flac_buffers {
     pub static PCM_BUF: ConstStaticCell<[i32; PCM]> = ConstStaticCell::new([0; PCM]);
 }
 
-macro_rules! card {
-    ($($dir:literal / $name:literal),* $(,)?) => {
-        &[$(($name, include_bytes!(concat!("../../", $dir, "/tests/fixtures/", $name)))),*]
-    };
+/// “SD 卡”镜像（构建时生成，见 `build.rs`）。
+static CARD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/card.img"));
+
+// ---- 板级：块设备 ----
+
+/// 闪存中的“SD 卡”。
+struct FlashCard {
+    reads: Cell<u32>,
 }
 
-/// “SD 卡”上的播放列表（文件名，内容）。
-#[cfg(feature = "full")]
-static CARD: &[(&str, &[u8])] = card![
-    "qy-codec-wav" / "pcm16_stereo_44k.wav",
-    "qy-codec-flac" / "cli_16_stereo_44k_default.flac",
-    "qy-codec-flac" / "err_frame_crc.flac",
-    "qy-codec-wav" / "ext24in32_6ch_51.wav",
-    "qy-codec-flac" / "cli_16_6ch_48k_51_side.flac",
-    "qy-codec-flac" / "cli_32_stereo_192k.flac",
-    "qy-codec-flac" / "cli_24_mono_96k_lpc12.flac",
-    "qy-codec-flac" / "fixed_orders_and_lpc32.flac",
-    "qy-codec-wav" / "pcm24_mono_48k_odd_list.wav",
+#[derive(Debug)]
+struct CardError;
+
+impl fmt::Display for CardError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("块越界")
+    }
+}
+
+impl core::error::Error for CardError {}
+
+impl BlockDevice for FlashCard {
+    type Error = CardError;
+
+    fn read(&self, blocks: &mut [Block], start: BlockIdx) -> Result<(), CardError> {
+        for (i, b) in blocks.iter_mut().enumerate() {
+            let off = (start.0 as usize + i) * Block::LEN;
+            let src = CARD.get(off..off + Block::LEN).ok_or(CardError)?;
+            b.contents.copy_from_slice(src);
+            self.reads.set(self.reads.get().wrapping_add(1));
+        }
+        Ok(())
+    }
+
+    fn write(&self, _: &[Block], _: BlockIdx) -> Result<(), CardError> {
+        Err(CardError)
+    }
+
+    fn num_blocks(&self) -> Result<BlockCount, CardError> {
+        Ok(BlockCount((CARD.len() / Block::LEN) as u32))
+    }
+}
+
+// ---- 板级：I²S 输出（软件模拟 DMA）与共享喂数器 ----
+
+static RATES: [u32; 9] = [
+    8_000, 11_025, 16_000, 22_050, 32_000, 44_100, 48_000, 88_200, 96_000,
 ];
-#[cfg(not(feature = "full"))]
-static CARD: &[(&str, &[u8])] = card![
-    "qy-codec-wav" / "pcm16_stereo_44k.wav",
-    "qy-codec-flac" / "cli_16_stereo_44k_default.flac",
-    "qy-codec-wav" / "ext16_6ch_51_side.wav",
-    "qy-codec-wav" / "pcm24_mono_48k_odd_list.wav",
-    "qy-codec-wav" / "pcm32_stereo_96k.wav",
-    "qy-codec-wav" / "pcm16_mono_8k_fmt18.wav",
+static SLOTS: [SlotFormat; 2] = [
+    SlotFormat {
+        container_bits: 16,
+        valid_bits: 16,
+        endian: Endian::Little,
+        placement: Placement::MsbAligned,
+    },
+    SlotFormat {
+        container_bits: 32,
+        valid_bits: 24,
+        endian: Endian::Little,
+        placement: Placement::MsbAligned,
+    },
 ];
+static CHANNELS: [u16; 2] = [1, 2];
+const CAPS: OutputCaps = OutputCaps {
+    rates: &RATES,
+    slots: &SLOTS,
+    channels: &CHANNELS,
+    buffer_frames: DMA_FRAMES as u32,
+    in_flight: 2,
+};
 
 /// FNV-1a 64。
 #[derive(Clone, Copy)]
@@ -117,7 +177,7 @@ impl Fnv {
     }
 }
 
-/// 一次设备打开期间的输出。
+/// 一次设备配置期间的输出。
 #[derive(Clone, Copy)]
 struct Segment {
     format: DeviceFormat,
@@ -126,263 +186,197 @@ struct Segment {
 }
 
 const MAX_SEGMENTS: usize = 8;
-const MAX_SKIPPED: usize = 8;
 
-struct Host {
-    engine: Engine<AutoDecoder, StaticProducer<QUEUE_BYTES>>,
-    consumer: StaticConsumer<QUEUE_BYTES>,
-    dma: &'static mut [u8; DMA_FRAMES * FRAME_BYTES],
-    open: Option<usize>,
-    cursor: usize,
-    ring_generation: u64,
-    /// 设备：格式、是否在取数、是否暂停。
-    device: Option<(DeviceFormat, bool, bool)>,
+/// 板级输出状态（主循环与“中断”共享）。
+struct Board {
+    format: Option<DeviceFormat>,
+    running: bool,
     segments: [Option<Segment>; MAX_SEGMENTS],
     seg_len: usize,
-    skipped: [Option<(u32, EngineFault)>; MAX_SKIPPED],
-    skip_len: usize,
-    failed: Option<(u32, EngineFault)>,
-    finished: bool,
-    /// 时钟：每个 DMA 半缓冲周期（含设备空闲等待）加一。
-    clock: u32,
-    dma_periods: u32,
-    pause_periods: u32,
-    underruns: u32,
-    reads: u32,
-    errors: u32,
+    overflow: bool,
 }
 
-/// I²S 设备格式：N ≤ 16 用 16/16，否则 32 位槽位、24 位有效（左对齐）。
-fn device_format(src: &SourceFormat) -> Option<DeviceFormat> {
-    let (c, v) = if src.bits() <= 16 { (16, 16) } else { (32, 24) };
-    DeviceFormat::new(
-        src.sample_rate(),
-        src.channels(),
-        c,
-        v,
-        Endian::Little,
-        Placement::MsbAligned,
-    )
-    .ok()
-    .filter(|d| d.accepts(src))
+static BOARD: Mutex<RefCell<Board>> = Mutex::new(RefCell::new(Board {
+    format: None,
+    running: false,
+    segments: [None; MAX_SEGMENTS],
+    seg_len: 0,
+    overflow: false,
+}));
+static FEEDER: Mutex<RefCell<Option<Feeder<QUEUE_BYTES>>>> = Mutex::new(RefCell::new(None));
+
+/// 在临界区内访问板级状态。
+fn board<R>(f: impl FnOnce(&mut Board) -> R) -> Option<R> {
+    interrupt::free(|cs| {
+        BOARD
+            .borrow(cs)
+            .try_borrow_mut()
+            .ok()
+            .map(|mut b| f(&mut b))
+    })
 }
 
-impl Host {
-    fn handle(&mut self, e: HostEvent) {
-        if self.engine.handle(e).is_err() {
-            self.errors += 1;
-        }
+struct SharedFeeder;
+
+impl FeederAccess<QUEUE_BYTES> for SharedFeeder {
+    fn with<R>(&self, f: impl FnOnce(&mut Feeder<QUEUE_BYTES>) -> R) -> Option<R> {
+        interrupt::free(|cs| {
+            let mut cell = FEEDER.borrow(cs).try_borrow_mut().ok()?;
+            cell.as_mut().map(f)
+        })
+    }
+}
+
+struct DemoOut;
+
+impl AudioOutput for DemoOut {
+    type Error = ();
+
+    fn caps(&self) -> OutputCaps {
+        CAPS
     }
 
-    fn execute(&mut self, a: HostAction) {
-        match a {
-            HostAction::Open { generation, track } => {
-                if (track as usize) < CARD.len() {
-                    self.open = Some(track as usize);
-                    self.cursor = 0;
-                    self.handle(HostEvent::Opened { generation });
-                } else {
-                    self.handle(HostEvent::OpenFailed { generation });
+    fn configure(&mut self, format: &DeviceFormat) -> Result<(), ()> {
+        board(|b| {
+            b.running = false;
+            b.format = Some(*format);
+            match b.segments.get_mut(b.seg_len) {
+                Some(slot) => {
+                    *slot = Some(Segment {
+                        format: *format,
+                        frames: 0,
+                        fnv: Fnv::new(),
+                    });
+                    b.seg_len += 1;
+                    Ok(())
+                }
+                None => {
+                    b.overflow = true;
+                    Err(())
                 }
             }
-            HostAction::Read {
-                generation,
-                request,
-                max,
-            } => self.read(generation, request, max),
-            HostAction::Close { .. } => self.open = None,
-            HostAction::SelectDevice { .. } => {
-                self.errors += 1;
-                self.handle(HostEvent::DeviceUnsupported);
-            }
-            HostAction::OpenDevice { source, .. } => {
-                let event = match self.open_device(&source) {
-                    Some(format) => HostEvent::DeviceOpened { format },
-                    None => HostEvent::DeviceOpenFailed,
-                };
-                self.handle(event);
-            }
-            HostAction::StartDevice => {
-                if let Some(d) = self.device.as_mut() {
-                    d.1 = true;
-                }
-            }
-            HostAction::DrainDevice => {
-                if let Some(d) = self.device.as_mut() {
-                    d.1 = true;
-                }
-                // 有界：队列中的帧数有限，每个周期至少取走一帧（暂停时按脚本恢复）。
-                for _ in 0..QUEUE_BYTES {
-                    if self.consumer.available_frames() == 0 {
-                        break;
-                    }
-                    self.dma_period(true);
-                }
-                self.handle(HostEvent::DeviceDrained);
-            }
-            HostAction::StopDevice => self.device = None,
-            HostAction::PauseDevice => {
-                if let Some(d) = self.device.as_mut() {
-                    d.2 = true;
-                }
-            }
-            HostAction::ResumeDevice => {
-                if let Some(d) = self.device.as_mut() {
-                    d.2 = false;
-                }
-            }
-            HostAction::TrackSkipped { track, fault } => {
-                if let Some(slot) = self.skipped.get_mut(self.skip_len) {
-                    *slot = Some((track, fault));
-                    self.skip_len += 1;
-                }
-            }
-            HostAction::Finished => self.finished = true,
-            HostAction::Failed { track, fault } => self.failed = Some((track, fault)),
-        }
+        })
+        .unwrap_or(Err(()))
     }
 
-    fn read(&mut self, generation: qy_core::Generation, request: u32, max: usize) {
-        self.reads += 1;
-        let file = self.open.and_then(|i| CARD.get(i)).map(|f| f.1);
-        let (Some(file), Some(dst)) = (file, self.engine.read_target(generation, request)) else {
-            self.errors += 1;
-            self.handle(HostEvent::ReadFailed {
-                generation,
-                request,
-            });
-            return;
+    fn start(&mut self) -> Result<(), ()> {
+        board(|b| b.running = b.format.is_some()).ok_or(())
+    }
+
+    fn stop(&mut self) {
+        let _ = board(|b| b.running = false);
+    }
+}
+
+/// 一个 DMA 缓冲周期（真实板子上由 DMA 完成中断触发）：填缓冲，有效数据计入当前段。
+fn dma_period(dma: &mut [u8]) -> bool {
+    interrupt::free(|cs| {
+        let Ok(mut b) = BOARD.borrow(cs).try_borrow_mut() else {
+            return false;
         };
-        let rest = file.get(self.cursor..).unwrap_or(&[]);
-        let n = rest.len().min(max).min(SECTOR).min(dst.len());
-        if n == 0 {
-            self.handle(HostEvent::ReadEof {
-                generation,
-                request,
-            });
-            return;
-        }
-        dst[..n].copy_from_slice(&rest[..n]);
-        self.cursor += n;
-        self.handle(HostEvent::ReadDone {
-            generation,
-            request,
-            len: n,
-        });
-    }
-
-    fn open_device(&mut self, source: &SourceFormat) -> Option<DeviceFormat> {
-        let format = device_format(source)?;
-        let frames = usize::try_from(frames_for_millis(
-            format.sample_rate(),
-            PROFILE.caps.prefill_ms,
-        ))
-        .ok()?;
-        let required = frames.checked_mul(usize::from(format.block_align()))?;
-        self.ring_generation += 1;
-        reconfigure(
-            self.engine.sink_mut(),
-            &mut self.consumer,
-            &format,
-            required,
-            self.ring_generation,
-        )
-        .ok()?;
-        let slot = self.segments.get_mut(self.seg_len)?;
-        *slot = Some(Segment {
-            format,
-            frames: 0,
-            fnv: Fnv::new(),
-        });
-        self.seg_len += 1;
-        self.device = Some((format, false, false));
-        Some(format)
-    }
-
-    /// 推进一个时钟周期并执行到期的串口命令。
-    fn tick(&mut self) {
-        self.clock += 1;
-        if self.clock == PAUSE_AT {
-            self.engine.pause();
-        } else if self.clock == RESUME_AT {
-            self.engine.resume();
-        }
-        while let Some(a) = self.engine.take_control() {
-            self.execute(a);
-        }
-    }
-
-    /// 一个 DMA 半缓冲周期：至多取出 `DMA_FRAMES` 帧（有界拷贝）并计入当前段。
-    fn dma_period(&mut self, draining: bool) {
-        self.tick();
-        let Some((format, running, paused)) = self.device else {
-            return;
+        let (Some(format), true) = (b.format, b.running) else {
+            return false;
         };
-        if !running {
-            return;
-        }
-        self.dma_periods += 1;
-        if paused {
-            // 暂停：输出静音，单独计数，不算欠载。
-            self.pause_periods += 1;
-            return;
-        }
+        let Ok(mut cell) = FEEDER.borrow(cs).try_borrow_mut() else {
+            return false;
+        };
+        let Some(feeder) = cell.as_mut() else {
+            return false;
+        };
         let fb = usize::from(format.block_align());
-        let n = match self.consumer.pop_frames(&mut self.dma[..DMA_FRAMES * fb]) {
-            Ok(n) => n,
-            Err(_) => {
-                self.errors += 1;
-                0
-            }
-        };
-        if n < DMA_FRAMES && !draining {
-            self.underruns += 1;
+        let buf = &mut dma[..DMA_FRAMES * fb];
+        let fill = feeder.fill(buf);
+        let n = b.seg_len;
+        if let Some(Some(seg)) = n.checked_sub(1).and_then(|i| b.segments.get_mut(i)) {
+            seg.frames += fill.data_frames as u64;
+            seg.fnv.feed(&buf[..fill.data_frames * fb]);
         }
-        if let Some(Some(seg)) = self
-            .seg_len
-            .checked_sub(1)
-            .and_then(|i| self.segments.get_mut(i))
-        {
-            seg.frames += n as u64;
-            seg.fnv.feed(&self.dma[..n * fb]);
-        }
-    }
+        true
+    })
+}
 
-    fn run(&mut self) {
-        // 有界：每次循环要么推进核心，要么让设备取走数据；超出即视为错误。
-        for _ in 0..50_000_000u32 {
-            match self.engine.poll() {
-                Poll::Action(a) => self.execute(a),
-                Poll::Yield => {}
-                Poll::Wait(Wait::QueueFull) => self.dma_period(false),
-                // 暂停中、设备尚未启动（等待恢复后排空）：时间照常流逝。
-                Poll::Wait(Wait::Device) if self.engine.is_paused() => self.tick(),
-                Poll::Wait(_) => {
-                    self.errors += 1;
-                    return;
-                }
-                Poll::Idle => return,
-            }
-        }
-        self.errors += 1;
+// ---- 串口（半主机） ----
+
+struct Serial;
+
+impl fmt::Write for Serial {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        hprint!("{}", s);
+        Ok(())
     }
 }
 
-fn setup() -> Option<Host> {
-    let wav = AutoDecoder::empty().with_wav(WAV_PCM.try_take()?).ok()?;
+// ---- 组装与运行 ----
+
+type DemoPlayer = Player<
+    AutoDecoder,
+    FatStorage<FlashCard, NoClock, MAX_TRACKS>,
+    DemoOut,
+    SharedFeeder,
+    QUEUE_BYTES,
+>;
+
+/// 名义时序（QEMU 不测时序；实物板须按 `qy_host_embedded::budget` 实测后填写）。
+fn loads() -> ([Load; 2], usize) {
+    let caps = PROFILE.caps;
+    let wav = Load {
+        demand: Demand::wav(&caps, 16_384),
+        unit_read_us: 10_000,
+        decode_us: 2_000,
+    };
+    #[cfg(feature = "full")]
+    if let Some(c) = PROFILE.flac_capacity() {
+        let small = qy_codec_flac::Capacity::for_limits(
+            16,
+            caps.max_channels as usize,
+            caps.max_bits as usize,
+        );
+        let flac = Load {
+            demand: Demand::flac(
+                &caps,
+                c.input_window as u32,
+                c.max_block as u32,
+                small.input_window as u32,
+            ),
+            unit_read_us: 10_000,
+            decode_us: 10_000,
+        };
+        return ([wav, flac], 2);
+    }
+    ([wav, wav], 1)
+}
+
+enum SetupError {
+    Buffers,
+    Budget(qy_host_embedded::BudgetError),
+}
+
+fn setup() -> Result<DemoPlayer, SetupError> {
+    let wav = AutoDecoder::empty()
+        .with_wav(WAV_PCM.try_take().ok_or(SetupError::Buffers)?)
+        .map_err(|_| SetupError::Buffers)?;
     #[cfg(feature = "full")]
     let wav = wav
         .with_flac(
-            PROFILE.flac_capacity()?,
-            flac_buffers::WORKSPACE.try_take()?,
-            flac_buffers::PCM_BUF.try_take()?,
+            PROFILE.flac_capacity().ok_or(SetupError::Buffers)?,
+            flac_buffers::WORKSPACE
+                .try_take()
+                .ok_or(SetupError::Buffers)?,
+            flac_buffers::PCM_BUF
+                .try_take()
+                .ok_or(SetupError::Buffers)?,
         )
-        .ok()?;
+        .map_err(|_| SetupError::Buffers)?;
     let decoder = wav;
-    let input = INPUT.try_take()?;
+    let input = INPUT.try_take().ok_or(SetupError::Buffers)?;
     let window = decoder.required_window();
-    let core = Core::with_window(input, window, decoder).ok()?;
-    let (producer, consumer) = QUEUE.split()?;
+    let core = Core::with_window(input, window, decoder).map_err(|_| SetupError::Buffers)?;
+    let (producer, consumer) = QUEUE.split().ok_or(SetupError::Buffers)?;
+    interrupt::free(|cs| {
+        if let Ok(mut f) = FEEDER.borrow(cs).try_borrow_mut() {
+            *f = Some(Feeder::new(consumer, CAPS.in_flight));
+        }
+    });
     let config = EngineConfig {
         caps: PROFILE.caps,
         reuse: ReusePolicy::Accepts,
@@ -390,64 +384,129 @@ fn setup() -> Option<Host> {
     };
     // 静态队列直接 pack 进队列存储，不需要 pack 暂存区。
     let engine = Engine::new(core, producer, &mut [], config);
-    Some(Host {
+    let (storage, _scan) = FatStorage::new(
+        FlashCard {
+            reads: Cell::new(0),
+        },
+        NoClock,
+    );
+    let (loads, n) = loads();
+    Player::new(
         engine,
-        consumer,
-        dma: DMA_BUF.try_take()?,
-        open: None,
-        cursor: 0,
-        ring_generation: 0,
-        device: None,
-        segments: [None; MAX_SEGMENTS],
-        seg_len: 0,
-        skipped: [None; MAX_SKIPPED],
-        skip_len: 0,
-        failed: None,
-        finished: false,
-        clock: 0,
-        dma_periods: 0,
-        pause_periods: 0,
-        underruns: 0,
-        reads: 0,
-        errors: 0,
-    })
+        storage,
+        DemoOut,
+        SharedFeeder,
+        READ_CHUNK,
+        &loads[..n],
+    )
+    .map_err(SetupError::Budget)
 }
 
-fn report(h: &Host) -> u8 {
-    for (i, (name, data)) in CARD.iter().enumerate() {
-        hprintln!("QYBIT-TRACK i={} bytes={} name={}", i, data.len(), name);
+struct Run {
+    finished: bool,
+    failed: bool,
+    clock: u32,
+    dma_periods: u32,
+    host_errors: u32,
+}
+
+fn run(p: &mut DemoPlayer, dma: &mut [u8]) -> Run {
+    let mut serial = Serial;
+    let mut lines = LineBuffer::<32>::new();
+    let mut r = Run {
+        finished: false,
+        failed: false,
+        clock: 0,
+        dma_periods: 0,
+        host_errors: 0,
+    };
+    let mut next_cmd = 0;
+    // 有界：每次循环要么推进宿主，要么推进一个时钟周期；超出即视为错误。
+    for _ in 0..50_000_000u32 {
+        while let Some(&(at, cmd)) = SCRIPT.get(next_cmd) {
+            if at > r.clock {
+                break;
+            }
+            next_cmd += 1;
+            for &b in cmd {
+                match lines.push(b) {
+                    Some(Ok(c)) => {
+                        let _ = p.command(c, &mut serial);
+                    }
+                    Some(Err(e)) => {
+                        let _ = write_parse_error(&mut serial, e);
+                        r.host_errors += 1;
+                    }
+                    None => {}
+                }
+            }
+        }
+        let step = p.step();
+        while let Some(n) = p.pop_notice() {
+            match n {
+                Notice::Skipped { track, fault } => {
+                    hprintln!("QYBIT-SKIP track={} fault={:?}", track, fault)
+                }
+                Notice::Failed { track, fault } => {
+                    r.failed = true;
+                    hprintln!("QYBIT-FAIL track={} fault={:?}", track, fault)
+                }
+                Notice::Finished => r.finished = true,
+                Notice::OutputError => r.host_errors += 1,
+                _ => {}
+            }
+        }
+        if step == Step::Busy {
+            continue;
+        }
+        // 空闲：推进一个时钟周期（设备运行时即一个 DMA 缓冲周期）。
+        r.clock += 1;
+        if dma_period(dma) {
+            r.dma_periods += 1;
+        } else if !p.status().active && next_cmd >= SCRIPT.len() {
+            return r;
+        }
     }
-    for (i, s) in h.segments.iter().flatten().enumerate() {
-        let f = s.format;
-        hprintln!(
-            "QYBIT-SEG i={} rate={} ch={} c={} v={} frames={} fnv={:016x}",
-            i,
-            f.sample_rate(),
-            f.channels(),
-            f.container_bits(),
-            f.valid_bits(),
-            s.frames,
-            s.fnv.0
-        );
-    }
-    for (track, fault) in h.skipped.iter().flatten() {
-        hprintln!("QYBIT-SKIP track={} fault={:?}", track, fault);
-    }
-    if let Some((track, fault)) = h.failed {
-        hprintln!("QYBIT-FAIL track={} fault={:?}", track, fault);
-    }
-    let st = h.engine.stats();
+    r.host_errors += 1;
+    r
+}
+
+fn report(p: &DemoPlayer, r: &Run) -> u8 {
+    let _ = board(|b| {
+        for (i, s) in b.segments.iter().flatten().enumerate() {
+            let f = s.format;
+            hprintln!(
+                "QYBIT-SEG i={} rate={} ch={} c={} v={} frames={} fnv={:016x}",
+                i,
+                f.sample_rate(),
+                f.channels(),
+                f.container_bits(),
+                f.valid_bits(),
+                s.frames,
+                s.fnv.0
+            );
+        }
+    });
+    let s = p.status();
+    let _ = write_status(&mut Serial, &s);
+    let reads = p.storage().device_reads();
+    let errors = r.host_errors
+        + s.counters.output_errors
+        + s.counters.protocol_errors
+        + s.counters.notices_dropped
+        + s.output.errors
+        + u32::from(board(|b| b.overflow).unwrap_or(true));
     hprintln!(
         "QYBIT-STAT finished={} underruns={} pause_periods={} dma_periods={} reads={} errors={} stale={} protocol={} pushed={}",
-        u8::from(h.finished),
-        h.underruns,
-        h.pause_periods,
-        h.dma_periods,
-        h.reads,
-        h.errors,
-        st.stale,
-        st.protocol_errors,
-        st.frames_pushed
+        u8::from(r.finished),
+        s.output.underruns,
+        s.output.paused_fills,
+        r.dma_periods,
+        reads,
+        errors,
+        s.engine.stale,
+        s.engine.protocol_errors,
+        s.engine.frames_pushed
     );
     let b = BUDGET;
     hprintln!(
@@ -460,8 +519,27 @@ fn report(h: &Host) -> u8 {
         b.pack_scratch,
         b.total
     );
-    let ok = h.finished && h.errors == 0 && h.underruns == 0 && st.protocol_errors == 0;
+    let m = p.margins();
+    hprintln!(
+        "QYBIT-TIMING nominal load_permille={} required_prefill_us={} prefill_us={} card_bytes={}",
+        m.load_permille,
+        m.required_prefill_us,
+        m.prefill_us,
+        CARD.len()
+    );
+    let ok = r.finished && !r.failed && errors == 0 && s.output.underruns == 0;
     u8::from(!ok)
+}
+
+/// 块读取计数（只用于报告）。
+trait DeviceReads {
+    fn device_reads(&self) -> u32;
+}
+
+impl DeviceReads for FatStorage<FlashCard, NoClock, MAX_TRACKS> {
+    fn device_reads(&self) -> u32 {
+        self.device(|d| d.reads.get()).unwrap_or(0)
+    }
 }
 
 #[entry]
@@ -474,13 +552,16 @@ fn main() -> ! {
         stack_top,
         heap_start
     );
-    let code = match setup() {
-        Some(mut h) => {
-            h.engine.play(0, CARD.len() as u32);
-            h.run();
-            report(&h)
+    let code = match (setup(), DMA_BUF.try_take()) {
+        (Ok(mut p), Some(dma)) => {
+            let r = run(&mut p, dma);
+            report(&p, &r)
         }
-        None => {
+        (Err(SetupError::Budget(e)), _) => {
+            hprintln!("QYBIT-ERROR 时序不足：{}", e);
+            2
+        }
+        _ => {
             hprintln!("QYBIT-ERROR 初始化失败");
             2
         }
