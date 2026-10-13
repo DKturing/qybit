@@ -101,6 +101,8 @@ pub struct OpenFailure<A> {
 #[derive(Debug, Clone)]
 pub struct StreamReport<A> {
     pub negotiation: Negotiation<A>,
+    /// 打开本流时的播放计划（R1）。
+    pub plan: Option<qy_core::engine::PlaybackPlan>,
     /// 实际使用的设备格式（即被接受的请求格式）。
     pub format: DeviceFormat,
     pub submission: Submission,
@@ -247,6 +249,9 @@ impl<A: AttemptRecord> PlaybackReport<A> {
         for (i, s) in self.streams.iter().enumerate() {
             let _ = writeln!(o, "输出流 {}：", i + 1);
             negotiation_text(&mut o, &s.negotiation);
+            if let Some(p) = &s.plan {
+                let _ = writeln!(o, "  播放计划：{p}");
+            }
             match s.submission {
                 Submission::Packet { frames } => {
                     let _ = writeln!(o, "  提交方式：整包，每包 {frames} 帧");

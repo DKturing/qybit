@@ -21,6 +21,7 @@ mod bits;
 mod crc;
 mod frame;
 
+use qy_core::engine::{CapabilityError, DecoderDemand, Resources};
 use qy_core::{ChannelLayout, DecodeError, Decoder, Progress, SourceFormat, Status};
 
 /// 解码器容量配置（宿主声明）。
@@ -282,6 +283,8 @@ struct StreamInfo {
     params: frame::StreamParams,
     /// 元数据全部解析完（得到声道布局）之后才有值，之前不对外报告格式。
     format: Option<SourceFormat>,
+    /// STREAMINFO 声明的最大块（不可信，只用于播放计划）。
+    max_block: u32,
     max_frame: u32,
     total_samples: u64,
 }
@@ -304,6 +307,8 @@ pub struct FlacDecoder {
     decoded_samples: u64,
     /// VORBIS_COMMENT 声明的声道掩码。
     channel_mask: Option<u32>,
+    /// STREAMINFO 阶段因本机容量不足拒绝的具体原因（R1）。
+    rejection: Option<CapabilityError>,
     /// 已发布、未取走的交错样本 `pcm[start..end]`。
     start: usize,
     end: usize,
@@ -325,6 +330,7 @@ impl FlacDecoder {
             workspace,
             pcm,
             channel_mask: None,
+            rejection: None,
             state: State::Marker,
             info: None,
             blocking: None,
@@ -401,14 +407,27 @@ impl FlacDecoder {
         if rate == 0 || bits < 4 || max_block < 16 {
             return Err(FlacError::BadStreamInfo);
         }
+        // 声明的容量需求先检查（R1：记录具体原因，引擎按能力不足报告）；实际帧仍逐帧检查。
+        let sat = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
         if channels as usize > self.cap.max_channels {
+            self.rejection = Some(CapabilityError::Channels {
+                channels: channels as u16,
+                max: u16::try_from(self.cap.max_channels).unwrap_or(u16::MAX),
+            });
             return Err(FlacError::TooManyChannels);
         }
-        // 声明的容量需求先检查；实际帧仍逐帧检查。
         if usize::from(max_block) > self.cap.max_block {
+            self.rejection = Some(CapabilityError::FlacBlock {
+                block: u32::from(max_block),
+                max: sat(self.cap.max_block),
+            });
             return Err(FlacError::BlockTooLarge);
         }
         if max_frame != 0 && max_frame as usize > self.cap.input_window {
+            self.rejection = Some(CapabilityError::FlacFrame {
+                bytes: max_frame,
+                window: sat(self.cap.input_window),
+            });
             return Err(FlacError::FrameTooLarge);
         }
         // 采样率与位深可由格式描述表示（声道布局在元数据结束时确定，见 end_metadata）。
@@ -421,6 +440,7 @@ impl FlacDecoder {
                 bits,
             },
             format: None,
+            max_block: u32::from(max_block),
             max_frame,
             total_samples: total,
         });
@@ -779,11 +799,29 @@ impl FlacDecoder {
     }
 }
 
+impl Resources for FlacDecoder {
+    fn capacity_rejection(&self) -> Option<CapabilityError> {
+        self.rejection
+    }
+
+    fn demand(&self) -> Option<DecoderDemand> {
+        let info = self.info.as_ref()?;
+        let sat = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
+        Some(DecoderDemand {
+            max_block: info.max_block,
+            block_capacity: sat(self.cap.max_block),
+            max_frame: info.max_frame,
+            window: sat(self.cap.input_window),
+        })
+    }
+}
+
 impl Decoder for FlacDecoder {
     fn reset(&mut self) {
         self.state = State::Marker;
         self.info = None;
         self.channel_mask = None;
+        self.rejection = None;
         self.blocking = None;
         self.retry_at = 0;
         self.decoded_samples = 0;

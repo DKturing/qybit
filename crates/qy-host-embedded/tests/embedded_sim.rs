@@ -582,3 +582,166 @@ fn flat_storage_read_error_skips_track() {
     assert!(want[1].4.starts_with(&got[1].data), "L2 前缀");
     assert!(got[2].data == want[2].4, "L3");
 }
+
+/// 改写 FLAC 的 STREAMINFO（`fLaC` 后第一个元数据块）：最小/最大块与最大帧。只改声明，不改音频。
+fn patch_streaminfo(bytes: &[u8], block: Option<u16>, max_frame: Option<u32>) -> Vec<u8> {
+    let mut b = bytes.to_vec();
+    let si = 8; // "fLaC" + 4 字节块头
+    if let Some(v) = block {
+        b[si..si + 2].copy_from_slice(&v.to_be_bytes());
+        b[si + 2..si + 4].copy_from_slice(&v.to_be_bytes());
+    }
+    if let Some(v) = max_frame {
+        b[si + 7..si + 10].copy_from_slice(&v.to_be_bytes()[1..]);
+    }
+    b
+}
+
+/// R1 资源计划：文件头阶段的容量拒绝按能力不足报告具体数值；WAV 与 FLAC 的多声道拒绝同一类原因；
+/// STREAMINFO 不实（声称小块、实际帧更大）仍在帧级按解码错误拒绝；可播放的曲目报告播放计划。
+#[test]
+fn resource_plan_reasons() {
+    let big = fixture("R1.FLA", "cli_16_blocksize_16384.flac", 96_000, 2, 16);
+    let mut frame = fixture("R2.FLA", "cli_16_stereo_44k_default.flac", 44_100, 2, 16);
+    frame.bytes = patch_streaminfo(&frame.bytes, None, Some(30_000));
+    let mut lie = big.clone();
+    lie.name = "R5.FLA".into();
+    lie.bytes = patch_streaminfo(&big.bytes, Some(4_096), Some(0));
+    let tracks = vec![
+        big,
+        frame,
+        fixture("R3.FLA", "cli_16_6ch_48k_51_side.flac", 48_000, 6, 16),
+        fixture("R4.WAV", "ext16_6ch_51_side.wav", 48_000, 6, 16),
+        lie,
+        fixture("R6.WAV", "pcm16_stereo_44k.wav", 44_100, 2, 16),
+    ];
+    let Ok((mut p, w, _)) = setup(disk(image(&tracks)), caps(), TIMING, ErrorPolicy::Skip) else {
+        panic!("时序");
+    };
+    assert!(p.play(0));
+    let mut notices = Vec::new();
+    run(&mut p, &w, 30_000_000, &mut notices, |_, _, _| {});
+    let got = skips(&notices);
+    let ch6 = EngineFault::Capability(CapabilityError::Channels {
+        channels: 6,
+        max: 2,
+    });
+    assert_eq!(
+        got[..4],
+        [
+            Notice::Skipped {
+                track: 0,
+                fault: EngineFault::Capability(CapabilityError::FlacBlock {
+                    block: 16_384,
+                    max: 4_608
+                })
+            },
+            Notice::Skipped {
+                track: 1,
+                fault: EngineFault::Capability(CapabilityError::FlacFrame {
+                    bytes: 30_000,
+                    window: 28_244
+                })
+            },
+            Notice::Skipped {
+                track: 2,
+                fault: ch6
+            },
+            Notice::Skipped {
+                track: 3,
+                fault: ch6
+            },
+        ]
+    );
+    // STREAMINFO 不实：帧级拒绝，仍是解码错误（不归入能力不足，因为文件头并未声明超限）。
+    match got.get(4) {
+        Some(Notice::Skipped {
+            track: 4,
+            fault: EngineFault::Core(Fault::Decode(_)),
+        }) => {}
+        other => panic!("STREAMINFO 不实应按解码错误拒绝：{other:?}"),
+    }
+    assert_eq!(got.len(), 5);
+    assert_eq!(notices.last(), Some(&Notice::Finished));
+    // 原因文字带具体数值。
+    assert_eq!(
+        CapabilityError::FlacBlock {
+            block: 16_384,
+            max: 4_608
+        }
+        .to_string(),
+        "FLAC 最大块 16384 帧超出本机配置的 4608 帧"
+    );
+    assert_eq!(
+        CapabilityError::FlacFrame {
+            bytes: 30_000,
+            window: 28_244
+        }
+        .to_string(),
+        "FLAC 声明的最大帧 30000 字节超出本机输入窗口 28244 字节"
+    );
+    // 播放计划：WAV 16 位双声道 44.1 kHz，16/16 设备，预填 250 ms = 11025 帧 × 4 字节。
+    let plans: Vec<String> = notices
+        .iter()
+        .filter(|n| matches!(n, Notice::Plan { .. }))
+        .map(|n| {
+            let mut s = String::new();
+            let _ = write_notice(&mut s, n);
+            s
+        })
+        .collect();
+    assert_eq!(
+        plans,
+        vec![
+            "EVENT plan rate=44100 ch=2 bits=16 device=16-16 prefill_frames=11025 prefill_ms=250 \
+             queue=44100/192000\n"
+                .to_string()
+        ]
+    );
+    check_segments(
+        &w,
+        &expected(
+            &tracks,
+            &[false, false, false, false, false, true],
+            &[None; 6],
+        ),
+        "资源计划",
+    );
+}
+
+/// 播放计划含 FLAC 的声明需求与本机容量（文件头声明，只用于报告）。
+#[test]
+fn plan_reports_flac_demand() {
+    let tracks = vec![fixture(
+        "P1.FLA",
+        "cli_16_stereo_44k_default.flac",
+        44_100,
+        2,
+        16,
+    )];
+    let Ok((mut p, w, _)) = setup(disk(image(&tracks)), caps(), TIMING, ErrorPolicy::Skip) else {
+        panic!("时序");
+    };
+    assert!(p.play(0));
+    let mut notices = Vec::new();
+    run(&mut p, &w, 30_000_000, &mut notices, |_, _, _| {});
+    let Some(Notice::Plan { plan }) = notices.iter().find(|n| matches!(n, Notice::Plan { .. }))
+    else {
+        panic!("缺少播放计划");
+    };
+    let Some(d) = plan.decoder else {
+        panic!("FLAC 应报告需求");
+    };
+    // 独立读取夹具的 STREAMINFO：最大块与最大帧。
+    let b = &tracks[0].bytes;
+    let max_block = u32::from(u16::from_be_bytes([b[10], b[11]]));
+    let max_frame = u32::from_be_bytes([0, b[15], b[16], b[17]]);
+    assert_eq!((d.max_block, d.block_capacity), (max_block, 4_608));
+    assert_eq!((d.max_frame, d.window), (max_frame, 28_244));
+    let text = plan.to_string();
+    assert!(
+        text.contains(&format!("FLAC 最大块 {max_block}/4608 帧")),
+        "{text}"
+    );
+    check_segments(&w, &expected(&tracks, &[true], &[None]), "FLAC 计划");
+}

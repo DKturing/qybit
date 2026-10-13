@@ -39,6 +39,8 @@ struct Active<B: Backend> {
     format: DeviceFormat,
     submission: Submission,
     negotiation: Negotiation<B::Attempt>,
+    /// 打开本流时的播放计划（R1）。
+    plan: Option<qy_core::engine::PlaybackPlan>,
     ctl: Arc<RenderControl>,
     /// 打开本流时引擎的累计入队帧数。
     pushed_base: u64,
@@ -167,6 +169,11 @@ impl<B: Backend> Player<'_, B> {
                     None => HostEvent::DeviceOpenFailed,
                 };
                 self.handle(event);
+                // 设备已确定：记录本流的播放计划（R1）。
+                let plan = self.res.engine.plan();
+                if let Some(a) = self.active.as_mut() {
+                    a.plan = plan;
+                }
             }
             HostAction::StartDevice => self.start_if_pending(),
             HostAction::DrainDevice => {
@@ -256,6 +263,7 @@ impl<B: Backend> Player<'_, B> {
                     submission: pending.submission(),
                     stream: Stream::Pending(pending),
                     format,
+                    plan: None,
                     ctl: Arc::new(RenderControl::default()),
                     pushed_base: self.res.engine.stats().frames_pushed,
                 });
@@ -334,6 +342,7 @@ impl<B: Backend> Player<'_, B> {
         }
         self.report.streams.push(StreamReport {
             negotiation: active.negotiation,
+            plan: active.plan,
             format: active.format,
             submission: active.submission,
             pushed_frames: self.res.engine.stats().frames_pushed - active.pushed_base,

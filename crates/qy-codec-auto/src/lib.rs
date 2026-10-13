@@ -197,6 +197,16 @@ macro_rules! dispatch_ref {
     };
 }
 
+impl qy_core::engine::Resources for AutoDecoder {
+    fn capacity_rejection(&self) -> Option<qy_core::engine::CapabilityError> {
+        dispatch_ref!(self, d => d.capacity_rejection(), None)
+    }
+
+    fn demand(&self) -> Option<qy_core::engine::DecoderDemand> {
+        dispatch_ref!(self, d => d.demand(), None)
+    }
+}
+
 impl Decoder for AutoDecoder {
     fn reset(&mut self) {
         self.codec = Codec::Unknown;

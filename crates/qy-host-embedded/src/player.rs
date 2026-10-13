@@ -17,7 +17,8 @@
 use core::fmt;
 
 use qy_core::engine::{
-    Engine, EngineFault, EngineStats, ErrorPolicy, HostAction, HostEvent, Poll, Wait,
+    Engine, EngineFault, EngineStats, ErrorPolicy, HostAction, HostEvent, PlaybackPlan, Poll,
+    Resources, Wait,
 };
 use qy_core::{Decoder, DeviceFormat, Fault};
 use qy_pcm_format::frames_for_millis;
@@ -45,6 +46,8 @@ pub enum Notice {
     Opened { track: u32 },
     /// 设备按格式打开。
     Device { format: DeviceFormat },
+    /// 设备打开后的播放计划（R1）。
+    Plan { plan: PlaybackPlan },
     /// 设备格式选择失败。
     Unsupported { error: SelectError },
     /// 曲目出错，已跳过。
@@ -93,7 +96,7 @@ const NOTICES: usize = 8;
 /// 通用嵌入式宿主。`N` 为静态帧队列存储字节数。
 pub struct Player<D, S, O, F, const N: usize>
 where
-    D: Decoder,
+    D: Decoder + Resources,
     S: Storage,
     O: AudioOutput,
     F: FeederAccess<N>,
@@ -118,7 +121,7 @@ where
 
 impl<D, S, O, F, const N: usize> Player<D, S, O, F, N>
 where
-    D: Decoder,
+    D: Decoder + Resources,
     S: Storage,
     O: AudioOutput,
     F: FeederAccess<N>,
@@ -356,6 +359,9 @@ where
                 Ok(format) => {
                     self.notice(Notice::Device { format });
                     self.handle(HostEvent::DeviceOpened { format });
+                    if let Some(plan) = self.engine.plan() {
+                        self.notice(Notice::Plan { plan });
+                    }
                 }
                 Err(e) => {
                     if let Some(error) = e {
@@ -609,6 +615,7 @@ pub fn write_notice(w: &mut impl fmt::Write, n: &Notice) -> fmt::Result {
             format.container_bits(),
             format.valid_bits()
         ),
+        Notice::Plan { plan } => write_plan(w, plan),
         Notice::Unsupported { error } => writeln!(w, "EVENT unsupported reason={error:?}"),
         Notice::Skipped { track, fault } => writeln!(w, "EVENT skip track={track} fault={fault:?}"),
         Notice::Finished => writeln!(w, "EVENT finished"),
@@ -617,6 +624,34 @@ pub fn write_notice(w: &mut impl fmt::Write, n: &Notice) -> fmt::Result {
         }
         Notice::OutputError => writeln!(w, "EVENT output-error"),
     }
+}
+
+/// 播放计划行：`EVENT plan key=value ...`（R1）。
+pub fn write_plan(w: &mut impl fmt::Write, p: &PlaybackPlan) -> fmt::Result {
+    let s = &p.source;
+    write!(
+        w,
+        "EVENT plan rate={} ch={} bits={} ",
+        s.sample_rate(),
+        s.channels(),
+        s.bits()
+    )?;
+    if let Some(d) = &p.device {
+        write!(w, "device={}-{} ", d.container_bits(), d.valid_bits())?;
+    }
+    write!(
+        w,
+        "prefill_frames={} prefill_ms={} queue={}/{}",
+        p.prefill_frames, p.prefill_ms, p.queue_required, p.queue_available
+    )?;
+    if let Some(d) = &p.decoder {
+        write!(
+            w,
+            " flac_block={}/{} flac_frame={}/{}",
+            d.max_block, d.block_capacity, d.max_frame, d.window
+        )?;
+    }
+    writeln!(w)
 }
 
 /// 命令解析错误的回应行。

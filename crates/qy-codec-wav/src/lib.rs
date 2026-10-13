@@ -444,6 +444,9 @@ impl WavDecoder {
     }
 }
 
+/// WAV 是流式解码，资源需求固定（PCM 工作区与核心最小窗口），没有文件头阶段的容量拒绝。
+impl qy_core::engine::Resources for WavDecoder {}
+
 impl Decoder for WavDecoder {
     fn reset(&mut self) {
         self.state = State::RiffHeader;

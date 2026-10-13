@@ -60,6 +60,16 @@ pub enum CapabilityError {
         required: usize,
         available: usize,
     },
+    /// FLAC 文件头声明的最大块超出本机解码容量（R1）。
+    FlacBlock {
+        block: u32,
+        max: u32,
+    },
+    /// FLAC 文件头声明的最大帧超出本机输入窗口（R1）。
+    FlacFrame {
+        bytes: u32,
+        window: u32,
+    },
 }
 
 impl fmt::Display for CapabilityError {
@@ -76,6 +86,13 @@ impl fmt::Display for CapabilityError {
             } => write!(
                 f,
                 "本机配置的队列不足以承载该格式：需要 {required} 字节，只有 {available} 字节"
+            ),
+            Self::FlacBlock { block, max } => {
+                write!(f, "FLAC 最大块 {block} 帧超出本机配置的 {max} 帧")
+            }
+            Self::FlacFrame { bytes, window } => write!(
+                f,
+                "FLAC 声明的最大帧 {bytes} 字节超出本机输入窗口 {window} 字节"
             ),
         }
     }
@@ -129,6 +146,90 @@ impl Capabilities {
                 required,
                 available: self.queue_bytes,
             });
+        }
+        Ok(())
+    }
+}
+
+/// 解码器对本机资源的需求（R1）。可选接口，冻结的 [`Decoder`] 不变；默认实现表示“无额外说明”。
+///
+/// 文件头声明不可信：这里的数值只用于提前给出具体原因与播放计划，逐帧的边界检查仍在解码器里。
+pub trait Resources {
+    /// 当前曲目在文件头处因本机解码容量不足被拒绝时，换算成能力不足的具体原因。只报告文件头阶段的
+    /// 拒绝；解码过程中实际帧超出容量仍按解码错误报告。
+    fn capacity_rejection(&self) -> Option<CapabilityError> {
+        None
+    }
+
+    /// 当前曲目文件头声明的需求与本机容量（用于播放计划）。
+    fn demand(&self) -> Option<DecoderDemand> {
+        None
+    }
+}
+
+/// 解码器的需求与容量（文件头声明值，不可信，只用于报告）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecoderDemand {
+    /// 声明的最大块（帧）与本机容量。
+    pub max_block: u32,
+    pub block_capacity: u32,
+    /// 声明的最大帧字节数（0 表示未声明）与本机输入窗口。
+    pub max_frame: u32,
+    pub window: u32,
+}
+
+/// 播放计划（R1）：当前源在本机上的资源安排，供宿主报告。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackPlan {
+    pub source: SourceFormat,
+    pub device: Option<DeviceFormat>,
+    /// 启动前的预填帧数（按设备采样率）与时长。
+    pub prefill_frames: u64,
+    pub prefill_ms: u32,
+    /// 预填所需的队列字节数（按设备帧宽；设备未定时按最小容器估计）与本机队列字节数。
+    pub queue_required: usize,
+    pub queue_available: usize,
+    pub decoder: Option<DecoderDemand>,
+}
+
+impl fmt::Display for PlaybackPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = &self.source;
+        write!(
+            f,
+            "源 {} Hz / {} 声道 / {} 位",
+            s.sample_rate(),
+            s.channels(),
+            s.bits()
+        )?;
+        match &self.device {
+            Some(d) => write!(
+                f,
+                "，设备 {} Hz / {} 声道 / {}-{} 位",
+                d.sample_rate(),
+                d.channels(),
+                d.container_bits(),
+                d.valid_bits()
+            )?,
+            None => f.write_str("，设备未定")?,
+        }
+        write!(
+            f,
+            "，预填 {} 帧（{} ms），队列 {}/{} 字节",
+            self.prefill_frames, self.prefill_ms, self.queue_required, self.queue_available
+        )?;
+        if let Some(d) = &self.decoder {
+            write!(
+                f,
+                "，FLAC 最大块 {}/{} 帧，最大帧 ",
+                d.max_block, d.block_capacity
+            )?;
+            if d.max_frame == 0 {
+                f.write_str("未声明")?;
+            } else {
+                write!(f, "{}", d.max_frame)?;
+            }
+            write!(f, "/{} 字节", d.window)?;
         }
         Ok(())
     }
@@ -320,7 +421,7 @@ const OUTBOX: usize = 6;
 const MARKS: usize = 8;
 
 /// 播放引擎。
-pub struct Engine<D: Decoder, S: FrameSink> {
+pub struct Engine<D: Decoder + Resources, S: FrameSink> {
     core: Core<D>,
     sink: S,
     scratch: &'static mut [u8],
@@ -338,7 +439,7 @@ pub struct Engine<D: Decoder, S: FrameSink> {
     stats: EngineStats,
 }
 
-impl<D: Decoder, S: FrameSink> Engine<D, S> {
+impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
     /// 由宿主一次性提供的核心、帧队列生产端与 pack 暂存区构造。
     pub fn new(core: Core<D>, sink: S, scratch: &'static mut [u8], cfg: EngineConfig) -> Self {
         Self {
@@ -436,6 +537,32 @@ impl<D: Decoder, S: FrameSink> Engine<D, S> {
     /// 当前设备格式（已打开时）。
     pub fn device_format(&self) -> Option<DeviceFormat> {
         self.device.map(|d| d.format)
+    }
+
+    /// 当前源的播放计划（源格式已知时）。
+    pub fn plan(&self) -> Option<PlaybackPlan> {
+        let source = self.core.decoder().format()?;
+        let device = self.device.map(|d| d.format);
+        let rate = device.map_or(source.sample_rate(), |d| d.sample_rate());
+        let caps = &self.cfg.caps;
+        let prefill_frames = caps.prefill_frames(rate);
+        let frame_bytes = match device {
+            Some(d) => usize::from(d.block_align()),
+            None => usize::from(source.channels()) * min_container_bytes(source.bits()),
+        };
+        let queue_required = usize::try_from(prefill_frames)
+            .ok()
+            .and_then(|f| f.checked_mul(frame_bytes))
+            .unwrap_or(usize::MAX);
+        Some(PlaybackPlan {
+            source,
+            device,
+            prefill_frames,
+            prefill_ms: caps.prefill_ms,
+            queue_required,
+            queue_available: caps.queue_bytes,
+            decoder: self.core.decoder().demand(),
+        })
     }
 
     pub fn is_paused(&self) -> bool {
@@ -836,7 +963,17 @@ impl<D: Decoder, S: FrameSink> Engine<D, S> {
     }
 
     fn on_failed(&mut self, track: u32, fault: Fault) {
-        let fault = self.reject.take().unwrap_or(EngineFault::Core(fault));
+        // R1：文件头阶段因本机解码容量不足的拒绝，按能力不足报告具体原因（与引擎的能力检查同类）。
+        let fault = match (self.reject.take(), fault) {
+            (Some(r), _) => r,
+            (None, Fault::Decode(crate::DecodeError::CapacityExceeded)) => {
+                match self.core.decoder().capacity_rejection() {
+                    Some(c) => EngineFault::Capability(c),
+                    None => EngineFault::Core(fault),
+                }
+            }
+            (None, f) => EngineFault::Core(f),
+        };
         let next = track.saturating_add(1);
         if self.cfg.on_error == ErrorPolicy::Skip
             && !matches!(fault, EngineFault::Output)
@@ -851,7 +988,7 @@ impl<D: Decoder, S: FrameSink> Engine<D, S> {
     }
 }
 
-impl<D: Decoder, S: FrameSink> fmt::Debug for Engine<D, S> {
+impl<D: Decoder + Resources, S: FrameSink> fmt::Debug for Engine<D, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Engine")
             .field("mode", &self.mode)

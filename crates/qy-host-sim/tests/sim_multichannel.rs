@@ -272,7 +272,8 @@ fn undefined_layout_and_capability_rejections() {
     // 桌面：未定义布局按 Unsupported 跳过，不打开设备。
     let mut desk = host(&DESKTOP);
     // Embedded Full（双声道）：6 声道 WAV 由引擎按能力不足拒绝；6 声道 FLAC 在 STREAMINFO 处
-    // 即超出解码器容量（双声道工作区），报 CapacityExceeded。都不打开设备。
+    // 即超出解码器容量（双声道工作区）。R1 起两者报告同一类原因（能力不足，6 声道 / 上限 2），
+    // 原先 FLAC 只报 CapacityExceeded（tasks/R1.md §1）。都不打开设备。
     let mut emb = host(&EMBEDDED_FULL);
     for seed in SEEDS {
         for device in DEVICES {
@@ -319,7 +320,10 @@ fn undefined_layout_and_capability_rejections() {
                     ),
                     (
                         1,
-                        EngineFault::Core(Fault::Decode(DecodeError::CapacityExceeded))
+                        EngineFault::Capability(CapabilityError::Channels {
+                            channels: 6,
+                            max: 2
+                        })
                     ),
                 ]
             );

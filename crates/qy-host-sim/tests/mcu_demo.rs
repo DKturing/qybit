@@ -127,9 +127,9 @@ const FULL: Expect = Expect {
     skipped: &[
         (2, "Core(Decode(Malformed))"),
         // F1：Embedded 为双声道。6 声道 WAV 由引擎按能力不足拒绝；6 声道 FLAC 在 STREAMINFO 处
-        // 即超出解码器的双声道容量。都不打开设备。
+        // 即超出解码器的双声道容量，R1 起同样报能力不足（原先只报 CapacityExceeded）。都不打开设备。
         (3, "Capability(Channels { channels: 6, max: 2 })"),
-        (4, "Core(Decode(CapacityExceeded))"),
+        (4, "Capability(Channels { channels: 6, max: 2 })"),
         (5, "Capability(Rate { rate: 192000, max: 96000 })"),
     ],
     pause_periods: 50,
