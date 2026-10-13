@@ -12,7 +12,7 @@
 - 格式范围：先只做无损格式（WAV、FLAC，其后 AIFF、浮点 WAV、ALAC、WavPack、APE、DSD 等，见 tasks/FORMATS.md），每种格式自行实现解码并单独立卡；有损格式（MP3、AAC、Opus 等）以后以插件形式另行设计，不进入当前核心范围。
 - M0 先完成 Windows：核心、WAV、模拟宿主、纯格式描述、WASAPI 独占、CLI。
 - M0 允许按命令行顺序播放多文件；不实现 GUI、拖放、随机播放、seek、配置保存或交互设备选择。
-- M1 实现自有 FLAC；M2 实现 ALSA 与 snd-aloop 自动回环（M2 T5 验证加强延后）；M3 为 QyBit Embedded Reference：先把播放调度下沉到 no_std 核心层，再做不绑定开发板的通用嵌入式宿主（板级只做薄适配），从板载存储（介质由板级决定：SD 卡、eMMC、U 盘、闪存等，宿主不假定 SD 卡）经 I²S DMA 播放，并在用户手头任一满足最低要求的板上实测验证（见 tasks/M3.md 与 docs/arch-core-mcu.md）；M3 T2 之前先做 F1 多声道（tasks/F1.md）。GUI 见 tasks/GUI.md，在 M3 之后作为薄应用层再做；macOS 另列任务，不提前扩展范围。
+- M1 实现自有 FLAC；M2 实现 ALSA 与 snd-aloop 自动回环（M2 T5 验证加强延后）；M3 为 QyBit Embedded Reference：先把播放调度下沉到 no_std 核心层，再做不绑定开发板的通用嵌入式宿主（板级只做薄适配），从板载存储（介质由板级决定：SD 卡、eMMC、U 盘、闪存等，宿主不假定 SD 卡）经 I²S DMA 播放，并在用户手头任一满足最低要求的板上实测验证（见 tasks/M3.md 与 docs/arch-core-mcu.md）；M3 T2 之前先做 F1 多声道（tasks/F1.md），M3 T3 之前先做 R1 资源计划与可靠性验证（tasks/R1.md），性能优化 P1（tasks/P1.md）在 M3 T3 实测之后按数据决定。GUI 见 tasks/GUI.md，在 M3 之后作为薄应用层再做；macOS 另列任务，不提前扩展范围。
 
 ## 2. 核心与数据流
 

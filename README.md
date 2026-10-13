@@ -4,7 +4,7 @@ QyBit Core：Rust 编写的 `no_std`、无 alloc 本地音频播放引擎，桌�
 
 软件不设人为上限：采样率、声道、位深只受格式规范、设备能力与宿主资源限制，并在播放前说明原因。当前支持无损格式 WAV、FLAC，后续无损格式路线见 [tasks/FORMATS.md](tasks/FORMATS.md)；有损格式以后以插件形式另行设计。
 
-长期规则见 [AGENTS.md](AGENTS.md)，阶段任务卡见 [tasks/](tasks/)。
+长期规则见 [AGENTS.md](AGENTS.md)，阶段任务卡见 [tasks/](tasks/)（接下来：[R1 资源计划与可靠性验证](tasks/R1.md) → M3 T3 实物验证 → [P1 按实测数据的性能优化](tasks/P1.md)）。
 
 ## 当前状态
 
