@@ -8,7 +8,8 @@
 //! 4. 时序不足时 `Player::new` 明确拒绝；
 //! 5. 读错误、拔卡与重新插卡后 `scan`；
 //! 6. 串口命令：ls、play、pause/resume、next、prev、status、stop、错误命令；
-//! 7. 板级能力不足（缺采样率、只支持双声道）。
+//! 7. 板级能力不足（缺采样率、只支持双声道）；
+//! 8. 无文件系统的存储（曲目表 + `embedded_storage::ReadStorage` 闪存）：同一夹具播放列表与读错误。
 
 mod common;
 
@@ -512,4 +513,72 @@ fn board_capability_limits() {
         "板级能力",
     );
     assert_eq!(p.status().counters.unsupported, 2);
+}
+
+/// 无文件系统：同一夹具播放列表放在“闪存”里（曲目表 + 按偏移读取），慢读与停顿照常注入。
+#[test]
+fn flat_storage_fixture_playlist_matches_reference() {
+    let tracks = playlist();
+    let Ok((mut p, w)) = setup_flat(&tracks, disk(Vec::new()), TIMING, ErrorPolicy::Skip) else {
+        panic!("时序应满足");
+    };
+    let mut names = String::new();
+    for i in 0..p.storage().track_count() {
+        let _ = p.storage().track_name(i, &mut names);
+        names.push(' ');
+    }
+    assert_eq!(
+        names,
+        "T01.WAV T02.FLA T03.FLA T04.WAV T05.FLA T06.FLA T07.FLA T08 long name.wav T09.WAV "
+    );
+    assert!(p.play(0));
+    let mut notices = Vec::new();
+    run(&mut p, &w, 30_000_000, &mut notices, |_, _, _| {});
+    let s = p.status();
+    assert_eq!(skips(&notices), expected_skips());
+    assert_eq!(notices.last(), Some(&Notice::Finished));
+    assert_eq!(s.output.underruns, 0, "{s:?}");
+    assert_eq!(s.counters.read_errors + s.counters.open_errors, 0);
+    check_segments(&w, &expected(&tracks, &PLAYABLE, &[None; 9]), "无文件系统");
+    eprintln!(
+        "闪存块读取 {} 次，虚拟时长 {} µs",
+        w.borrow().disk.block_reads,
+        w.borrow().now
+    );
+}
+
+/// 无文件系统：读取第 2 首时闪存报错一次：该曲按读取错误跳过，只输出出错前的前缀，其余完整。
+#[test]
+fn flat_storage_read_error_skips_track() {
+    let tracks = long_playlist();
+    let Ok((mut p, w)) = setup_flat(&tracks, disk(Vec::new()), TIMING, ErrorPolicy::Skip) else {
+        panic!("时序");
+    };
+    assert!(p.play(0));
+    let mut notices = Vec::new();
+    let mut armed = false;
+    run(&mut p, &w, 60_000_000, &mut notices, |_, w, n| {
+        if !armed && n.contains(&Notice::Opened { track: 1 }) {
+            let mut w = w.borrow_mut();
+            w.disk.fail_at = Some(w.disk.block_reads + 40);
+            armed = true;
+        }
+    });
+    let s = p.status();
+    assert_eq!(s.counters.read_errors, 1, "{s:?}");
+    assert_eq!(
+        skips(&notices),
+        vec![Notice::Skipped {
+            track: 1,
+            fault: EngineFault::Core(Fault::Read)
+        }]
+    );
+    let wb = w.borrow();
+    let got: Vec<&common::Segment> = wb.segments.iter().filter(|s| !s.data.is_empty()).collect();
+    let want = expected(&tracks, &[true; 3], &[None; 3]);
+    assert_eq!(got.len(), 3);
+    assert!(got[0].data == want[0].4, "L1");
+    assert!(!got[1].data.is_empty() && got[1].data.len() < want[1].4.len());
+    assert!(want[1].4.starts_with(&got[1].data), "L2 前缀");
+    assert!(got[2].data == want[2].4, "L3");
 }

@@ -12,8 +12,10 @@ publish.workspace = true
 qy-core.workspace = true
 qy-pcm-format = { workspace = true, features = ["static-queue"] }
 embedded-sdmmc.workspace = true
+embedded-storage.workspace = true
 
 [dev-dependencies]
+embedded-storage.workspace = true
 qy-codec-auto.workspace = true
 qy-codec-flac.workspace = true
 qy-fat-image = { path = "../../tools/qy-fat-image" }

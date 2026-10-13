@@ -15,7 +15,7 @@
 - `crates/qy-mcu-demo`：QEMU 演示改为运行 `qy-host-embedded`；
 - `crates/qy-board-stm32f411`：板级适配示例，只验证能编译；
 - 测试：
-  - `qy-host-embedded/tests/embedded_sim.rs`（宿主侧仿真，7 个场景）；
+  - `qy-host-embedded/tests/embedded_sim.rs`（宿主侧仿真，9 个场景）；
   - `budget`、`command` 单元测试；
   - `qy-pcm-format` 的 pack 测试；
   - `qy-host-sim/tests/mcu_demo.rs`（QEMU 核对）。
@@ -26,7 +26,7 @@
 
 | 接口 | 作用 | 板级实现 |
 | --- | --- | --- |
-| `storage::Storage` | 播放列表、打开、分段读取、关闭、重新扫描 | 通用实现 `FatStorage`（基于 `embedded-sdmmc`），板子只提供 `BlockDevice`（SPI 或 SDIO） |
+| `storage::Storage` | 播放列表、打开、分段读取、关闭、重新扫描 | 介质不限，见下方“存储”。两种通用实现：`FatStorage`（板子只提供 `BlockDevice`）、`FlatStorage`（板子只提供 `ReadStorage` 与曲目表） |
 | `output::AudioOutput` + `OutputCaps` | 按设备格式配置 I²S/SAI、启动/停止循环 DMA；声明能精确产生的采样率、槽位格式、声道、缓冲帧数与在途缓冲数 | 时钟分频、DMA 双缓冲 |
 | `feeder::FeederAccess` | 主循环与 DMA 中断共享 `Feeder` | 临界区（`cortex_m::interrupt::Mutex<RefCell<…>>`） |
 
@@ -54,13 +54,23 @@
   - 输出错误、喂数错误、协议错误、旧代次回报。
 - 超长的行整行丢弃并回 `ERR too-long`。
 
-**存储**：
+**存储**：介质由板级决定，宿主只依赖 `Storage`，不假定 SD 卡（2026-10-13 用户确认要通用）。
+
+| 板上存储 | 接法 | 板级要写的 |
+| --- | --- | --- |
+| 块设备上的 FAT：SD 卡（SPI 或 SDIO/SDMMC）、eMMC、U 盘（USB Host 大容量存储）、放了 FAT 镜像的 SPI/QSPI 闪存或片内闪存 | 通用 `FatStorage`（`embedded-sdmmc`） | 按 512 字节块读取（`embedded_sdmmc::BlockDevice`） |
+| 无文件系统：内存映射的片内闪存或 QSPI/OSPI 闪存（XIP）、SPI NOR、EEPROM 等 | 通用 `FlatStorage`：曲目表（名称、偏移、长度）+ 标准接口 `embedded_storage::ReadStorage`；内存映射介质直接用 `MemoryStorage` | 曲目表（通常与闪存镜像一起在构建时生成）；非内存映射介质用实现了 `ReadStorage` 的驱动 |
+| 其他文件系统（如 littlefs） | 板级用成熟库直接实现 `Storage` | 打开、分段读取、关闭、列表 |
+
+无论哪种介质，预填公式都一样，只是 `U` 要按该介质实测（内存映射闪存很小，U 盘与 SD 卡可能有较长停顿）。`FlatStorage` 在构造与重新扫描时逐项核对曲目表：偏移 + 长度不得溢出或超出设备容量，否则拒绝并指出是哪一项；读取不会越过曲目末尾。
+
+`FatStorage` 的行为：
 
 - 读 MBR 第 1 个分区（FAT16/FAT32）的根目录，扩展名为 `WAV` 或 `FLA`（`.flac` 的 8.3 短名）的文件按短文件名排序，构成播放列表。格式由解码器按文件头识别。
 - 拔卡或读错时返回错误，由引擎按出错策略跳过或停止。
 - `scan` 会重建卷管理器（丢弃 `embedded-sdmmc` 的块缓存，避免读到旧卡内容）。
 
-## 2. 预填与读卡时序的推导（写入任务卡）
+## 2. 预填与读取时序的推导（写入任务卡）
 
 记号：
 
@@ -110,6 +120,8 @@
   
   损坏的文件系统（例如目录项中的起始簇号越界）有可能触发这些 panic。这是不可信输入，按 AGENTS §4 不应 panic。本卡未处理，列为未完成项：T3 故障注入前对 `FatStorage` 做损坏镜像 fuzz，再决定上游修复，还是在 `BlockDevice` / 目录扫描层加防护。
 
+**`embedded-storage =0.3.2`**：2026-09-20 发布，rust-embedded-community，MIT/Apache-2.0，无依赖，`#![deny(unsafe_code)]`。只用其中按偏移读取的 `ReadStorage` 接口（闪存驱动普遍实现它），作为无文件系统存储的设备接口。
+
 **`fatfs =0.3.6`**：
 
 - 只用于测试与构建脚本，生成 FAT16 镜像（`tools/qy-fat-image`），与被测读取路径相互独立。
@@ -135,9 +147,9 @@ STM32F4 的 SPI/I²S 数据寄存器是 16 位。经 16 位 DMA 发送 32 位槽
 
 ## 5. 宿主侧仿真（不是实机）
 
-`qy-host-embedded/tests/embedded_sim.rs` 运行真实的 `qy-host-embedded`、引擎、自有解码器、pack、静态队列与 `embedded-sdmmc`，只把 SD 卡与 I²S DMA 换成虚拟时间下的假设备：
+`qy-host-embedded/tests/embedded_sim.rs` 运行真实的 `qy-host-embedded`、引擎、自有解码器、pack、静态队列与 `embedded-sdmmc`，只把存储与 I²S DMA 换成虚拟时间下的假设备：
 
-- **SD 卡**：内存中的 FAT16 镜像，簇 4 KiB。每读一个块推进虚拟时钟。可注入：
+- **存储**：两种。块设备上的 FAT16 镜像（簇 4 KiB，经 `FatStorage`），以及无文件系统的“闪存”（曲目按顺序存放 + 曲目表，经 `FlatStorage` 与 `ReadStorage`）。两者共用时序与故障注入：每读一个 512 字节块推进虚拟时钟。可注入：
   - 固定延迟；
   - 周期性停顿；
   - 第 k 次块读取失败；
@@ -153,6 +165,8 @@ STM32F4 的 SPI/I²S 数据寄存器是 16 位。经 16 位 DMA 发送 32 位槽
 | 时序不足 | `Player::new` 拒绝：“读卡与解码的持续负载为 134.1%，超过 100%”；预填不足的报告文字另有核对 |
 | 读错误、拔卡、重新插卡 | 第 2 首读取中块读取失败：该曲按读取错误跳过（`read_errors=1`），只输出出错前的前缀，其余曲目完整。播放中拔卡：其余曲目打开失败，最后一首出错时停止并报告失败，不 panic。重新插卡后 `scan`、`play`：完整且逐字节一致 |
 | 串口命令脚本 | `ls`、错误命令、越界 `play` 的回应正确；播放中 `pause`（`status` 显示 paused）、`resume`、`next`、`prev`、`stop` 都生效；暂停与切歌不算欠载；三段输出各为对应参考的前缀 |
+| 无文件系统存储：同一夹具播放列表放在“闪存”里，时序与停顿同第一行 | 与参考逐字节一致，跳过原因相同，无欠载 |
+| 无文件系统存储的读错误 | 第 2 首读取中闪存报错一次：按读取错误跳过，只输出出错前的前缀，其余曲目完整 |
 | 板级能力不足：时钟不能产生 44.1 kHz、只支持双声道 | 44.1 kHz 与单声道曲目分别以 `Rate(44100)`、`Channels(1)` 拒绝，其余曲目逐字节一致 |
 
 变异检查（逐一改坏、确认被测试发现、再还原），四处都被发现：
@@ -168,7 +182,7 @@ STM32F4 的 SPI/I²S 数据寄存器是 16 位。经 16 位 DMA 发送 32 位槽
 
 `qy-mcu-demo` 现在就是一个“外设由软件模拟的板级适配”：
 
-- **SD 卡**：`build.rs` 用 `qy-fat-image` 生成 FAT16 镜像（簇 512 字节，约 2.1 MB），编进闪存，经 `embedded-sdmmc` 扫描读取；
+- **存储**：块设备上的 FAT（“SD 卡”镜像放在闪存里）：`build.rs` 用 `qy-fat-image` 生成 FAT16 镜像（簇 512 字节，约 2.1 MB），编进闪存，经 `embedded-sdmmc` 扫描读取；
 - **DMA**：主循环空闲时推进一个 DMA 周期，在临界区里调用 `Feeder::fill`；
 - **串口**：命令脚本（`ls`、`play`、`pause`、`resume`）经行缓冲解析，回应经半主机输出。
 
@@ -216,7 +230,7 @@ STM32F4 的 SPI/I²S 数据寄存器是 16 位。经 16 位 DMA 发送 32 位槽
 ## 8. 未运行与未完成
 
 - **实物验收（任务卡 T2 末尾三项）**：**未运行**。需要用户在任一满足最低要求的板上提供记录，记录里写明芯片型号、RAM/Flash、时钟、DAC 型号与采集设备。三项为：
-  - 从 SD 卡播放 16/24 位 WAV 与支持范围内的 FLAC；
+  - 从板载存储（该板实际使用的介质）播放 16/24 位 WAV 与支持范围内的 FLAC；
   - 串口命令；
   - 欠载、读取错误、解码错误的计数与报告。
 - **实测时序 `U`、`D` 与 DMA 周期**：未实测，配置档的预填仍为暂定值，应由实测回写。示例板与 QEMU 的时序都不是实测值。

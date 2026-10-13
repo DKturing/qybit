@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use embedded_sdmmc::{Block, BlockCount, BlockDevice, BlockIdx};
+use embedded_storage::ReadStorage;
 use qy_codec_auto::AutoDecoder;
 use qy_codec_auto::profile::{EMBEDDED_FULL, Profile};
 use qy_core::engine::{Engine, EngineConfig, ErrorPolicy, ReusePolicy};
@@ -25,7 +26,9 @@ use qy_core::{Core, DeviceFormat, PCM_WORK_SAMPLES};
 use qy_host_embedded::budget::{Demand, Load};
 use qy_host_embedded::output::{AudioOutput, OutputCaps, SlotFormat};
 use qy_host_embedded::player::{Notice, Player, Step};
-use qy_host_embedded::{BudgetError, FatStorage, Feeder, FeederAccess, NoClock};
+use qy_host_embedded::{
+    BudgetError, FatStorage, Feeder, FeederAccess, FlatStorage, FlatTrack, NoClock, Storage,
+};
 use qy_pcm_format::static_queue::StaticFrameQueue;
 use qy_pcm_format::{Endian, Placement};
 
@@ -219,6 +222,80 @@ impl BlockDevice for SimDisk {
     }
 }
 
+/// 假的无文件系统闪存（`embedded_storage::ReadStorage`）：与假 SD 卡共用镜像、时序与故障注入，
+/// 按读取的 512 字节块数计时与计数。
+pub struct SimFlash(pub Shared);
+
+impl ReadStorage for SimFlash {
+    type Error = DiskError;
+
+    fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), DiskError> {
+        let mut w = self.0.borrow_mut();
+        for _ in 0..bytes.len().div_ceil(512).max(1) {
+            w.disk.block_reads += 1;
+            let n = w.disk.block_reads;
+            let mut dt = w.disk.block_us;
+            if w.disk.stall_every > 0 && n % w.disk.stall_every == 0 {
+                dt += w.disk.stall_us;
+            }
+            w.advance(dt);
+            if w.disk.removed || w.disk.fail_at == Some(n) {
+                w.disk.failures += 1;
+                return Err(DiskError("注入的闪存读取错误"));
+            }
+        }
+        let start = offset as usize;
+        let Some(src) = w.disk.image.get(start..start + bytes.len()) else {
+            return Err(DiskError("越界"));
+        };
+        bytes.copy_from_slice(src);
+        Ok(())
+    }
+
+    fn capacity(&self) -> usize {
+        self.0.borrow().disk.image.len()
+    }
+}
+
+/// 无文件系统镜像：曲目按顺序紧接存放（每首按 4 字节对齐），返回镜像与曲目表（泄漏为 `'static`）。
+pub fn flat_image(tracks: &[Track]) -> (Vec<u8>, &'static [FlatTrack]) {
+    let mut img = Vec::new();
+    let mut table = Vec::new();
+    for t in tracks {
+        while img.len() % 4 != 0 {
+            img.push(0xA5);
+        }
+        table.push(FlatTrack {
+            name: Box::leak(t.name.clone().into_boxed_str()),
+            offset: img.len() as u32,
+            len: t.bytes.len() as u32,
+        });
+        img.extend_from_slice(&t.bytes);
+    }
+    (img, Box::leak(table.into_boxed_slice()))
+}
+
+/// 用无文件系统存储搭建。
+pub fn setup_flat(
+    tracks: &[Track],
+    disk: Disk,
+    timing: Timing,
+    policy: ErrorPolicy,
+) -> Result<(FlatPlayer, Shared), BudgetError> {
+    let (img, table) = flat_image(tracks);
+    let disk = Disk { image: img, ..disk };
+    setup_with(
+        |w| match FlatStorage::new(SimFlash(w.clone()), table) {
+            Ok(s) => s,
+            Err(e) => panic!("曲目表：{e:?}"),
+        },
+        disk,
+        caps(),
+        timing,
+        policy,
+    )
+}
+
 /// 假 I²S 输出。
 pub struct SimOut(pub Shared);
 
@@ -276,8 +353,9 @@ impl FeederAccess<QN> for SimFeeder {
     }
 }
 
-pub type SimPlayer =
-    Player<AutoDecoder, FatStorage<SimDisk, NoClock, MAX_TRACKS>, SimOut, SimFeeder, QN>;
+pub type SimPlayerWith<S> = Player<AutoDecoder, S, SimOut, SimFeeder, QN>;
+pub type SimPlayer = SimPlayerWith<FatStorage<SimDisk, NoClock, MAX_TRACKS>>;
+pub type FlatPlayer = SimPlayerWith<FlatStorage<SimFlash>>;
 
 fn leak<T: Default + Clone>(n: usize) -> &'static mut [T] {
     Box::leak(vec![T::default(); n].into_boxed_slice())
@@ -329,6 +407,31 @@ pub fn setup(
     timing: Timing,
     policy: ErrorPolicy,
 ) -> Result<(SimPlayer, Shared, u32), BudgetError> {
+    let (p, w) = setup_with(
+        |w| {
+            let (storage, scan) = FatStorage::new(SimDisk(w.clone()), NoClock);
+            if let Err(e) = scan {
+                panic!("扫描失败：{e:?}");
+            }
+            storage
+        },
+        disk,
+        caps,
+        timing,
+        policy,
+    )?;
+    let n = p.storage().track_count();
+    Ok((p, w, n))
+}
+
+/// 用任意存储搭建（`make` 由共享世界构造存储）。
+pub fn setup_with<S: Storage>(
+    make: impl FnOnce(&Shared) -> S,
+    disk: Disk,
+    caps: OutputCaps,
+    timing: Timing,
+    policy: ErrorPolicy,
+) -> Result<(SimPlayerWith<S>, Shared), BudgetError> {
     let world = Rc::new(RefCell::new(World {
         now: 0,
         dma: None,
@@ -376,11 +479,7 @@ pub fn setup(
             on_error: policy,
         },
     );
-    let (storage, scan) = FatStorage::new(SimDisk(world.clone()), NoClock);
-    let tracks = match scan {
-        Ok(n) => n,
-        Err(e) => panic!("扫描失败：{e:?}"),
-    };
+    let storage = make(&world);
     let player = Player::new(
         engine,
         storage,
@@ -389,19 +488,19 @@ pub fn setup(
         512,
         &loads(timing),
     )?;
-    Ok((player, world, tracks))
+    Ok((player, world))
 }
 
 /// 每次 `step` 的 CPU 耗时（µs，解码与 pack 的虚拟成本）。
 pub const STEP_US: u64 = 20;
 
 /// 运行主循环直到播放结束（无 DMA、不在播放）或超时。`hook` 在每步之前调用，可下发命令。
-pub fn run(
-    p: &mut SimPlayer,
+pub fn run<S: Storage>(
+    p: &mut SimPlayerWith<S>,
     w: &Shared,
     limit_us: u64,
     notices: &mut Vec<Notice>,
-    mut hook: impl FnMut(&mut SimPlayer, &Shared, &[Notice]),
+    mut hook: impl FnMut(&mut SimPlayerWith<S>, &Shared, &[Notice]),
 ) {
     loop {
         hook(p, w, notices);

@@ -43,6 +43,9 @@ bbqueue = { version = "=0.7.0", default-features = false }
 # SD 卡 / FAT 文件系统读取（no_std，无 alloc），通用嵌入式宿主（M3 T2）读取曲目文件。关闭默认的
 # log 特性。2026-07-24 发布，审阅记录见 docs/m3-t2-embedded-host.md。
 embedded-sdmmc = { version = "=0.10.0", default-features = false }
+# 按偏移读取的存储设备标准接口（no_std，无依赖），通用嵌入式宿主的无文件系统曲目存储（闪存等）。
+# 2026-09-20 发布，rust-embedded-community。
+embedded-storage = { version = "=0.3.2", default-features = false }
 # MCU 一次性静态零缓冲（ConstStaticCell），仅 qy-codec-flac 的 static-cell 特性使用。
 static_cell = { version = "=2.1.1", default-features = false }
 # ALSA 绑定（封装系统 alsa-lib），仅 Linux 目标使用（M2 T3）。

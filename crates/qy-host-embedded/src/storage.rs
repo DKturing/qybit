@@ -1,5 +1,9 @@
 //! 曲目存储：[`Storage`] 接口与基于 `embedded-sdmmc` 的 FAT 实现 [`FatStorage`]。
 //!
+//! 存储介质由板级决定，宿主只依赖 [`Storage`]：块设备上的 FAT（SD 卡、eMMC、U 盘、放了 FAT 镜像的
+//! 闪存）用 [`FatStorage`]，板级只实现按块读取；不需要文件系统的介质用 [`crate::flat::FlatStorage`]；
+//! 其他文件系统由板级直接实现 [`Storage`]。
+//!
 //! 读取是同步分段的：主循环每步至多读一段（`read_chunk` 字节），期间 DMA 中断照常
 //! 取数，因此单次读取的最长耗时直接计入预填公式（见 [`crate::budget`]）。
 //!
