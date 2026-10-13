@@ -62,6 +62,39 @@ jobs:
       - run: cargo build --locked -p qy-host-wasapi -p qybit
       - run: cargo test --locked -p qy-host-wasapi -p qybit
 
+  # M2 T4 B 层：snd-aloop 内核虚拟声卡回环。runner 不能加载内核模块时明确标记为未运行，
+  # A 层（file 插件，见通用模块测试）的结果不能代替 B 层。
+  loopback-aloop:
+    name: 回环 B 层 (snd-aloop)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: 加载 snd-aloop
+        id: aloop
+        run: |
+          if sudo apt-get install -y "linux-modules-extra-$(uname -r)" && sudo modprobe snd-aloop; then
+            sudo chmod a+rw /dev/snd/*
+            cat /proc/asound/cards
+            echo "loaded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=B 层未运行::runner 不支持加载 snd-aloop 内核模块，B 层未运行（A 层结果不能代替 B 层）"
+            echo "loaded=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: B 层回环矩阵
+        if: steps.aloop.outputs.loaded == 'true'
+        run: cargo test --locked -p qy-host-alsa --test loopback_aloop -- --ignored --nocapture --test-threads=1
+      - name: 上传回环报告
+        if: always() && steps.aloop.outputs.loaded == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: qybit-alsa-loopback-snd-aloop
+          path: target/qybit-report/
+      - name: 记录未运行
+        if: steps.aloop.outputs.loaded != 'true'
+        run: echo "回环 B 层（snd-aloop）：未运行（runner 不支持内核模块）。本地运行见 scripts/aloop-loopback.sh。" >> "$GITHUB_STEP_SUMMARY"
+
   # 解码 fuzz 冒烟（各 60 秒，以夹具为初始语料）。正式 10 分钟记录见 docs/m0-t2-wav.md 与 docs/m1-t3-integration.md。
   fuzz-smoke:
     name: fuzz 冒烟 (${{ matrix.target }})

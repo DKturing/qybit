@@ -288,8 +288,8 @@ fn valid_card_name(s: &str) -> bool {
 
 /// 检查设备名：只接受 `hw:`，其他会转换或混音的 PCM 一律拒绝。
 ///
-/// 接受：`hw:0`、`hw:0,1`、`hw:0,1,2`、`hw:CARD=名称`、`hw:CARD=名称,DEV=1`、
-/// `hw:CARD=名称,DEV=1,SUBDEV=0`（名称为字母、数字、`_`、`-`）。
+/// 接受：`hw:0`、`hw:0,1`、`hw:0,1,2`、`hw:名称,1,2`（名称以字母开头）、`hw:CARD=名称`、
+/// `hw:CARD=名称,DEV=1`、`hw:CARD=名称,DEV=1,SUBDEV=0`（名称为字母、数字、`_`、`-`）。
 pub fn check_device_name(name: &str) -> Result<HwDevice<'_>, DeviceNameError> {
     let name = name.trim();
     if name.is_empty() {
@@ -318,7 +318,16 @@ pub fn check_device_name(name: &str) -> Result<HwDevice<'_>, DeviceNameError> {
             None => Card::Name(n),
         },
         Some(_) => return Err(DeviceNameError::Malformed),
-        None => Card::Index(parse_u32(first).ok_or(DeviceNameError::Malformed)?),
+        // 位置写法：卡号或声卡 id（以字母开头，如 `hw:Loopback,0,1`）。
+        None => match parse_u32(first) {
+            Some(i) => Card::Index(i),
+            None if first.starts_with(|c: char| c.is_ascii_alphabetic())
+                && valid_card_name(first) =>
+            {
+                Card::Name(first)
+            }
+            None => return Err(DeviceNameError::Malformed),
+        },
     };
     let field = |p: Option<&str>, key: &str| -> Result<Option<u32>, DeviceNameError> {
         match p {

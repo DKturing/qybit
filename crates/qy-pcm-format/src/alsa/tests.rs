@@ -287,6 +287,8 @@ fn device_names_only_hw() {
         ),
         ("hw:CARD=1,DEV=0", Card::Index(1), 0, None),
         ("  hw:0,0  ", Card::Index(0), 0, None),
+        ("hw:Loopback,0,1", Card::Name("Loopback"), 0, Some(1)),
+        ("hw:PCH", Card::Name("PCH"), 0, None),
     ];
     for (name, card, device, subdevice) in ok {
         assert_eq!(
@@ -307,6 +309,10 @@ fn device_names_only_hw() {
         check_device_name("hw:CARD=PCH").map(|d| d.playback_node()),
         Ok(None)
     );
+    assert_eq!(
+        check_device_name("hw:Loopback,0,1").map(|d| d.playback_node()),
+        Ok(None)
+    );
     use DeviceNameError::*;
     let bad = [
         ("", Empty),
@@ -325,7 +331,8 @@ fn device_names_only_hw() {
         ("HW:0", NotHw),
         ("hw", Malformed),
         ("hw:", Malformed),
-        ("hw:x", Malformed),
+        ("hw:_x", Malformed),
+        ("hw:Loop back", Malformed),
         ("hw:0,x", Malformed),
         ("hw:-1", Malformed),
         ("hw:0,1,2,3", Malformed),
