@@ -190,3 +190,20 @@ fn capacity_errors_are_explicit() {
         })
     ));
 }
+
+/// F1：声道数超出宿主容量（双声道容量上的 6 声道流）在 STREAMINFO 处报容量不足，
+/// 不是“不支持的格式”；同一个流在 8 声道容量下正常解码。
+#[test]
+fn channels_beyond_capacity_are_capacity_errors() {
+    use qy_codec_flac::FlacError;
+    let data = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/cli_24_6ch_96k_51.flac"),
+    )
+    .unwrap_or_default();
+    assert_eq!(
+        decode_all(&data, Capacity::DESKTOP),
+        Err(FlacError::TooManyChannels)
+    );
+    assert_eq!(decode_all(&data, Capacity::DESKTOP_MULTICHANNEL), Ok(6_000));
+}

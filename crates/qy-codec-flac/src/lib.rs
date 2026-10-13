@@ -182,6 +182,8 @@ pub enum FlacError {
     NonZeroPadding,
     /// 块大小超出宿主容量。
     BlockTooLarge,
+    /// 声道数超出宿主容量（F1：如双声道配置档上的多声道流）。
+    TooManyChannels,
     /// 编码帧超出输入窗口容量（含 STREAMINFO 声明的最大帧长度）。
     FrameTooLarge,
     /// 合法但不支持：位深或采样率超出格式描述可表示的范围。
@@ -202,7 +204,9 @@ impl FlacError {
         match self {
             FlacError::Unsupported | FlacError::BadChannelMask => DecodeError::Unsupported,
             FlacError::Truncated => DecodeError::Truncated,
-            FlacError::BlockTooLarge | FlacError::FrameTooLarge => DecodeError::CapacityExceeded,
+            FlacError::BlockTooLarge | FlacError::FrameTooLarge | FlacError::TooManyChannels => {
+                DecodeError::CapacityExceeded
+            }
             _ => DecodeError::Malformed,
         }
     }
@@ -398,7 +402,7 @@ impl FlacDecoder {
             return Err(FlacError::BadStreamInfo);
         }
         if channels as usize > self.cap.max_channels {
-            return Err(FlacError::Unsupported);
+            return Err(FlacError::TooManyChannels);
         }
         // 声明的容量需求先检查；实际帧仍逐帧检查。
         if usize::from(max_block) > self.cap.max_block {

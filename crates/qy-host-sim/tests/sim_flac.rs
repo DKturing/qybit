@@ -377,6 +377,7 @@ fn build_case(seed: u64, fixtures: &[Fixture]) -> Case {
         max_ticks: dur * 3 + stall_total + 100 * tracks.len() as u64 + 5_000,
         on_error: ErrorPolicy::Stop,
         controls: Vec::new(),
+        device_layouts: None,
     };
     Case {
         tracks,

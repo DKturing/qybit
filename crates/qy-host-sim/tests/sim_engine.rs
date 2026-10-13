@@ -116,6 +116,7 @@ fn scenario(
         max_ticks: 60_000,
         on_error,
         controls,
+        device_layouts: None,
     }
 }
 

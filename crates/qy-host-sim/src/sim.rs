@@ -15,7 +15,7 @@
 //! 写入输入窗口，交给核心拒绝并计数。
 
 use qy_core::engine::{EngineFault, ErrorPolicy, HostAction, HostEvent, Poll};
-use qy_core::{DeviceFormat, Generation};
+use qy_core::{ChannelLayout, DeviceFormat, Generation};
 
 use crate::SimHost;
 
@@ -110,6 +110,9 @@ pub struct Scenario {
     pub on_error: ErrorPolicy,
     /// 在指定 tick 执行的播放控制。
     pub controls: Vec<(u64, Control)>,
+    /// 设备支持的声道布局（设备上的样本顺序，F1）。`None`：设备按源布局输出（WASAPI 掩码顺序）；
+    /// `Some`：只支持列出的布局，位置集合与源相同而顺序不同时由 pack 纯置换，否则设备不支持。
+    pub device_layouts: Option<Vec<ChannelLayout>>,
 }
 
 /// 播放控制。
@@ -240,6 +243,35 @@ pub fn choose_device_format(
     src: &qy_core::SourceFormat,
     supported: &[(u8, u8)],
 ) -> Option<DeviceFormat> {
+    choose_device_format_with(src, supported, None)
+}
+
+/// 同 [`choose_device_format`]，设备只支持 `layouts` 中的声道布局时取位置集合与源相同的一个。
+pub fn choose_device_format_with(
+    src: &qy_core::SourceFormat,
+    supported: &[(u8, u8)],
+    layouts: Option<&[ChannelLayout]>,
+) -> Option<DeviceFormat> {
+    let Some(list) = layouts else {
+        return choose_wave_order(src, supported);
+    };
+    let layout = list
+        .iter()
+        .copied()
+        .find(|l| l.same_positions(&src.layout()))?;
+    let base = choose_wave_order(src, supported)?;
+    DeviceFormat::with_layout(
+        base.sample_rate(),
+        layout,
+        base.container_bits(),
+        base.valid_bits(),
+        base.endian(),
+        base.placement(),
+    )
+    .ok()
+}
+
+fn choose_wave_order(src: &qy_core::SourceFormat, supported: &[(u8, u8)]) -> Option<DeviceFormat> {
     let min_v = supported
         .iter()
         .filter(|(_, v)| *v >= src.bits())
@@ -511,7 +543,11 @@ impl Sim<'_> {
             } => self.issue_read(generation, request, max, tick),
             HostAction::Close { .. } => self.open_track = None,
             HostAction::SelectDevice { source } => {
-                match choose_device_format(&source, &self.sc.supported) {
+                match choose_device_format_with(
+                    &source,
+                    &self.sc.supported,
+                    self.sc.device_layouts.as_deref(),
+                ) {
                     Some(format) => self.handle(HostEvent::DeviceSelected { format }),
                     None => self.handle(HostEvent::DeviceUnsupported),
                 }

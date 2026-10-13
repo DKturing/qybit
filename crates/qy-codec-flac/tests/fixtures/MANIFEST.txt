@@ -236,20 +236,20 @@ err_reserved_channels -> Malformed ReservedCode
   180 字节；来源：手写错误：声道码 11（CRC-8 重算）；种子：smooth 909 / 1001–1004（错误夹具）
   核对：未做参考解码（错误或不支持的夹具）
 err_mask_tag_count_mismatch -> Unsupported BadChannelMask
-  sha256 6e206af63689f34d94325cf39b748ccf1cb2c0f61c75c20e1739281036e36291
-  4110 字节；来源：手写错误：6 声道，掩码只有 3 位；种子：smooth 1101（声道签名）
+  sha256 8022d1020243f89e6aebadabe2b0448d4f0743f5a800d94cc30d7c5e46cf226d
+  1413 字节；来源：手写错误：双声道，掩码有 3 位；种子：smooth 1101（声道签名）
   核对：未做参考解码（错误或不支持的夹具）
 err_mask_tag_bad_hex -> Unsupported BadChannelMask
-  sha256 886c3b1eb3f6f99b20e728235ffd8a8ec276f4529f9ff16262a1997b6a6e4080
-  4108 字节；来源：手写错误：掩码不是十六进制；种子：smooth 1101（声道签名）
+  sha256 c50ee213117894f5dbe45d32bb92ac0bb021b6ada9cb0757fc40523fb74d4e76
+  1411 字节；来源：手写错误：掩码不是十六进制；种子：smooth 1101（声道签名）
   核对：未做参考解码（错误或不支持的夹具）
 err_mask_tag_conflict -> Unsupported BadChannelMask
-  sha256 ace430ff36442604ff7746b2863f3c034e33b73cd39f200c145fbfcb6640cef3
-  4154 字节；来源：手写错误：两个掩码标签不一致；种子：smooth 1101（声道签名）
+  sha256 1d118199c0c8628912662f69c8470ff5c2d727d48914155fd322a4ba3236dc12
+  1457 字节；来源：手写错误：两个掩码标签不一致；种子：smooth 1101（声道签名）
   核对：未做参考解码（错误或不支持的夹具）
 err_mask_tag_reserved_bit -> Unsupported BadChannelMask
-  sha256 8edf41efc23033b113bc688f03d285e87b5319cf83a0c1c306d5f3aa44df0b41
-  4112 字节；来源：手写错误：掩码含第 20 位（无扬声器位置）；种子：smooth 1101（声道签名）
+  sha256 4521ae33c848ffb98c0cc997bc82296c5f117656e64f9bcfea01d5ff8f2b150f
+  1415 字节；来源：手写错误：掩码含第 20 位（无扬声器位置）；种子：smooth 1101（声道签名）
   核对：未做参考解码（错误或不支持的夹具）
 err_vorbis_comment_overrun -> Malformed BadVorbisComment
   sha256 c462feb620926bea8e5a59b5c25725972457b0f3f3772be31c8d07c02d23273a

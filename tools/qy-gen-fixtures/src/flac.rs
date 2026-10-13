@@ -1512,13 +1512,14 @@ fn error_cases() -> Vec<Fixture> {
         vec![sub(Kind::Verbatim); 3]
     });
     let _ = frames;
-    // F1：声道掩码标签的错误形式（布局无法确认，拒绝）。
+    // F1：声道掩码标签的错误形式（布局无法确认，拒绝）。用双声道流，使任何声道容量下
+    // 解码器都能读到标签（多声道流在双声道容量下会先报容量不足）。
     let mc = |tags: &[&[u8]]| {
-        let vals = channel_signed(smooth(1101, 512, 6, 16, 0.5), 6);
-        let frames = encode_blocks(&vals, 6, 48_000, 16, 512, Assign::Indep, &|_| {
-            vec![sub(Kind::Fixed(1, rice(9))); 6]
+        let vals = channel_signed(smooth(1101, 512, 2, 16, 0.5), 2);
+        let frames = encode_blocks(&vals, 2, 48_000, 16, 512, Assign::Indep, &|_| {
+            vec![sub(Kind::Fixed(1, rice(9))); 2]
         });
-        let mut s = stream(48_000, 6, 16, frames);
+        let mut s = stream(48_000, 2, 16, frames);
         s.meta = vec![(4, vorbis_comment_with(tags))];
         stream_bytes(&s)
     };
@@ -1526,7 +1527,7 @@ fn error_cases() -> Vec<Fixture> {
         (
             "err_mask_tag_count_mismatch",
             &[b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x0007".as_slice()][..],
-            "6 声道，掩码只有 3 位",
+            "双声道，掩码有 3 位",
         ),
         (
             "err_mask_tag_bad_hex",
@@ -1536,14 +1537,14 @@ fn error_cases() -> Vec<Fixture> {
         (
             "err_mask_tag_conflict",
             &[
-                b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x003F".as_slice(),
-                b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x060F".as_slice(),
+                b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x0003".as_slice(),
+                b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x0600".as_slice(),
             ][..],
             "两个掩码标签不一致",
         ),
         (
             "err_mask_tag_reserved_bit",
-            &[b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x10001F".as_slice()][..],
+            &[b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x100001".as_slice()][..],
             "掩码含第 20 位（无扬声器位置）",
         ),
     ] {

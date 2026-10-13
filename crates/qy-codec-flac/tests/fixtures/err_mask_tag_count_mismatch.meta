@@ -2,4 +2,4 @@ result Unsupported
 detail BadChannelMask
 format none
 frames 0
-origin 手写错误：6 声道，掩码只有 3 位
+origin 手写错误：双声道，掩码有 3 位
