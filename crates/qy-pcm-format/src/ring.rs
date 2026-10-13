@@ -19,7 +19,9 @@ pub use crate::queue::MAX_FRAME_BYTES;
 /// 这是宿主的默认资源配置，不是软件上限：更高采样率由宿主按资源预算分配更大的队列，
 /// 预算不足时 [`reconfigure`] 返回容量错误（播放前明确报告）。
 pub const DEFAULT_CAPACITY_BYTES: usize =
-    frames_for_millis(192_000, BUFFER_MILLIS) as usize * MAX_FRAME_BYTES;
+    frames_for_millis(192_000, BUFFER_MILLIS) as usize * STEREO_C32_FRAME_BYTES;
+/// 双声道 C32 一帧的字节数（默认队列预算按此计算）。
+const STEREO_C32_FRAME_BYTES: usize = 2 * 4;
 
 /// 启动前预填目标：当前采样率下 500 ms 的帧数（向上取整）。
 /// 短曲目由宿主预填全部有效帧并明确 EOF。

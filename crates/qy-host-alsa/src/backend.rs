@@ -153,6 +153,7 @@ impl<O: Opener, P: ThreadPriority + Clone + Send + 'static> Backend for AlsaBack
                 format: alsa_format,
                 sample_rate: source.sample_rate(),
                 channels: source.channels(),
+                layout: source.layout(),
                 period_frames: period,
                 periods: self.periods,
             };

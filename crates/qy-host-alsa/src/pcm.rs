@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+use qy_pcm_format::ChannelLayout;
 use qy_pcm_format::alsa::{AlsaFormat, HwApplied, HwRequest};
 
 /// alsa-lib 调用失败：调用名与正 errno。
@@ -65,6 +66,8 @@ pub struct HwPlan {
     pub format: AlsaFormat,
     pub sample_rate: u32,
     pub channels: u16,
+    /// 设备声道布局（设备上的样本顺序）。
+    pub layout: ChannelLayout,
     /// 目标周期帧数。
     pub period_frames: u32,
     /// 缓冲为周期的整数倍。

@@ -13,11 +13,12 @@ use core::fmt;
 use crate::pack::{Exact, PackError, Pcm};
 use crate::{DeviceFormat, MAX_CHANNELS};
 
-/// 当前实现范围内的最大设备帧字节数：双声道 × C32（多声道见 tasks/FORMATS.md F1）。
+/// 最大设备帧字节数：有布局可描述的最大声道数（18）× C32。
 pub const MAX_FRAME_BYTES: usize = MAX_CHANNELS as usize * 4;
 
-/// 需要暂存区的队列实现（`rtrb`）每批 pack 的最大字节数：工作区最大帧数 × 最大帧宽。
-pub const PACK_SCRATCH_BYTES: usize = 4096 * MAX_FRAME_BYTES;
+/// 需要暂存区的队列实现（`rtrb`）每批 pack 的最大字节数：4096 帧双声道 C32（32 KiB）。
+/// 声道更多时每批帧数相应减少（至少一帧，18 声道 C32 一帧 72 字节），不改变结果。
+pub const PACK_SCRATCH_BYTES: usize = 4096 * 2 * 4;
 
 /// 按目标能力计算设备帧队列须容纳的数据字节数：`rate` 下 `millis` 毫秒（帧数向上取整）×
 /// 声道 × 容器字节。整数溢出时返回 `None`。静态 BipBuffer 的存储还须另加

@@ -238,6 +238,7 @@ impl Pcm for FakePcm {
             format: plan.format,
             sample_rate: plan.sample_rate,
             channels: plan.channels,
+            layout: plan.layout,
             period_frames: period,
             buffer_frames: buffer,
         };

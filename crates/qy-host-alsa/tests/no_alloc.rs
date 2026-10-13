@@ -68,6 +68,7 @@ fn alsa_render_loop_does_not_allocate() {
         format: AlsaFormat::S16Le,
         sample_rate: 44_100,
         channels: 2,
+        layout: qy_pcm_format::ChannelLayout::STEREO,
         period_frames: 441,
         periods: 4,
     };

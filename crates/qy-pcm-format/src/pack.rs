@@ -11,7 +11,7 @@
 
 use core::marker::PhantomData;
 
-use crate::{DeviceFormat, Endian, Placement, SourceFormat};
+use crate::{DeviceFormat, Endian, MAX_LAYOUT_CHANNELS, Placement, SourceFormat};
 
 mod sealed {
     pub trait Sealed {}
@@ -47,7 +47,7 @@ pub struct Pcm<'a, M: Fidelity> {
 pub enum PackError {
     /// 样本数不是声道数的整数倍。
     PartialFrame,
-    /// 采样率或声道数与设备格式不同（禁止隐式重采样或声道变换）。
+    /// 采样率或扬声器位置集合与设备格式不同（禁止隐式重采样、声道增减或混音）。
     FormatMismatch,
     /// N > V：设备有效位不足以无损容纳源精度。
     Precision { source_bits: u8, valid_bits: u8 },
@@ -86,7 +86,7 @@ impl<M: Fidelity> Pcm<'_, M> {
 
 /// 检查源与设备格式是否可无损 pack。
 pub fn check(src: &SourceFormat, dev: &DeviceFormat) -> Result<(), PackError> {
-    if src.sample_rate() != dev.sample_rate() || src.channels() != dev.channels() {
+    if src.sample_rate() != dev.sample_rate() || !src.layout().same_positions(&dev.layout()) {
         return Err(PackError::FormatMismatch);
     }
     if src.bits() > dev.valid_bits() {
@@ -98,11 +98,29 @@ pub fn check(src: &SourceFormat, dev: &DeviceFormat) -> Result<(), PackError> {
     Ok(())
 }
 
+/// 设备第 j 个声道取源的哪个声道：按扬声器位置对应（F1）。位置集合相同由 [`check`] 保证。
+fn channel_map(
+    src: &SourceFormat,
+    dev: &DeviceFormat,
+) -> Result<[u8; MAX_LAYOUT_CHANNELS], PackError> {
+    let mut map = [0u8; MAX_LAYOUT_CHANNELS];
+    let s = src.layout();
+    for (slot, &pos) in map.iter_mut().zip(dev.layout().positions()) {
+        let i = s.index_of(pos).ok_or(PackError::FormatMismatch)?;
+        *slot = i as u8;
+    }
+    Ok(map)
+}
+
 /// 把 `src` 尽可能多的完整帧 pack 到 `out`，返回帧数（受 `out` 容量限制）。
+///
+/// 设备声道顺序与源不同（位置集合相同）时按位置纯置换：每个样本值原样放入对应扬声器的
+/// 设备声道，不增减、不混合声道（tasks/F1.md §6）。
 ///
 /// 出错时 `out` 内容未定义，调用方不得入队。
 pub fn pack(src: &Pcm<'_, Exact>, dev: &DeviceFormat, out: &mut [u8]) -> Result<usize, PackError> {
     check(&src.format, dev)?;
+    let map = channel_map(&src.format, dev)?;
     let n = u32::from(src.format.bits());
     let v = u32::from(dev.valid_bits());
     let c = u32::from(dev.container_bits());
@@ -116,23 +134,31 @@ pub fn pack(src: &Pcm<'_, Exact>, dev: &DeviceFormat, out: &mut [u8]) -> Result<
     };
     let lo = -(1i64 << (n - 1));
     let hi = (1i64 << (n - 1)) - 1;
-    let count = frames * channels;
-    for (i, (&s, dst)) in src.samples[..count]
-        .iter()
-        .zip(out[..count * bytes].chunks_exact_mut(bytes))
+    for (f, (frame, dst_frame)) in src
+        .samples
+        .chunks_exact(channels)
+        .zip(out[..frames * align].chunks_exact_mut(align))
         .enumerate()
     {
-        let s = i64::from(s);
-        if s < lo || s > hi {
-            return Err(PackError::SampleOutOfRange { index: i });
-        }
-        // shift ≤ 31 且 s 在 N 位内，结果落在 C 位有符号范围内，不会溢出。
-        let word = ((s << shift) as u32).to_le_bytes();
-        match dev.endian() {
-            Endian::Little => dst.copy_from_slice(&word[..bytes]),
-            Endian::Big => {
-                for (k, b) in dst.iter_mut().enumerate() {
-                    *b = word[bytes - 1 - k];
+        for (&from, dst) in map[..channels]
+            .iter()
+            .zip(dst_frame.chunks_exact_mut(bytes))
+        {
+            let from = usize::from(from);
+            let s = i64::from(frame[from]);
+            if s < lo || s > hi {
+                return Err(PackError::SampleOutOfRange {
+                    index: f * channels + from,
+                });
+            }
+            // shift ≤ 31 且 s 在 N 位内，结果落在 C 位有符号范围内，不会溢出。
+            let word = ((s << shift) as u32).to_le_bytes();
+            match dev.endian() {
+                Endian::Little => dst.copy_from_slice(&word[..bytes]),
+                Endian::Big => {
+                    for (k, b) in dst.iter_mut().enumerate() {
+                        *b = word[bytes - 1 - k];
+                    }
                 }
             }
         }
@@ -416,5 +442,70 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// F1：5.1 源（WAVE 顺序 FL FR FC LFE BL BR）送到 HDA 顺序（FL FR BL BR FC LFE）的
+    /// ALSA S24_LE 设备：每个样本值原样放入同一扬声器的设备声道（纯置换），期望字节独立写出。
+    #[test]
+    fn permutes_channels_by_speaker_position() {
+        use crate::{ChannelLayout, Speaker::*};
+        let (Some(wave51), Some(hda)) = (
+            ChannelLayout::from_mask(0x3F),
+            ChannelLayout::from_positions(&[
+                FrontLeft,
+                FrontRight,
+                BackLeft,
+                BackRight,
+                FrontCenter,
+                LowFrequency,
+            ]),
+        ) else {
+            panic!("layouts");
+        };
+        let (Ok(src), Ok(dev)) = (
+            SourceFormat::with_layout(48_000, wave51, 16),
+            DeviceFormat::with_layout(48_000, hda, 32, 24, Endian::Little, Placement::LsbAligned),
+        ) else {
+            panic!("formats");
+        };
+        // 两帧：声道值即“帧号 × 16 + 声道编号”，负值覆盖符号扩展。
+        let samples = [1, 2, 3, 4, 5, 6, -17, -18, -19, -20, -21, -22];
+        let Ok(pcm) = Pcm::exact(&samples, src) else {
+            panic!("pcm");
+        };
+        let mut out = [0u8; 48];
+        assert_eq!(pack(&pcm, &dev, &mut out), Ok(2));
+        // S24_LE（LsbAligned，C32/V24，N16）：s << 8，按设备顺序 FL FR BL BR FC LFE。
+        let order = [0usize, 1, 4, 5, 2, 3];
+        let mut expect = [0u8; 48];
+        for f in 0..2 {
+            for (j, &from) in order.iter().enumerate() {
+                let v = (samples[f * 6 + from] << 8) as u32;
+                expect[(f * 6 + j) * 4..(f * 6 + j) * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        assert_eq!(out, expect);
+        // 位置集合不同（5.1 侧环绕）：拒绝。
+        let Some(side) = ChannelLayout::from_mask(0x60F) else {
+            panic!("side");
+        };
+        let Ok(dev_side) =
+            DeviceFormat::with_layout(48_000, side, 32, 24, Endian::Little, Placement::LsbAligned)
+        else {
+            panic!("dev");
+        };
+        assert_eq!(
+            pack(&pcm, &dev_side, &mut out),
+            Err(PackError::FormatMismatch)
+        );
+        // 超范围样本报告的是源样本下标（第 2 帧的 FC = 下标 8）。
+        let bad = [1, 2, 3, 4, 5, 6, 7, 8, 40_000, 10, 11, 12];
+        let Ok(pcm) = Pcm::exact(&bad, src) else {
+            panic!("pcm");
+        };
+        assert_eq!(
+            pack(&pcm, &dev, &mut out),
+            Err(PackError::SampleOutOfRange { index: 8 })
+        );
     }
 }

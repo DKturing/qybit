@@ -182,6 +182,7 @@ impl Pcm for RealPcm {
                 format: plan.format,
                 sample_rate: plan.sample_rate,
                 channels: plan.channels,
+                layout: plan.layout,
                 period_frames: u32::try_from(period).unwrap_or(u32::MAX),
                 buffer_frames: u32::try_from(buffer).unwrap_or(u32::MAX),
             },
@@ -275,6 +276,7 @@ mod tests {
             format: AlsaFormat::S16Le,
             sample_rate: 48_000,
             channels: 2,
+            layout: qy_pcm_format::ChannelLayout::STEREO,
             period_frames: 480,
             periods: 4,
         };

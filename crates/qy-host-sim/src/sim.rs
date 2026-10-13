@@ -180,7 +180,25 @@ impl Report {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for s in &self.segments {
             s.epoch.hash(&mut h);
-            format!("{:?}", s.format).hash(&mut h);
+            let f = &s.format;
+            // 字段与 M3 T1 时 `DeviceFormat` 的 Debug 输出逐字一致，使单/双声道摘要可与 F1 之前比对；
+            // 非默认布局（多声道等）另行计入。
+            format!(
+                "DeviceFormat {{ sample_rate: {}, channels: {}, container_bits: {}, valid_bits: {}, \
+                 endian: {:?}, placement: {:?}, block_align: {}, bytes_per_sec: {} }}",
+                f.sample_rate(),
+                f.channels(),
+                f.container_bits(),
+                f.valid_bits(),
+                f.endian(),
+                f.placement(),
+                f.block_align(),
+                f.bytes_per_sec()
+            )
+            .hash(&mut h);
+            if qy_core::ChannelLayout::default_for(f.channels()) != Some(f.layout()) {
+                format!("{:?}", f.layout()).hash(&mut h);
+            }
             s.valid.hash(&mut h);
             s.tail_padding_frames.hash(&mut h);
         }

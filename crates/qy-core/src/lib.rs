@@ -21,14 +21,14 @@
 pub mod engine;
 
 pub use qy_pcm_format::pack::{Exact, Pcm};
-pub use qy_pcm_format::{DeviceFormat, MAX_CHANNELS, SourceFormat};
+pub use qy_pcm_format::{ChannelLayout, DeviceFormat, MAX_CHANNELS, SourceFormat, Speaker};
 
 /// M0 默认输入窗口字节数。
 pub const INPUT_WINDOW_BYTES: usize = 8192;
 /// M0 默认 PCM 工作区帧数。
 pub const PCM_WORK_FRAMES: usize = 4096;
-/// M0 默认 PCM 工作区样本数（4096 帧 × 最多 2 声道）。
-pub const PCM_WORK_SAMPLES: usize = PCM_WORK_FRAMES * qy_pcm_format::MAX_CHANNELS as usize;
+/// WAV PCM 工作区样本数（4096 帧双声道）。声道更多时每次解码的帧数相应减少（F1）。
+pub const PCM_WORK_SAMPLES: usize = PCM_WORK_FRAMES * 2;
 
 /// 解码器一次调用的结果状态。各状态互斥，零产出不兼表缺输入与 EOF。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

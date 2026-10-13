@@ -352,6 +352,7 @@ fn request() -> HwRequest {
         format: AlsaFormat::S24_3Le,
         sample_rate: 44_100,
         channels: 2,
+        layout: ChannelLayout::STEREO,
         period_frames: 441,
         buffer_frames: 1764,
     }
@@ -576,4 +577,148 @@ fn open_errors_are_classified() {
     assert_eq!(OpenError::from_errno(-1), OpenError::Permission);
     assert_eq!(OpenError::from_errno(-22), OpenError::Other(22));
     assert_eq!(OpenError::from_errno(i32::MIN), OpenError::Other(i32::MAX));
+}
+
+// ---- F1：声道映射（chmap）----
+
+use crate::Speaker::*;
+
+/// 独立写出的 ALSA 位置值（alsa-lib pcm.h）：FL=3 FR=4 RL=5 RR=6 FC=7 LFE=8 SL=9 SR=10 RC=11。
+const FL: u32 = 3;
+const FR: u32 = 4;
+const RL: u32 = 5;
+const RR: u32 = 6;
+const FC: u32 = 7;
+const LFE: u32 = 8;
+const SL: u32 = 9;
+const SR: u32 = 10;
+
+fn layout(mask: u32) -> ChannelLayout {
+    match ChannelLayout::from_mask(mask) {
+        Some(l) => l,
+        None => panic!("{mask:#x}"),
+    }
+}
+
+#[test]
+fn chmap_positions_map_to_speakers() {
+    assert_eq!(
+        layout_from_chmap(&[FL, FR, RL, RR, FC, LFE]).map(|l| l.mask()),
+        Ok(0x3F)
+    );
+    assert_eq!(
+        layout_from_chmap(&[FL, FR, RL, RR, FC, LFE]).map(|l| l.is_wave_order()),
+        Ok(false)
+    );
+    assert_eq!(
+        layout_from_chmap(&[FL, FR, FC, LFE, SL, SR]),
+        Ok(layout(0x60F))
+    );
+    assert_eq!(layout_from_chmap(&[CHMAP_MONO]), Ok(ChannelLayout::MONO));
+    assert_eq!(
+        layout_from_chmap(&[FL, FR | CHMAP_PHASE_INVERSE]),
+        Err(ChmapError::PhaseInverse { channel: 1 })
+    );
+    // UNKNOWN=0、NA=1、FLW=16、LLFE=37 没有对应的 WAVE 位置。
+    for p in [0, 1, 16, 37] {
+        assert_eq!(
+            layout_from_chmap(&[FL, p]),
+            Err(ChmapError::UnknownPosition {
+                channel: 1,
+                position: p
+            })
+        );
+    }
+    assert_eq!(layout_from_chmap(&[FL, FL]), Err(ChmapError::Invalid));
+    assert_eq!(layout_from_chmap(&[]), Err(ChmapError::Invalid));
+    // 往返：每个 WAVE 位置的 ALSA 值都能映回同一位置。
+    for bit in 0..18 {
+        let Some(s) = Speaker::from_bit(bit) else {
+            panic!("{bit}");
+        };
+        assert_eq!(
+            layout_from_chmap(&[chmap_position(s)]).map(|l| l.positions()[0]),
+            Ok(s)
+        );
+    }
+    assert_eq!(chmap_position(BackCenter), 11);
+    assert_eq!(chmap_position(TopBackRight), 26);
+}
+
+#[test]
+fn chmap_plan_prefers_var_then_fixed() {
+    let src51 = layout(0x3F);
+    let hda: &[u32] = &[FL, FR, RL, RR, FC, LFE];
+    let side: &[u32] = &[FL, FR, FC, LFE, SL, SR];
+    let stereo: &[u32] = &[FL, FR];
+    // 可变映射：设置为源布局（不置换）。
+    assert_eq!(
+        plan_chmap(&src51, &[(ChmapType::Var, hda)]),
+        Ok(ChmapPlan::Set(src51))
+    );
+    // 固定映射：按设备顺序，pack 置换。
+    let Ok(ChmapPlan::Fixed(l)) = plan_chmap(&src51, &[(ChmapType::Fixed, hda)]) else {
+        panic!("fixed");
+    };
+    assert!(l.same_positions(&src51) && l != src51);
+    // 位置集合不同：拒绝。
+    assert_eq!(
+        plan_chmap(
+            &src51,
+            &[(ChmapType::Fixed, side), (ChmapType::Fixed, stereo)]
+        ),
+        Err(ChmapError::NoMatchingMap)
+    );
+    // 设备不报告映射：多于 2 声道拒绝，双声道按默认布局（M2 行为不变）。
+    assert_eq!(plan_chmap(&src51, &[]), Err(ChmapError::Unavailable));
+    assert_eq!(
+        plan_chmap(&ChannelLayout::STEREO, &[]),
+        Ok(ChmapPlan::Unqueried(ChannelLayout::STEREO))
+    );
+    assert_eq!(
+        plan_chmap(&ChannelLayout::STEREO, &[(ChmapType::Fixed, hda)]),
+        Ok(ChmapPlan::Unqueried(ChannelLayout::STEREO))
+    );
+    // 反相映射被跳过。
+    let inv: &[u32] = &[FL, FR, RL, RR, FC, LFE | CHMAP_PHASE_INVERSE];
+    assert_eq!(
+        plan_chmap(&src51, &[(ChmapType::Fixed, inv)]),
+        Err(ChmapError::NoMatchingMap)
+    );
+    // 读回核对。
+    let plan = ChmapPlan::Set(src51);
+    assert_eq!(confirm_chmap(&plan, &[FL, FR, FC, LFE, RL, RR]), Ok(src51));
+    assert_eq!(confirm_chmap(&plan, hda), Err(ChmapError::ReadBack));
+}
+
+#[test]
+fn confirm_with_reordered_layout() {
+    let Ok(hda) = layout_from_chmap(&[FL, FR, RL, RR, FC, LFE]) else {
+        panic!("hda");
+    };
+    let r = HwRequest {
+        format: AlsaFormat::S24Le,
+        channels: 6,
+        layout: hda,
+        ..request()
+    };
+    let a = HwApplied {
+        format_code: AlsaFormat::S24Le.code(),
+        channels: 6,
+        ..applied_ok()
+    };
+    let Ok(src51) = SourceFormat::with_layout(44_100, layout(0x3F), 24) else {
+        panic!("src");
+    };
+    let Ok(d) = confirm(&src51, &r, &a) else {
+        panic!("confirm");
+    };
+    assert!(d.reorders(&src51));
+    assert_eq!(d.layout(), hda);
+    // 布局声道数与请求不符：拒绝。
+    let bad = HwRequest { channels: 2, ..r };
+    assert_eq!(
+        confirm(&src51, &bad, &a),
+        Err(ConfirmError::Request(FormatError::UndefinedLayout))
+    );
 }

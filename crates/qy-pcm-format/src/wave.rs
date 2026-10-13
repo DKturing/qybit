@@ -9,7 +9,7 @@
 //! `wBitsPerSample` 为容器位宽且为 8 的倍数、`wValidBitsPerSample ≤ wBitsPerSample`、
 //! `dwChannelMask`、`SubFormat`）；ksmedia.h `SPEAKER_*` 与 `KSDATAFORMAT_SUBTYPE_PCM`。
 
-use crate::{DeviceFormat, Endian, FormatError, MAX_CHANNELS, Placement};
+use crate::{ChannelLayout, DeviceFormat, Endian, FormatError, MAX_CHANNELS, Placement};
 
 /// `WAVE_FORMAT_PCM`。
 pub const WAVE_FORMAT_PCM: u16 = 0x0001;
@@ -114,8 +114,11 @@ const fn derive(
 }
 
 impl WaveFormatEx {
-    /// 纯 `WAVEFORMATEX` PCM 描述，本阶段只用于 16/16 单/双声道。
+    /// 纯 `WAVEFORMATEX` PCM 描述，只用于 16/16 单/双声道（格式码 1 不能表示更多声道的布局）。
     pub const fn pcm16(sample_rate: u32, channels: u16) -> Result<Self, FormatError> {
+        if channels > 2 {
+            return Err(FormatError::UndefinedLayout);
+        }
         match derive(sample_rate, channels, 16, 16) {
             Ok((block_align, avg_bytes_per_sec)) => Ok(Self {
                 format_tag: WAVE_FORMAT_PCM,
@@ -161,22 +164,40 @@ impl WaveFormatEx {
 }
 
 impl WaveFormatExtensible {
-    /// 纯 `WAVEFORMATEXTENSIBLE` PCM 描述。
+    /// 纯 `WAVEFORMATEXTENSIBLE` PCM 描述（单/双声道默认布局）。
     pub const fn pcm(
         sample_rate: u32,
         channels: u16,
         container_bits: u16,
         valid_bits: u16,
     ) -> Result<Self, FormatError> {
+        if channels == 0 {
+            return Err(FormatError::Channels);
+        }
+        match ChannelLayout::default_for(channels) {
+            Some(layout) => Self::pcm_layout(sample_rate, layout, container_bits, valid_bits),
+            None => Err(FormatError::UndefinedLayout),
+        }
+    }
+
+    /// 以声道布局构造：`dwChannelMask` 为布局的位置集合，布局必须是掩码顺序（样本按掩码位
+    /// 从低到高排列），否则返回 [`FormatError::LayoutOrder`]。
+    pub const fn pcm_layout(
+        sample_rate: u32,
+        layout: ChannelLayout,
+        container_bits: u16,
+        valid_bits: u16,
+    ) -> Result<Self, FormatError> {
+        if !layout.is_wave_order() {
+            return Err(FormatError::LayoutOrder);
+        }
+        let channels = layout.channels();
         let (block_align, avg_bytes_per_sec) =
             match derive(sample_rate, channels, container_bits, valid_bits) {
                 Ok(v) => v,
                 Err(e) => return Err(e),
             };
-        let mask = match channel_mask(channels) {
-            Ok(m) => m,
-            Err(e) => return Err(e),
-        };
+        let mask = layout.mask();
         Ok(Self {
             format: WaveFormatEx {
                 format_tag: WAVE_FORMAT_EXTENSIBLE,
@@ -199,9 +220,9 @@ impl WaveFormatExtensible {
         {
             return Err(FormatError::Layout);
         }
-        Self::pcm(
+        Self::pcm_layout(
             f.sample_rate(),
-            f.channels(),
+            f.layout(),
             f.container_bits() as u16,
             f.valid_bits() as u16,
         )
@@ -370,12 +391,52 @@ mod tests {
         assert_eq!(WaveFormatEx::pcm16(44_100, 1).map(|f| f.to_bytes()), Ok(ex));
     }
 
+    /// 多声道：dwChannelMask 等于布局的位置集合，nBlockAlign 随声道数；非掩码顺序拒绝。
+    #[test]
+    fn multichannel_layouts() {
+        use crate::Speaker::*;
+        for (mask, ch) in [(0x7u32, 3u16), (0x33, 4), (0x3F, 6), (0x60F, 6), (0x63F, 8)] {
+            let Some(l) = ChannelLayout::from_mask(mask) else {
+                panic!("{mask:#x}");
+            };
+            let Ok(f) = WaveFormatExtensible::pcm_layout(48_000, l, 24, 24) else {
+                panic!("{mask:#x}");
+            };
+            let b = f.to_bytes();
+            assert_eq!(u16::from_le_bytes([b[2], b[3]]), ch);
+            assert_eq!(u16::from_le_bytes([b[12], b[13]]), ch * 3);
+            assert_eq!(
+                u32::from_le_bytes([b[8], b[9], b[10], b[11]]),
+                48_000 * u32::from(ch) * 3
+            );
+            assert_eq!(u32::from_le_bytes([b[20], b[21], b[22], b[23]]), mask);
+        }
+        let Some(hda) = ChannelLayout::from_positions(&[
+            FrontLeft,
+            FrontRight,
+            BackLeft,
+            BackRight,
+            FrontCenter,
+            LowFrequency,
+        ]) else {
+            panic!("hda");
+        };
+        assert_eq!(
+            WaveFormatExtensible::pcm_layout(48_000, hda, 16, 16),
+            Err(FormatError::LayoutOrder)
+        );
+    }
+
     #[test]
     fn rejects_invalid() {
         use FormatError::*;
         assert_eq!(WaveFormatExtensible::pcm(0, 2, 16, 16), Err(SampleRate));
         assert_eq!(WaveFormatExtensible::pcm(48_000, 0, 16, 16), Err(Channels));
-        assert_eq!(WaveFormatExtensible::pcm(48_000, 3, 16, 16), Err(Channels));
+        // F1：多于 2 声道必须给出布局（pcm_layout）。
+        assert_eq!(
+            WaveFormatExtensible::pcm(48_000, 3, 16, 16),
+            Err(UndefinedLayout)
+        );
         assert_eq!(WaveFormatExtensible::pcm(48_000, 2, 32, 0), Err(ValidBits));
         assert_eq!(WaveFormatExtensible::pcm(48_000, 2, 24, 32), Err(ValidBits));
         assert_eq!(
@@ -395,7 +456,8 @@ mod tests {
             Err(Overflow)
         );
         assert_eq!(WaveFormatEx::pcm16(0, 1), Err(SampleRate));
-        assert_eq!(WaveFormatEx::pcm16(48_000, 3), Err(Channels));
+        // F1：WAVE_FORMAT_PCM 不能表示多于 2 声道的扬声器布局（tasks/F1.md §0）。
+        assert_eq!(WaveFormatEx::pcm16(48_000, 3), Err(UndefinedLayout));
         assert_eq!(WaveFormatEx::pcm16(u32::MAX, 2), Err(Overflow));
     }
 

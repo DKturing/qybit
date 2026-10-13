@@ -17,7 +17,10 @@
 
 use core::fmt;
 
-use crate::{DeviceFormat, Endian, FormatError, Placement, SourceFormat};
+use crate::{
+    ChannelLayout, DeviceFormat, Endian, FormatError, MAX_LAYOUT_CHANNELS, Placement, SourceFormat,
+    Speaker,
+};
 
 /// 本阶段支持的 ALSA 样本格式（小端有符号整数）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,7 +100,23 @@ impl AlsaFormat {
         }
     }
 
-    /// 本格式下的设备格式。
+    /// 本格式、指定设备声道布局（设备上的样本顺序）下的设备格式。
+    pub const fn device_format_layout(
+        self,
+        sample_rate: u32,
+        layout: ChannelLayout,
+    ) -> Result<DeviceFormat, FormatError> {
+        DeviceFormat::with_layout(
+            sample_rate,
+            layout,
+            self.container_bits(),
+            self.valid_bits(),
+            Endian::Little,
+            self.placement(),
+        )
+    }
+
+    /// 本格式下的单/双声道设备格式（默认布局）。
     pub const fn device_format(
         self,
         sample_rate: u32,
@@ -370,6 +389,8 @@ pub struct HwRequest {
     pub format: AlsaFormat,
     pub sample_rate: u32,
     pub channels: u16,
+    /// 设备声道布局（设备上的样本顺序，见 [`plan_chmap`]）；声道数必须等于 `channels`。
+    pub layout: ChannelLayout,
     pub period_frames: u32,
     pub buffer_frames: u32,
 }
@@ -565,9 +586,12 @@ pub fn confirm(
     req: &HwRequest,
     applied: &HwApplied,
 ) -> Result<DeviceFormat, ConfirmError> {
+    if req.layout.channels() != req.channels {
+        return Err(ConfirmError::Request(FormatError::UndefinedLayout));
+    }
     let format = req
         .format
-        .device_format(req.sample_rate, req.channels)
+        .device_format_layout(req.sample_rate, req.layout)
         .map_err(ConfirmError::Request)?;
     if !format.accepts(src) {
         return Err(ConfirmError::Request(FormatError::ValidBits));
@@ -602,6 +626,198 @@ pub fn confirm(
             source_bits: src.bits(),
             mask,
         }))
+    }
+}
+
+/// ALSA 声道映射类型（`snd_pcm_chmap_type`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChmapType {
+    /// `SND_CHMAP_TYPE_NONE`：位置未指定。
+    None,
+    /// `SND_CHMAP_TYPE_FIXED`：固定位置，不能改。
+    Fixed,
+    /// `SND_CHMAP_TYPE_VAR`：位置可自由交换，可用 `snd_pcm_set_chmap` 设置。
+    Var,
+    /// `SND_CHMAP_TYPE_PAIRED`：成对可交换。本项目按列出的顺序使用，不做成对交换。
+    Paired,
+}
+
+/// `SND_CHMAP_POSITION_MASK`：位置值所在的低 16 位。
+pub const CHMAP_POSITION_MASK: u32 = 0xffff;
+/// `SND_CHMAP_PHASE_INVERSE`：该声道反相。
+pub const CHMAP_PHASE_INVERSE: u32 = 1 << 16;
+/// `SND_CHMAP_MONO`。
+pub const CHMAP_MONO: u32 = 2;
+
+/// WAVE 扬声器位置与 ALSA 位置值（alsa-lib `include/pcm.h` 的 `SND_CHMAP_*`，已与系统头文件
+/// 核对）的对应：FL=3、FR=4、RL=5、RR=6、FC=7、LFE=8、SL=9、SR=10、RC=11、FLC=12、FRC=13、
+/// TC=21、TFL=22、TFR=23、TFC=24、TRL=25、TRR=26、TRC=27。ALSA 的 rear（RL/RR/RC）即 WAVE 的
+/// back（BL/BR/BC）。
+const CHMAP_OF_SPEAKER: [u32; 18] = [
+    3,  // FrontLeft
+    4,  // FrontRight
+    7,  // FrontCenter
+    8,  // LowFrequency
+    5,  // BackLeft（RL）
+    6,  // BackRight（RR）
+    12, // FrontLeftOfCenter（FLC）
+    13, // FrontRightOfCenter（FRC）
+    11, // BackCenter（RC）
+    9,  // SideLeft
+    10, // SideRight
+    21, // TopCenter
+    22, // TopFrontLeft
+    24, // TopFrontCenter
+    23, // TopFrontRight
+    25, // TopBackLeft（TRL）
+    27, // TopBackCenter（TRC）
+    26, // TopBackRight（TRR）
+];
+
+/// ALSA 声道映射不可用的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChmapError {
+    /// 设备不报告声道映射，多于 2 声道时无法确认布局。
+    Unavailable,
+    /// 设备没有与源扬声器位置集合相同的映射。
+    NoMatchingMap,
+    /// 映射含反相声道（`SND_CHMAP_PHASE_INVERSE`），会改变信号。
+    PhaseInverse { channel: usize },
+    /// 映射含 WAVE 无对应的位置（如 `UNKNOWN`、`NA`、宽声道、低音左右）。
+    UnknownPosition { channel: usize, position: u32 },
+    /// 映射有重复位置或声道数为 0 / 超过 18。
+    Invalid,
+    /// 设置后读回的映射与计划不符。
+    ReadBack,
+}
+
+impl fmt::Display for ChmapError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Unavailable => {
+                f.write_str("设备不报告声道映射（chmap），无法确认多声道的扬声器布局")
+            }
+            Self::NoMatchingMap => f.write_str("设备没有与源扬声器位置相同的声道映射"),
+            Self::PhaseInverse { channel } => write!(f, "设备声道 {channel} 为反相映射"),
+            Self::UnknownPosition { channel, position } => {
+                write!(
+                    f,
+                    "设备声道 {channel} 的位置 {position} 没有对应的扬声器位置"
+                )
+            }
+            Self::Invalid => f.write_str("设备声道映射无效（重复位置或声道数不符）"),
+            Self::ReadBack => f.write_str("设置后读回的声道映射与请求不符"),
+        }
+    }
+}
+
+/// 扬声器位置的 ALSA 位置值。
+pub const fn chmap_position(s: Speaker) -> u32 {
+    CHMAP_OF_SPEAKER[s as usize]
+}
+
+/// 由 ALSA 映射（原始位置值，含标志位）得到设备布局。单声道映射 `[MONO]` 视为 `[FC]`。
+pub fn layout_from_chmap(raw: &[u32]) -> Result<ChannelLayout, ChmapError> {
+    if raw.len() == 1 && raw[0] & CHMAP_POSITION_MASK == CHMAP_MONO {
+        if raw[0] & CHMAP_PHASE_INVERSE != 0 {
+            return Err(ChmapError::PhaseInverse { channel: 0 });
+        }
+        return Ok(ChannelLayout::MONO);
+    }
+    if raw.is_empty() || raw.len() > MAX_LAYOUT_CHANNELS {
+        return Err(ChmapError::Invalid);
+    }
+    let mut list = [Speaker::FrontLeft; MAX_LAYOUT_CHANNELS];
+    for (i, (&p, slot)) in raw.iter().zip(list.iter_mut()).enumerate() {
+        if p & CHMAP_PHASE_INVERSE != 0 {
+            return Err(ChmapError::PhaseInverse { channel: i });
+        }
+        let pos = p & CHMAP_POSITION_MASK;
+        let found = CHMAP_OF_SPEAKER.iter().position(|&c| c == pos);
+        let Some(bit) = found.and_then(|b| Speaker::from_bit(b as u32)) else {
+            return Err(ChmapError::UnknownPosition {
+                channel: i,
+                position: pos,
+            });
+        };
+        *slot = bit;
+    }
+    ChannelLayout::from_positions(&list[..raw.len()]).ok_or(ChmapError::Invalid)
+}
+
+/// 声道映射计划。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChmapPlan {
+    /// 设备不报告映射；单/双声道按默认布局使用（报告为“不可查询”）。
+    Unqueried(ChannelLayout),
+    /// 可变映射：设置为该布局（与源相同顺序），之后必须读回核对。
+    Set(ChannelLayout),
+    /// 固定映射：设备即为该布局；与源顺序不同时 pack 纯置换。
+    Fixed(ChannelLayout),
+}
+
+impl ChmapPlan {
+    /// 计划的设备布局。
+    pub const fn layout(&self) -> ChannelLayout {
+        match *self {
+            Self::Unqueried(l) | Self::Set(l) | Self::Fixed(l) => l,
+        }
+    }
+}
+
+/// 按 `snd_pcm_query_chmaps` 的结果选择声道映射（tasks/F1.md §3）：
+/// - 有声道数相同的可变映射且其位置集合包含源的全部位置：设置为源布局（不需要置换）；
+/// - 否则取位置集合与源相同的固定（或成对）映射，按其顺序使用（pack 纯置换）；
+/// - 设备没有该声道数的映射：单/双声道按默认布局，多于 2 声道拒绝；
+/// - 有该声道数的映射但位置集合都不同：拒绝。
+///
+/// 含反相或无对应位置的映射跳过，不会被选中。
+pub fn plan_chmap(
+    src: &ChannelLayout,
+    maps: &[(ChmapType, &[u32])],
+) -> Result<ChmapPlan, ChmapError> {
+    let n = usize::from(src.channels());
+    let candidates = maps.iter().filter(|(_, m)| m.len() == n);
+    let mut fixed = None;
+    let mut any = false;
+    for (t, m) in candidates {
+        any = true;
+        let Ok(layout) = layout_from_chmap(m) else {
+            continue;
+        };
+        if !layout.same_positions(src) {
+            continue;
+        }
+        match t {
+            ChmapType::Var => return Ok(ChmapPlan::Set(*src)),
+            ChmapType::Fixed | ChmapType::Paired => {
+                if fixed.is_none() || layout == *src {
+                    fixed = Some(layout);
+                }
+            }
+            ChmapType::None => {}
+        }
+    }
+    if let Some(l) = fixed {
+        return Ok(ChmapPlan::Fixed(l));
+    }
+    if any {
+        return Err(ChmapError::NoMatchingMap);
+    }
+    // 没有该声道数的映射：单/双声道按默认布局（M2 行为不变），更多声道无法确认布局。
+    match ChannelLayout::default_for(src.channels()) {
+        Some(l) if l == *src => Ok(ChmapPlan::Unqueried(l)),
+        _ => Err(ChmapError::Unavailable),
+    }
+}
+
+/// 核对读回的映射（`snd_pcm_get_chmap`）是否等于计划的设备布局。
+pub fn confirm_chmap(plan: &ChmapPlan, read_back: &[u32]) -> Result<ChannelLayout, ChmapError> {
+    let got = layout_from_chmap(read_back)?;
+    if got == plan.layout() {
+        Ok(got)
+    } else {
+        Err(ChmapError::ReadBack)
     }
 }
 

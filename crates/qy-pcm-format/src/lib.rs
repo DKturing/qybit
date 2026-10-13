@@ -15,6 +15,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod alsa;
+pub mod layout;
 pub mod pack;
 pub mod queue;
 #[cfg(feature = "ring")]
@@ -23,9 +24,12 @@ pub mod ring;
 pub mod static_queue;
 pub mod wave;
 
-/// 当前实现覆盖的声道数（单/双声道）。不是设计上限：多声道（声道映射）见 tasks/FORMATS.md F1，
-/// 在实现前多于 2 声道的源明确报告“尚未实现”。
-pub const MAX_CHANNELS: u16 = 2;
+pub use layout::{ChannelLayout, MAX_LAYOUT_CHANNELS, Speaker};
+
+/// 有声道布局可描述的最大声道数（WAVE 的 18 个扬声器位置，F1）。这是格式语义的限制，不是软件
+/// 资源上限：更多声道的源没有可确认的扬声器位置，按“未定义布局”拒绝；实际可播放的声道数还受
+/// 宿主声明的能力与资源限制（`Capabilities::max_channels`）。
+pub const MAX_CHANNELS: u16 = MAX_LAYOUT_CHANNELS as u16;
 
 /// 格式构造错误。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +46,10 @@ pub enum FormatError {
     Overflow,
     /// 字节序或有效位放置方式不符合目标描述（如 WASAPI 要求小端、高位对齐）。
     Layout,
+    /// 多于 2 声道但没有给出声道布局，或布局声道数与声道数不符（F1）。
+    UndefinedLayout,
+    /// 声道布局不是掩码顺序（按位从低到高），目标描述（WAVEFORMATEXTENSIBLE）无法表示。
+    LayoutOrder,
 }
 
 /// 样本字节序。
@@ -60,31 +68,47 @@ pub enum Placement {
     LsbAligned,
 }
 
-/// 源 PCM 格式：解码器输出为交错、右对齐的 `i32`，携带有效位数 N。
+/// 源 PCM 格式：解码器输出为交错、右对齐的 `i32`，携带有效位数 N 与声道布局。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceFormat {
     sample_rate: u32,
     channels: u16,
     bits: u8,
+    layout: ChannelLayout,
 }
 
 impl SourceFormat {
-    /// 构造源格式；N 必须在 1..=32。
+    /// 构造单/双声道源格式（默认布局 `[FC]` / `[FL FR]`）；N 必须在 1..=32。
+    /// 多于 2 声道必须用 [`SourceFormat::with_layout`] 给出布局，否则返回
+    /// [`FormatError::UndefinedLayout`]。
     pub const fn new(sample_rate: u32, channels: u16, bits: u8) -> Result<Self, FormatError> {
+        if channels == 0 {
+            return Err(FormatError::Channels);
+        }
+        match ChannelLayout::default_for(channels) {
+            Some(layout) => Self::with_layout(sample_rate, layout, bits),
+            None => Err(FormatError::UndefinedLayout),
+        }
+    }
+
+    /// 以声道布局构造源格式；声道数即布局的声道数。
+    pub const fn with_layout(
+        sample_rate: u32,
+        layout: ChannelLayout,
+        bits: u8,
+    ) -> Result<Self, FormatError> {
         // 采样率不设软件上限（AGENTS §3）；只拒绝 0，派生量溢出另行检查。
         if sample_rate == 0 {
             return Err(FormatError::SampleRate);
-        }
-        if channels == 0 || channels > MAX_CHANNELS {
-            return Err(FormatError::Channels);
         }
         if bits == 0 || bits > 32 {
             return Err(FormatError::ValidBits);
         }
         Ok(Self {
             sample_rate,
-            channels,
+            channels: layout.channels(),
             bits,
+            layout,
         })
     }
 
@@ -100,6 +124,11 @@ impl SourceFormat {
     pub const fn bits(&self) -> u8 {
         self.bits
     }
+
+    /// 声道布局（样本顺序）。
+    pub const fn layout(&self) -> ChannelLayout {
+        self.layout
+    }
 }
 
 /// 设备端 PCM 整数格式字段。
@@ -113,10 +142,12 @@ pub struct DeviceFormat {
     placement: Placement,
     block_align: u16,
     bytes_per_sec: u32,
+    layout: ChannelLayout,
 }
 
 impl DeviceFormat {
-    /// 构造设备格式并计算派生字段。
+    /// 构造单/双声道设备格式（默认布局）并计算派生字段。多于 2 声道用
+    /// [`DeviceFormat::with_layout`]。
     ///
     /// 容器位宽限定为 16/24/32；V 必须在 1..=C；所有派生量做溢出检查。
     pub const fn new(
@@ -127,13 +158,36 @@ impl DeviceFormat {
         endian: Endian,
         placement: Placement,
     ) -> Result<Self, FormatError> {
+        if channels == 0 {
+            return Err(FormatError::Channels);
+        }
+        match ChannelLayout::default_for(channels) {
+            Some(layout) => Self::with_layout(
+                sample_rate,
+                layout,
+                container_bits,
+                valid_bits,
+                endian,
+                placement,
+            ),
+            None => Err(FormatError::UndefinedLayout),
+        }
+    }
+
+    /// 以设备声道布局（设备上的样本顺序）构造设备格式。
+    pub const fn with_layout(
+        sample_rate: u32,
+        layout: ChannelLayout,
+        container_bits: u8,
+        valid_bits: u8,
+        endian: Endian,
+        placement: Placement,
+    ) -> Result<Self, FormatError> {
         // 采样率不设软件上限（AGENTS §3）；只拒绝 0，派生量溢出另行检查。
         if sample_rate == 0 {
             return Err(FormatError::SampleRate);
         }
-        if channels == 0 || channels > MAX_CHANNELS {
-            return Err(FormatError::Channels);
-        }
+        let channels = layout.channels();
         if !matches!(container_bits, 16 | 24 | 32) {
             return Err(FormatError::ContainerBits);
         }
@@ -158,7 +212,28 @@ impl DeviceFormat {
             placement,
             block_align,
             bytes_per_sec,
+            layout,
         })
+    }
+
+    /// WASAPI PCM 设备格式（布局为掩码顺序）。
+    pub const fn wasapi_layout(
+        sample_rate: u32,
+        layout: ChannelLayout,
+        container_bits: u8,
+        valid_bits: u8,
+    ) -> Result<Self, FormatError> {
+        if !layout.is_wave_order() {
+            return Err(FormatError::LayoutOrder);
+        }
+        Self::with_layout(
+            sample_rate,
+            layout,
+            container_bits,
+            valid_bits,
+            Endian::Little,
+            Placement::MsbAligned,
+        )
     }
 
     /// WASAPI PCM 设备格式：小端、有效位高位对齐（WAVEFORMATEXTENSIBLE 语义）。
@@ -213,11 +288,22 @@ impl DeviceFormat {
         self.bytes_per_sec
     }
 
-    /// 源格式能否无损放入本设备格式：采样率、声道一致且 N ≤ V。
+    /// 设备声道布局（设备上的样本顺序）。
+    pub const fn layout(&self) -> ChannelLayout {
+        self.layout
+    }
+
+    /// 源格式能否无损放入本设备格式：采样率一致、N ≤ V，扬声器位置集合相同（顺序可以不同，
+    /// 不同时由 pack 纯置换，见 [`DeviceFormat::reorders`]）。
     pub const fn accepts(&self, src: &SourceFormat) -> bool {
         src.sample_rate == self.sample_rate
-            && src.channels == self.channels
+            && src.layout.same_positions(&self.layout)
             && src.bits <= self.valid_bits
+    }
+
+    /// 承载 `src` 时是否需要按设备映射重排声道（位置集合相同而顺序不同）。
+    pub fn reorders(&self, src: &SourceFormat) -> bool {
+        src.layout.same_positions(&self.layout) && src.layout != self.layout
     }
 }
 
@@ -263,10 +349,31 @@ mod tests {
             DeviceFormat::new(48_000, 0, 16, 16, le, p),
             Err(FormatError::Channels)
         );
+        // F1：多于 2 声道没有默认布局，必须用 with_layout 给出（tasks/F1.md §1）。
         assert_eq!(
             DeviceFormat::new(48_000, 3, 16, 16, le, p),
-            Err(FormatError::Channels)
+            Err(FormatError::UndefinedLayout)
         );
+        let Some(l51) = ChannelLayout::from_mask(0x3F) else {
+            panic!("5.1");
+        };
+        let d = DeviceFormat::with_layout(48_000, l51, 24, 24, le, p);
+        assert_eq!(d.map(|d| (d.channels(), d.block_align())), Ok((6, 18)));
+        let Some(hda) = ChannelLayout::from_positions(&[
+            Speaker::FrontLeft,
+            Speaker::FrontRight,
+            Speaker::BackLeft,
+            Speaker::BackRight,
+            Speaker::FrontCenter,
+            Speaker::LowFrequency,
+        ]) else {
+            panic!("hda");
+        };
+        assert_eq!(
+            DeviceFormat::wasapi_layout(48_000, hda, 32, 24),
+            Err(FormatError::LayoutOrder)
+        );
+        assert!(DeviceFormat::wasapi_layout(48_000, l51, 32, 24).is_ok());
         assert_eq!(
             DeviceFormat::new(48_000, 2, 8, 8, le, p),
             Err(FormatError::ContainerBits)
@@ -298,6 +405,38 @@ mod tests {
         assert_eq!(mono.map(|s| dev.accepts(&s)), Ok(false));
         assert_eq!(other_rate.map(|s| dev.accepts(&s)), Ok(false));
         assert_eq!(SourceFormat::new(48_000, 2, 0), Err(FormatError::ValidBits));
+        assert_eq!(
+            SourceFormat::new(48_000, 6, 16),
+            Err(FormatError::UndefinedLayout)
+        );
+        // 位置集合相同、顺序不同：可承载（pack 纯置换）；集合不同：不可承载。
+        let (Some(wave51), Some(side51)) = (
+            ChannelLayout::from_mask(0x3F),
+            ChannelLayout::from_mask(0x60F),
+        ) else {
+            panic!("layouts");
+        };
+        let Some(hda) = ChannelLayout::from_positions(&[
+            Speaker::FrontLeft,
+            Speaker::FrontRight,
+            Speaker::BackLeft,
+            Speaker::BackRight,
+            Speaker::FrontCenter,
+            Speaker::LowFrequency,
+        ]) else {
+            panic!("hda");
+        };
+        let le = Endian::Little;
+        let lsb = Placement::LsbAligned;
+        let (Ok(src), Ok(dev_hda), Ok(dev_side)) = (
+            SourceFormat::with_layout(48_000, wave51, 24),
+            DeviceFormat::with_layout(48_000, hda, 32, 24, le, lsb),
+            DeviceFormat::with_layout(48_000, side51, 32, 24, le, lsb),
+        ) else {
+            panic!("formats");
+        };
+        assert!(dev_hda.accepts(&src) && dev_hda.reorders(&src));
+        assert!(!dev_side.accepts(&src) && !dev_side.reorders(&src));
         assert_eq!(
             SourceFormat::new(48_000, 2, 33),
             Err(FormatError::ValidBits)
