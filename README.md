@@ -35,7 +35,7 @@ cargo test --workspace
 cargo build --target thumbv7em-none-eabihf -p qy-core -p qy-codec-wav -p qy-pcm-format
 ```
 
-WAV 测试夹具由 `python3 tools/gen_wav_fixtures.py` 生成（需要 ffmpeg），fuzz 步骤见 [docs/m0-t2-wav.md](docs/m0-t2-wav.md)。
+WAV 测试夹具由 `cargo run -p qy-gen-fixtures` 生成（需要 PATH 中有 ffmpeg 作为第二参考），fuzz 步骤见 [docs/m0-t2-wav.md](docs/m0-t2-wav.md)。
 
 | fuzz 依赖 | 版本 | 用途 |
 | --- | --- | --- |

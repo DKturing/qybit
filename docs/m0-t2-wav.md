@@ -39,7 +39,7 @@
 
 ## 独立参考夹具
 
-- 生成器：`tools/gen_wav_fixtures.py`（固定种子，重复运行输出逐字节相同）。它不经过 Rust 解码器，而是从已知整数样本直接构造 WAV 字节，样本值写入 `.expect`。
+- 生成器：`tools/qy-gen-fixtures`，用 `cargo run -p qy-gen-fixtures` 运行（纯 Rust，不依赖任何 qy- crate；固定种子，重复运行输出逐字节相同）。它不经过本项目的解码器，而是从已知整数样本直接构造 WAV 字节，样本值写入 `.expect`。
 - 第二参考：对有效夹具用 ffmpeg 6.1.1-3ubuntu5 解码为 s32le，写入 `.ffmpeg.s32le`。生成器断言它等于 `样本 << (32 − V)`，Rust 测试也独立比较。
 - ffmpeg 6.1 会把 C32/V24 的 EXTENSIBLE PCM 误识别为 `pcm_f24le`，所以生成器显式指定输入解码器 `pcm_s{C}le`。脏填充位夹具不做 ffmpeg 比较，因为 ffmpeg 会保留填充位。
 - 共 54 个夹具：有效 17 个（含 V < C 的 12/16、20/24、24/32，奇数 chunk，未知 chunk，fmt 18/42 字节，10000 帧大文件），截断 5 个，不支持 12 个，非法 20 个。

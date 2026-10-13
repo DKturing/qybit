@@ -8,6 +8,7 @@ members = [
     "crates/qy-host-sim",
     "crates/qy-host-wasapi",
     "crates/qybit",
+    "tools/qy-gen-fixtures",
 ]
 
 [workspace.package]

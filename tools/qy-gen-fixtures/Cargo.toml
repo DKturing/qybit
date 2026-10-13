@@ -1,0 +1,12 @@
+[package]
+name = "qy-gen-fixtures"
+description = "生成 qy-codec-wav 的独立参考 WAV 夹具（开发工具，不发布）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
