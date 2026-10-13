@@ -1,5 +1,6 @@
 result ok
 detail -
 format 96000 1 24
+layout 0x4
 frames 512
 origin 手写：Rice2 参数 23、Rice2 escape 24 位

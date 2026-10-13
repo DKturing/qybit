@@ -4,7 +4,7 @@
 //! ksmedia.h；位序号 0–17），[`Speaker`] 的判别值即位序号。布局按**样本顺序**列出位置：
 //! - WAV EXTENSIBLE 与 WASAPI：样本按掩码位从低到高排列（[`ChannelLayout::from_mask`]）；
 //! - FLAC：RFC 9639 §9.1.3 规定 1–8 声道的固定顺序（[`ChannelLayout::flac_default`]），
-//!   这 8 种顺序都等于对应掩码按位从低到高的顺序；
+//!   这 8 种顺序都等于对应掩码按位从低到高的顺序（5、6 声道取侧环绕，与 libFLAC 一致）；
 //! - ALSA：设备的声道映射可以是任意顺序（见 `crate::alsa` 的 chmap 对应表）。
 //!
 //! 单声道布局为 `[FrontCenter]`，双声道为 `[FrontLeft, FrontRight]`。多于 2 声道的源必须
@@ -124,14 +124,17 @@ impl core::fmt::Display for ChannelLayout {
     }
 }
 
-/// FLAC 声道分配 0–7 的位置顺序（RFC 9639 §9.1.3）。
+/// FLAC 声道分配 0–7 的位置顺序（RFC 9639 §9.1.3）。RFC 对 5、6 声道的环绕声道写作
+/// “back/surround left/right”，参考实现 libFLAC（1.4.3 `src/flac/decode.c` 的默认掩码表，
+/// 已核对源码与实际解码输出）取侧环绕：5 声道 `0x607`、6 声道 `0x60F`。本项目与参考实现一致，
+/// 文件以 `WAVEFORMATEXTENSIBLE_CHANNEL_MASK` 声明其他布局（如后环绕 `0x3F`）时以声明为准。
 const FLAC_DEFAULT_MASKS: [u32; 8] = [
     0x4,   // 1：单声道（FC）
     0x3,   // 2：左、右
     0x7,   // 3：左、右、中
     0x33,  // 4：前左、前右、后左、后右
-    0x37,  // 5：前左、前右、中、后左、后右
-    0x3F,  // 6：前左、前右、中、低音、后左、后右
+    0x607, // 5：前左、前右、中、环绕左、环绕右（侧）
+    0x60F, // 6：前左、前右、中、低音、环绕左、环绕右（侧）
     0x70F, // 7：前左、前右、中、低音、后中、侧左、侧右
     0x63F, // 8：前左、前右、中、低音、后左、后右、侧左、侧右
 ];
@@ -263,20 +266,20 @@ mod tests {
     fn masks_and_orders() {
         assert_eq!(ChannelLayout::MONO.positions(), &[FrontCenter]);
         assert_eq!(ChannelLayout::STEREO.positions(), &[FrontLeft, FrontRight]);
-        // 独立写出 RFC 9639 §9.1.3 的顺序逐项核对。
+        // 独立写出 RFC 9639 §9.1.3 的顺序逐项核对（5、6 声道的环绕取侧环绕，与 libFLAC 一致）。
         let expect: [&[Speaker]; 8] = [
             &[FrontCenter],
             &[FrontLeft, FrontRight],
             &[FrontLeft, FrontRight, FrontCenter],
             &[FrontLeft, FrontRight, BackLeft, BackRight],
-            &[FrontLeft, FrontRight, FrontCenter, BackLeft, BackRight],
+            &[FrontLeft, FrontRight, FrontCenter, SideLeft, SideRight],
             &[
                 FrontLeft,
                 FrontRight,
                 FrontCenter,
                 LowFrequency,
-                BackLeft,
-                BackRight,
+                SideLeft,
+                SideRight,
             ],
             &[
                 FrontLeft,

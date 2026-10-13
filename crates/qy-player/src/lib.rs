@@ -128,11 +128,12 @@ mod tests {
             d.wav().map(|w| w.capacity_samples()),
             Some(PCM_WORK_SAMPLES)
         );
+        // F1：桌面配置档用多声道 FLAC 容量（8 声道），窗口为 8 声道不压缩帧上界。
         assert_eq!(
             d.flac().map(|f| f.capacity()),
-            Some(qy_codec_flac::Capacity::DESKTOP)
+            Some(qy_codec_flac::Capacity::DESKTOP_MULTICHANNEL)
         );
-        assert_eq!(d.required_window(), 1 << 20);
+        assert_eq!(d.required_window(), 2_097_146);
         assert_eq!(r.profile.budget().queue, 3_072_000);
         let Ok(f) = DeviceFormat::wasapi(192_000, 2, 32, 32) else {
             panic!("fmt");

@@ -1,0 +1,6 @@
+result ok
+detail -
+format 96000 6 24
+layout 0x3f
+frames 6000
+origin flac 命令行：

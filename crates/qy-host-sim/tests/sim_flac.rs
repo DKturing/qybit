@@ -69,6 +69,8 @@ fn load_fixtures() -> Vec<Fixture> {
             let meta = fs::read_to_string(dir().join(format!("{name}.meta"))).unwrap_or_default();
             let mut result = Ok(());
             let mut format = None;
+            let mut fmt = None;
+            let mut layout = None;
             for line in meta.lines() {
                 let (k, v) = line.split_once(' ').unwrap_or((line, ""));
                 match k {
@@ -85,11 +87,25 @@ fn load_fixtures() -> Vec<Fixture> {
                     "format" if v != "none" => {
                         let p: Vec<u32> = v.split(' ').filter_map(|x| x.parse().ok()).collect();
                         assert_eq!(p.len(), 3, "{name}: format 行");
-                        format = SourceFormat::new(p[0], p[1] as u16, p[2] as u8).ok();
-                        assert!(format.is_some(), "{name}: 非法格式");
+                        fmt = Some((p[0], p[1] as u16, p[2] as u8));
+                    }
+                    // F1：有效夹具的声道布局（WAVE 掩码，libFLAC 解码输出核对过）。
+                    "layout" => {
+                        layout = u32::from_str_radix(v.trim_start_matches("0x"), 16).ok();
                     }
                     _ => {}
                 }
+            }
+            if let Some((rate, ch, bits)) = fmt {
+                format = match layout {
+                    Some(m) => qy_core::ChannelLayout::from_mask(m)
+                        .and_then(|l| SourceFormat::with_layout(rate, l, bits).ok()),
+                    None => SourceFormat::new(rate, ch, bits).ok(),
+                };
+                assert!(
+                    format.is_some_and(|f| f.channels() == ch),
+                    "{name}: 非法格式"
+                );
             }
             let samples = fs::read(dir().join(format!("{name}.s32le")))
                 .unwrap_or_default()

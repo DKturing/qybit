@@ -1,5 +1,6 @@
 result ok
 detail -
 format 44100 2 32
+layout 0x3
 frames 256
 origin 手写：32 位 left/side、side/right、mid/side 极值，33 位侧声道 verbatim/固定/LPC

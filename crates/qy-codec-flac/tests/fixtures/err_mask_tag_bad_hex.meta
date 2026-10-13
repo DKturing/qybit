@@ -1,0 +1,5 @@
+result Unsupported
+detail BadChannelMask
+format none
+frames 0
+origin 手写错误：掩码不是十六进制

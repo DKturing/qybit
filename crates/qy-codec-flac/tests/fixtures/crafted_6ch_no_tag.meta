@@ -1,0 +1,6 @@
+result ok
+detail -
+format 48000 6 24
+layout 0x60f
+frames 1200
+origin 手写：6 声道、无掩码标签：默认 5.1 侧环绕（0x60F，与 libFLAC 一致）

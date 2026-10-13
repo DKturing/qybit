@@ -21,7 +21,7 @@ mod bits;
 mod crc;
 mod frame;
 
-use qy_core::{DecodeError, Decoder, Progress, SourceFormat, Status};
+use qy_core::{ChannelLayout, DecodeError, Decoder, Progress, SourceFormat, Status};
 
 /// 解码器容量配置（宿主声明）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +75,11 @@ impl Capacity {
     /// 桌面：块大小最大 65535、双声道、32 位。不压缩帧上界约 520 KiB，窗口保留 M1 承诺的
     /// 1 MiB（编码帧 ≤ 1 MiB）。
     pub const DESKTOP: Capacity = Capacity::for_limits(65_535, 2, 32).with_min_window(1 << 20);
+
+    /// 桌面多声道（F1）：块大小最大 65535、最多 8 声道（FLAC 声道上限）、32 位。不压缩帧上界
+    /// 2 097 146 字节，即输入窗口；工作区 4 MiB、PCM 2 MiB。桌面配置档使用此容量。
+    pub const DESKTOP_MULTICHANNEL: Capacity =
+        Capacity::for_limits(65_535, 8, 32).with_min_window(1 << 20);
 
     /// MCU 参考配置：块大小 ≤ 4608（RFC 9639 可流式子集在 ≤ 48 kHz 时的上限）、双声道、
     /// **覆盖到 24 位**（不压缩帧上界 28 244 字节）。32 位需要 [`Capacity::for_limits`]`(4608, 2, 32)`
@@ -181,8 +186,11 @@ pub enum FlacError {
     FrameTooLarge,
     /// 合法但不支持：位深或采样率超出格式描述可表示的范围。
     Unsupported,
-    /// 多于 2 声道：多声道（声道映射）尚未实现，见 tasks/FORMATS.md F1。
-    ChannelsNotImplemented,
+    /// VORBIS_COMMENT 块结构错误（长度越过块边界）。
+    BadVorbisComment,
+    /// `WAVEFORMATEXTENSIBLE_CHANNEL_MASK` 标签格式错误、多次出现且不一致，或置位数与声道数
+    /// 不符 / 含无扬声器位置的位（F1：布局无法确认，拒绝）。
+    BadChannelMask,
     /// 源在完整结构前结束（含已解码样本少于 STREAMINFO 总样本数）。
     Truncated,
     /// 已解码样本多于 STREAMINFO 总样本数。
@@ -192,7 +200,7 @@ pub enum FlacError {
 impl FlacError {
     pub fn to_decode_error(self) -> DecodeError {
         match self {
-            FlacError::Unsupported | FlacError::ChannelsNotImplemented => DecodeError::Unsupported,
+            FlacError::Unsupported | FlacError::BadChannelMask => DecodeError::Unsupported,
             FlacError::Truncated => DecodeError::Truncated,
             FlacError::BlockTooLarge | FlacError::FrameTooLarge => DecodeError::CapacityExceeded,
             _ => DecodeError::Malformed,
@@ -220,18 +228,56 @@ pub struct Metrics {
 enum State {
     Marker,
     BlockHeader,
-    StreamInfo { last: bool },
-    Skip { remaining: u32, last: bool },
+    StreamInfo {
+        last: bool,
+    },
+    Skip {
+        remaining: u32,
+        last: bool,
+    },
+    /// VORBIS_COMMENT 块（§8.6），只提取 `WAVEFORMATEXTENSIBLE_CHANNEL_MASK`。
+    Comment {
+        remaining: u32,
+        last: bool,
+        phase: Vc,
+    },
     Frames,
     End,
     Failed(FlacError),
 }
 
+/// VORBIS_COMMENT 解析阶段：长度字段均为 32 位小端（§8.6）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Vc {
+    VendorLen,
+    SkipVendor(u32),
+    Count,
+    FieldLen {
+        left: u32,
+    },
+    Field {
+        len: u32,
+        left: u32,
+    },
+    SkipField {
+        rem: u32,
+        left: u32,
+    },
+    /// 注释之后块内的剩余字节。
+    Tail,
+}
+
+/// 声道掩码标签名（含 `=`，大小写不敏感）。
+const MASK_TAG: &[u8] = b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=";
+/// 解析声道掩码标签时最多读入的字段长度；更长的字段不是该标签的合法形式，按普通注释跳过。
+const MAX_MASK_FIELD: u32 = 64;
+
 /// STREAMINFO 中解码需要的字段（§8.2）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StreamInfo {
     params: frame::StreamParams,
-    format: SourceFormat,
+    /// 元数据全部解析完（得到声道布局）之后才有值，之前不对外报告格式。
+    format: Option<SourceFormat>,
     max_frame: u32,
     total_samples: u64,
 }
@@ -252,6 +298,8 @@ pub struct FlacDecoder {
     blocking: Option<bool>,
     retry_at: usize,
     decoded_samples: u64,
+    /// VORBIS_COMMENT 声明的声道掩码。
+    channel_mask: Option<u32>,
     /// 已发布、未取走的交错样本 `pcm[start..end]`。
     start: usize,
     end: usize,
@@ -272,6 +320,7 @@ impl FlacDecoder {
             cap,
             workspace,
             pcm,
+            channel_mask: None,
             state: State::Marker,
             info: None,
             blocking: None,
@@ -348,9 +397,6 @@ impl FlacDecoder {
         if rate == 0 || bits < 4 || max_block < 16 {
             return Err(FlacError::BadStreamInfo);
         }
-        if channels > 2 {
-            return Err(FlacError::ChannelsNotImplemented);
-        }
         if channels as usize > self.cap.max_channels {
             return Err(FlacError::Unsupported);
         }
@@ -361,19 +407,156 @@ impl FlacDecoder {
         if max_frame != 0 && max_frame as usize > self.cap.input_window {
             return Err(FlacError::FrameTooLarge);
         }
-        let format = SourceFormat::new(rate, channels as u16, bits as u8)
-            .map_err(|_| FlacError::Unsupported)?;
+        // 采样率与位深可由格式描述表示（声道布局在元数据结束时确定，见 end_metadata）。
+        let layout = ChannelLayout::flac_default(channels as u16).ok_or(FlacError::Unsupported)?;
+        SourceFormat::with_layout(rate, layout, bits as u8).map_err(|_| FlacError::Unsupported)?;
         self.info = Some(StreamInfo {
             params: frame::StreamParams {
                 sample_rate: rate,
                 channels,
                 bits,
             },
-            format,
+            format: None,
             max_frame,
             total_samples: total,
         });
         Ok(())
+    }
+
+    /// 元数据结束：确定声道布局（§9.1.3 默认顺序，或 `WAVEFORMATEXTENSIBLE_CHANNEL_MASK`
+    /// 声明的掩码），此后才对外报告格式。
+    fn end_metadata(&mut self) -> Result<(), FlacError> {
+        let Some(info) = self.info.as_mut() else {
+            return Err(FlacError::BadStreamInfo);
+        };
+        let channels = info.params.channels as u16;
+        let layout = match self.channel_mask {
+            Some(m) => ChannelLayout::from_mask(m)
+                .filter(|l| l.channels() == channels)
+                .ok_or(FlacError::BadChannelMask)?,
+            None => ChannelLayout::flac_default(channels).ok_or(FlacError::Unsupported)?,
+        };
+        let format =
+            SourceFormat::with_layout(info.params.sample_rate, layout, info.params.bits as u8)
+                .map_err(|_| FlacError::Unsupported)?;
+        info.format = Some(format);
+        Ok(())
+    }
+
+    /// 解析声道掩码标签字段（不含长度前缀）；不是该标签返回 `Ok(None)`。
+    fn parse_mask_field(field: &[u8]) -> Result<Option<u32>, FlacError> {
+        let n = MASK_TAG.len();
+        if field.len() < n || !field[..n].eq_ignore_ascii_case(MASK_TAG) {
+            return Ok(None);
+        }
+        let v = &field[n..];
+        let hex = match v {
+            [b'0', b'x' | b'X', rest @ ..] => rest,
+            _ => return Err(FlacError::BadChannelMask),
+        };
+        if hex.is_empty() || hex.len() > 8 {
+            return Err(FlacError::BadChannelMask);
+        }
+        let mut m = 0u32;
+        for &c in hex {
+            let d = match c {
+                b'0'..=b'9' => c - b'0',
+                b'a'..=b'f' => c - b'a' + 10,
+                b'A'..=b'F' => c - b'A' + 10,
+                _ => return Err(FlacError::BadChannelMask),
+            };
+            m = (m << 4) | u32::from(d);
+        }
+        Ok(Some(m))
+    }
+
+    /// VORBIS_COMMENT 的一步：返回本步消耗的字节数（0 表示需要更多输入）。
+    fn comment_step(
+        &mut self,
+        avail: &[u8],
+        remaining: u32,
+        phase: Vc,
+    ) -> Result<(usize, u32, Option<Vc>), FlacError> {
+        let take_u32 = |avail: &[u8]| -> Option<u32> {
+            avail
+                .get(..4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        };
+        // (消耗字节, 新的块剩余, 下一阶段；None 表示块结束)
+        let need = |n: u32| -> Result<(), FlacError> {
+            if n > remaining {
+                Err(FlacError::BadVorbisComment)
+            } else {
+                Ok(())
+            }
+        };
+        match phase {
+            Vc::VendorLen | Vc::Count | Vc::FieldLen { .. } => {
+                need(4)?;
+                let Some(v) = take_u32(avail) else {
+                    return Ok((0, remaining, Some(phase)));
+                };
+                let next = match phase {
+                    Vc::VendorLen => Vc::SkipVendor(v),
+                    Vc::Count if v == 0 => Vc::Tail,
+                    Vc::Count => Vc::FieldLen { left: v },
+                    Vc::FieldLen { left } if v <= MAX_MASK_FIELD => Vc::Field { len: v, left },
+                    Vc::FieldLen { left } => Vc::SkipField { rem: v, left },
+                    _ => Vc::Tail,
+                };
+                Ok((4, remaining - 4, Some(next)))
+            }
+            Vc::SkipVendor(rem) | Vc::SkipField { rem, .. } => {
+                need(rem)?;
+                if rem == 0 {
+                    let next = match phase {
+                        Vc::SkipVendor(_) => Vc::Count,
+                        Vc::SkipField { left, .. } if left > 1 => Vc::FieldLen { left: left - 1 },
+                        _ => Vc::Tail,
+                    };
+                    return Ok((0, remaining, Some(next)));
+                }
+                if avail.is_empty() {
+                    return Ok((0, remaining, Some(phase)));
+                }
+                let n = rem.min(u32::try_from(avail.len()).unwrap_or(u32::MAX));
+                let next = match phase {
+                    Vc::SkipVendor(r) => Vc::SkipVendor(r - n),
+                    Vc::SkipField { rem, left } => Vc::SkipField { rem: rem - n, left },
+                    p => p,
+                };
+                Ok((n as usize, remaining - n, Some(next)))
+            }
+            Vc::Field { len, left } => {
+                need(len)?;
+                let Some(field) = avail.get(..len as usize) else {
+                    return Ok((0, remaining, Some(phase)));
+                };
+                if let Some(m) = Self::parse_mask_field(field)? {
+                    if self.channel_mask.is_some_and(|old| old != m) {
+                        return Err(FlacError::BadChannelMask);
+                    }
+                    self.channel_mask = Some(m);
+                }
+                let next = if left > 1 {
+                    Vc::FieldLen { left: left - 1 }
+                } else {
+                    Vc::Tail
+                };
+                Ok((len as usize, remaining - len, Some(next)))
+            }
+            Vc::Tail => {
+                // 注释之后的剩余字节按 §8.6 不属于任何字段，流式跳过。
+                if remaining == 0 {
+                    return Ok((0, 0, None));
+                }
+                if avail.is_empty() {
+                    return Ok((0, remaining, Some(phase)));
+                }
+                let n = remaining.min(u32::try_from(avail.len()).unwrap_or(u32::MAX));
+                Ok((n as usize, remaining - n, Some(Vc::Tail)))
+            }
+        }
     }
 
     fn step(&mut self, input: &[u8], eof: bool) -> Result<Progress, DecodeError> {
@@ -410,6 +593,11 @@ impl FlacDecoder {
                         (0, false) if len == 34 => State::StreamInfo { last },
                         (0, _) | (_, false) => return self.fail(FlacError::BadStreamInfo),
                         (127, _) => return self.fail(FlacError::BadMetadataType),
+                        (4, true) => State::Comment {
+                            remaining: len,
+                            last,
+                            phase: Vc::VendorLen,
+                        },
                         // 其余块（填充、应用、寻道表、注释、CUE、图片及保留类型）流式跳过，不缓存。
                         _ => State::Skip {
                             remaining: len,
@@ -425,14 +613,48 @@ impl FlacDecoder {
                         return self.fail(e);
                     }
                     pos += 34;
+                    if last && let Err(e) = self.end_metadata() {
+                        return self.fail(e);
+                    }
                     self.state = if last {
                         State::Frames
                     } else {
                         State::BlockHeader
                     };
                 }
+                State::Comment {
+                    remaining,
+                    last,
+                    phase,
+                } => match self.comment_step(avail, remaining, phase) {
+                    Err(e) => return self.fail(e),
+                    Ok((_, _, None)) => {
+                        if last && let Err(e) = self.end_metadata() {
+                            return self.fail(e);
+                        }
+                        self.state = if last {
+                            State::Frames
+                        } else {
+                            State::BlockHeader
+                        };
+                    }
+                    Ok((0, r, Some(p))) if p == phase && r == remaining => {
+                        return self.need(pos, eof);
+                    }
+                    Ok((n, r, Some(p))) => {
+                        pos += n;
+                        self.state = State::Comment {
+                            remaining: r,
+                            last,
+                            phase: p,
+                        };
+                    }
+                },
                 State::Skip { remaining, last } => {
                     if remaining == 0 {
+                        if last && let Err(e) = self.end_metadata() {
+                            return self.fail(e);
+                        }
                         self.state = if last {
                             State::Frames
                         } else {
@@ -557,6 +779,7 @@ impl Decoder for FlacDecoder {
     fn reset(&mut self) {
         self.state = State::Marker;
         self.info = None;
+        self.channel_mask = None;
         self.blocking = None;
         self.retry_at = 0;
         self.decoded_samples = 0;
@@ -565,7 +788,7 @@ impl Decoder for FlacDecoder {
     }
 
     fn format(&self) -> Option<SourceFormat> {
-        self.info.map(|i| i.format)
+        self.info.and_then(|i| i.format)
     }
 
     /// 工作区仍有未取走样本时返回 `NeedOutput`，不消耗输入、不重解帧。

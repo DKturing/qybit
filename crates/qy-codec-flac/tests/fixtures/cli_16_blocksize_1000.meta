@@ -1,5 +1,6 @@
 result ok
 detail -
 format 22050 1 16
+layout 0x4
 frames 5500
 origin flac 命令行：-b 1000

@@ -1,5 +1,6 @@
 result ok
 detail -
 format 22050 1 16
+layout 0x4
 frames 1041
 origin 手写：固定块 512，尾帧 17 帧

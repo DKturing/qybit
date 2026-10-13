@@ -1,5 +1,6 @@
 result ok
 detail -
 format 44100 2 16
+layout 0x3
 frames 340
 origin 手写：wasted bits 1–5，常量/verbatim/固定/LPC

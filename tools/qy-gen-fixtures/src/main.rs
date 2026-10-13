@@ -390,6 +390,64 @@ fn build_cases() -> Vec<Case> {
         None,
     );
     ok_ext(cs, "ext32_stereo", ext(2, 176_400, 32, 32, 3), 99, 12, None);
+    // F1：掩码完整声明布局即有效，含非标准的单/双声道位置（原 unsup_stereo_side_mask /
+    // unsup_mono_left_mask：Microsoft WAVEFORMATEXTENSIBLE 中样本按掩码位从低到高对应扬声器）。
+    ok_ext(
+        cs,
+        "ext16_stereo_side_mask",
+        ext(2, 44_100, 16, 16, 0x600),
+        64,
+        30,
+        None,
+    );
+    ok_ext(
+        cs,
+        "ext16_mono_left_mask",
+        ext(1, 44_100, 16, 16, 0x1),
+        64,
+        31,
+        None,
+    );
+    ok_ext(
+        cs,
+        "ext16_3ch_30",
+        ext(3, 48_000, 16, 16, 0x7),
+        120,
+        32,
+        None,
+    );
+    ok_ext(
+        cs,
+        "ext24_4ch_quad",
+        ext(4, 44_100, 24, 24, 0x33),
+        110,
+        33,
+        None,
+    );
+    ok_ext(
+        cs,
+        "ext24in32_6ch_51",
+        ext(6, 96_000, 32, 24, 0x3F),
+        100,
+        34,
+        None,
+    );
+    ok_ext(
+        cs,
+        "ext16_6ch_51_side",
+        ext(6, 48_000, 16, 16, 0x60F),
+        100,
+        35,
+        None,
+    );
+    ok_ext(
+        cs,
+        "ext24_8ch_71",
+        ext(8, 48_000, 24, 24, 0x63F),
+        90,
+        36,
+        None,
+    );
     ok_ext(
         cs,
         "ext24_stereo_cb24",
@@ -529,14 +587,34 @@ fn build_cases() -> Vec<Case> {
         riff(&[fmt_pcm(pcm(3, 44_100, 16)), chunk(b"data", &[0u8; 6])]),
         un,
     ));
+    // F1：多于 2 声道而布局未完整声明（tasks/F1.md §1）。
     cs.push(err_case(
-        "unsup_stereo_side_mask",
-        riff(&[fmt_ext(ext(2, 44_100, 16, 16, 0x600)), d.clone()]),
+        "unsup_6ch_pcm_tag1",
+        riff(&[fmt_pcm(pcm(6, 48_000, 16)), chunk(b"data", &[0u8; 12])]),
         un,
     ));
     cs.push(err_case(
-        "unsup_mono_left_mask",
-        riff(&[fmt_ext(ext(1, 44_100, 16, 16, 0x1)), d.clone()]),
+        "unsup_6ch_mask0",
+        riff(&[
+            fmt_ext(ext(6, 48_000, 16, 16, 0)),
+            chunk(b"data", &[0u8; 12]),
+        ]),
+        un,
+    ));
+    cs.push(err_case(
+        "unsup_6ch_mask_fewer_bits",
+        riff(&[
+            fmt_ext(ext(6, 48_000, 16, 16, 0x7)),
+            chunk(b"data", &[0u8; 12]),
+        ]),
+        un,
+    ));
+    cs.push(err_case(
+        "unsup_6ch_mask_reserved_bit",
+        riff(&[
+            fmt_ext(ext(6, 48_000, 16, 16, 0x1F | (1 << 20))),
+            chunk(b"data", &[0u8; 12]),
+        ]),
         un,
     ));
     cs.push(err_case(
@@ -746,20 +824,13 @@ fn build_cases() -> Vec<Case> {
     cases
 }
 
-fn ffmpeg_ref(path: &Path, ch: usize, c: u32) -> Result<Vec<i32>> {
+fn ffmpeg_ref(path: &Path, _ch: usize, c: u32) -> Result<Vec<i32>> {
     // 显式指定输入解码器：ffmpeg 6.1 会把 C32/V24 的 EXTENSIBLE PCM 误识别为 pcm_f24le。
     let out = Command::new("ffmpeg")
         .args(["-v", "error", "-c:a", &format!("pcm_s{c}le"), "-i"])
         .arg(path)
-        .args([
-            "-f",
-            "s32le",
-            "-c:a",
-            "pcm_s32le",
-            "-ac",
-            &ch.to_string(),
-            "-",
-        ])
+        // 不加 -ac：保持源声道布局原样输出，不让 ffmpeg 插入重混（F1：侧环绕等布局无法“转换”）。
+        .args(["-f", "s32le", "-c:a", "pcm_s32le", "-"])
         .output()?;
     if !out.status.success() {
         return Err(format!("ffmpeg 失败: {}", String::from_utf8_lossy(&out.stderr)).into());

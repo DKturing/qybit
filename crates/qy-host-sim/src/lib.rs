@@ -14,7 +14,7 @@ use qy_codec_auto::profile::Profile;
 use qy_codec_auto::{AutoDecoder, AutoInitError};
 use qy_codec_flac::Capacity;
 use qy_core::engine::{Capabilities, Engine, EngineConfig, ErrorPolicy, ReusePolicy};
-use qy_core::{Core, CoreError, DeviceFormat, INPUT_WINDOW_BYTES, MAX_CHANNELS, PCM_WORK_SAMPLES};
+use qy_core::{Core, CoreError, DeviceFormat, INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES};
 use qy_pcm_format::ring::{
     BUFFER_MILLIS, DEFAULT_CAPACITY_BYTES, FrameConsumer, FrameProducer, PACK_SCRATCH_BYTES,
     RingError, frame_ring, reconfigure_for,
@@ -37,7 +37,8 @@ fn leak_zeroed<T: Copy + Default>(len: usize) -> &'static mut [T] {
 /// 队列为默认预算，预填 500 ms。
 pub const SIM_CAPABILITIES: Capabilities = Capabilities {
     max_rate: u32::MAX,
-    max_channels: MAX_CHANNELS,
+    // 回归场景的能力保持双声道（F1 前的种子结果逐种子可比）；多声道场景用 `with_profile`。
+    max_channels: 2,
     max_bits: 32,
     queue_bytes: DEFAULT_CAPACITY_BYTES,
     prefill_ms: BUFFER_MILLIS,

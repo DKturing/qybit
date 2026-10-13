@@ -1,0 +1,6 @@
+result ok
+detail -
+format 48000 6 16
+layout 0x60f
+frames 1200
+origin 手写：6 声道、小写标签名与十六进制 0x60f（5.1 侧环绕），前有普通注释与 100 字节长注释

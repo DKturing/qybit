@@ -120,6 +120,15 @@ impl AutoDecoder {
         }
     }
 
+    /// WAV 拒绝明细（当前曲目为 WAV 且有明细时，如未定义的声道布局）。
+    #[cfg(feature = "wav")]
+    pub fn wav_detail(&self) -> Option<qy_codec_wav::WavDetail> {
+        match (self.codec, &self.wav) {
+            (Codec::Wav, Some(w)) => w.last_detail(),
+            _ => None,
+        }
+    }
+
     #[cfg(feature = "flac")]
     pub fn flac(&self) -> Option<&FlacDecoder> {
         self.flac.as_ref()

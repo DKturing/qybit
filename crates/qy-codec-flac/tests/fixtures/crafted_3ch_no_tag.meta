@@ -1,0 +1,6 @@
+result ok
+detail -
+format 44100 3 16
+layout 0x7
+frames 1500
+origin 手写：3 声道独立分配、无掩码标签：RFC 9639 默认布局 L R C（原 err_unsupported_3ch）

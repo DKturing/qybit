@@ -246,7 +246,8 @@ pub fn choose_device_format(
         .map(|(_, v)| *v)
         .min()?;
     let (c, v) = supported.iter().find(|(_, v)| *v == min_v)?;
-    DeviceFormat::wasapi(src.sample_rate(), src.channels(), *c, *v).ok()
+    // 设备布局与源布局相同（WASAPI 语义：掩码顺序），F1。
+    DeviceFormat::wasapi_layout(src.sample_rate(), src.layout(), *c, *v).ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

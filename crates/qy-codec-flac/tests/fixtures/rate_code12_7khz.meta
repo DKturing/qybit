@@ -1,5 +1,6 @@
 result ok
 detail -
 format 7000 1 16
+layout 0x4
 frames 500
 origin 手写：非常用采样率 7000 Hz

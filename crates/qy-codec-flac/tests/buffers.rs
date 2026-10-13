@@ -22,6 +22,12 @@ fn desktop_capacity_matches_task_card() {
         (4_608, 2, 28_244)
     );
     assert_eq!(m.ram_bytes(), 28_244 + 4_608 * 2 * 8 + 4_608 * 2 * 4);
+    // F1：桌面多声道容量，8 声道不压缩帧上界独立计算：
+    // 16 + ⌈(8 × 8 + 65535 × 8 × 32) / 8⌉ + 2 = 16 + 2 097 128 + 2。
+    let d = Capacity::DESKTOP_MULTICHANNEL;
+    assert_eq!((d.max_block, d.max_channels), (65_535, 8));
+    assert_eq!(d.input_window, 2_097_146);
+    assert_eq!(d.workspace_len() * 8, 65_535 * 8 * 8);
 }
 
 /// 不压缩帧上界：独立按 RFC 9639 逐项相加核对，并与最大块 verbatim 夹具的实际帧长比较。

@@ -25,7 +25,9 @@
 //! 有效位、声道掩码、`KSDATAFORMAT_SUBTYPE_PCM`）。
 #![no_std]
 
-use qy_core::{DecodeError, Decoder, PCM_WORK_SAMPLES, Progress, SourceFormat, Status};
+use qy_core::{
+    ChannelLayout, DecodeError, Decoder, PCM_WORK_SAMPLES, Progress, SourceFormat, Status,
+};
 
 const FORMAT_PCM: u16 = 0x0001;
 const FORMAT_EXTENSIBLE: u16 = 0xFFFE;
@@ -66,6 +68,37 @@ struct Layout {
     channel_mask: Option<u32>,
 }
 
+/// 拒绝的明细（宿主报告用；`DecodeError` 只给类别）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WavDetail {
+    /// 多于 2 声道但没有完整声明扬声器布局：格式码 1（`mask` 为 `None`）、EXTENSIBLE 掩码为 0、
+    /// 置位数少于声道数，或含无扬声器位置的位（F1）。
+    UndefinedLayout { channels: u16, mask: Option<u32> },
+}
+
+impl core::fmt::Display for WavDetail {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::UndefinedLayout {
+                channels,
+                mask: None,
+            } => {
+                write!(
+                    f,
+                    "源文件未声明 {channels} 声道的扬声器布局（WAVE_FORMAT_PCM）"
+                )
+            }
+            Self::UndefinedLayout {
+                channels,
+                mask: Some(m),
+            } => write!(
+                f,
+                "源文件声明的声道掩码 {m:#x} 不能确定 {channels} 声道的扬声器布局"
+            ),
+        }
+    }
+}
+
 /// WAV 解码器。
 pub struct WavDecoder {
     pcm: &'static mut [i32],
@@ -73,6 +106,7 @@ pub struct WavDecoder {
     /// RIFF 中 "WAVE" 之后尚未消耗的字节数。
     riff_remaining: u32,
     layout: Option<Layout>,
+    detail: Option<WavDetail>,
     data_seen: bool,
     /// 已解码未取走样本：`pcm[start..end]`。
     start: usize,
@@ -98,6 +132,7 @@ impl WavDecoder {
             state: State::RiffHeader,
             riff_remaining: 0,
             layout: None,
+            detail: None,
             data_seen: false,
             start: 0,
             end: 0,
@@ -107,6 +142,11 @@ impl WavDecoder {
     /// 工作区容量（样本数）。
     pub fn capacity_samples(&self) -> usize {
         self.pcm.len()
+    }
+
+    /// 最近一次拒绝的明细（新曲目 `reset` 后清除）。
+    pub fn last_detail(&self) -> Option<WavDetail> {
+        self.detail
     }
 
     /// EXTENSIBLE 的声道掩码；格式码 1 或头部未解析时为 `None`。
@@ -197,7 +237,7 @@ impl WavDecoder {
         Ok(())
     }
 
-    fn parse_fmt(b: &[u8], size: u32) -> Result<Layout, DecodeError> {
+    fn parse_fmt(&mut self, b: &[u8], size: u32) -> Result<Layout, DecodeError> {
         let tag = u16_at(b, 0);
         let channels = u16_at(b, 2);
         let rate = u32_at(b, 4);
@@ -247,23 +287,27 @@ impl WavDecoder {
         if block_align != expected_align {
             return Err(DecodeError::Malformed);
         }
-        // 多于 2 声道：多声道（声道映射）尚未实现，见 tasks/FORMATS.md F1。采样率不设软件上限。
-        if channels > 2 || rate == 0 {
+        // 声道布局（F1，Microsoft WAVEFORMATEXTENSIBLE：样本按 dwChannelMask 位从低到高排列）。
+        // 单/双声道：格式码 1 或掩码为 0 时按 [FC] / [FL FR]。多于 2 声道必须由掩码完整声明
+        // 每个声道的位置（置位数等于声道数、不含第 18 位及以上），否则布局未定义，拒绝。
+        // 采样率不设软件上限。
+        if let Some(mask) = channel_mask
+            && mask.count_ones() > u32::from(channels)
+        {
+            return Err(DecodeError::Malformed);
+        }
+        let layout = match channel_mask {
+            None | Some(0) => ChannelLayout::default_for(channels),
+            Some(m) => ChannelLayout::from_mask(m).filter(|l| l.channels() == channels),
+        };
+        let Some(layout) = layout else {
+            self.detail = Some(WavDetail::UndefinedLayout {
+                channels,
+                mask: channel_mask,
+            });
             return Err(DecodeError::Unsupported);
-        }
-        if let Some(mask) = channel_mask {
-            if mask.count_ones() > u32::from(channels) {
-                return Err(DecodeError::Malformed);
-            }
-            let ok = match channels {
-                1 => mask == 0 || mask == SPEAKER_FRONT_CENTER,
-                _ => mask == 0 || mask == SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT,
-            };
-            if !ok {
-                return Err(DecodeError::Unsupported);
-            }
-        }
-        let format = SourceFormat::new(rate, channels, valid_bits as u8)
+        };
+        let format = SourceFormat::with_layout(rate, layout, valid_bits as u8)
             .map_err(|_| DecodeError::Unsupported)?;
         Ok(Layout {
             format,
@@ -341,7 +385,7 @@ impl WavDecoder {
                     if avail.len() < want as usize {
                         return self.need_input(pos, eof);
                     }
-                    let layout = Self::parse_fmt(&avail[..want as usize], size)?;
+                    let layout = self.parse_fmt(&avail[..want as usize], size)?;
                     self.layout = Some(layout);
                     self.take_riff(want)?;
                     pos += want as usize;
@@ -405,6 +449,7 @@ impl Decoder for WavDecoder {
         self.state = State::RiffHeader;
         self.riff_remaining = 0;
         self.layout = None;
+        self.detail = None;
         self.data_seen = false;
         self.start = 0;
         self.end = 0;

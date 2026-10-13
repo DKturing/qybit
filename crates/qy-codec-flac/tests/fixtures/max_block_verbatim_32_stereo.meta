@@ -1,5 +1,6 @@
 result ok
 detail -
 format 48000 2 32
+layout 0x3
 frames 65535
 origin 手写：65535 块 verbatim，32 位极值

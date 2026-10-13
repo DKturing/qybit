@@ -1,5 +1,6 @@
 result ok
 detail -
 format 44100 2 16
+layout 0x3
 frames 6116
 origin 手写：可变块，块大小码 6/7/1/5 与 8/16 位非常用值，采样率/位深取自 STREAMINFO

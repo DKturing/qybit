@@ -20,7 +20,8 @@ fn leak<T: Copy + Default>(n: usize) -> &'static mut [T] {
 }
 
 fn decoder() -> FlacDecoder {
-    let c = Capacity::DESKTOP;
+    // F1：多声道夹具需要 8 声道容量。
+    let c = Capacity::DESKTOP_MULTICHANNEL;
     match FlacDecoder::new(c, leak(c.workspace_len()), leak(c.pcm_len())) {
         Ok(d) => d,
         Err(e) => panic!("{e:?}"),
@@ -31,6 +32,8 @@ pub struct Meta {
     pub result: String,
     pub detail: String,
     pub format: Option<(u32, u16, u8)>,
+    /// 期望声道布局的 WAVE 掩码（F1，由 libFLAC 解码输出核对过）。
+    pub layout: Option<u32>,
     pub frames: usize,
 }
 
@@ -40,6 +43,7 @@ pub fn meta(name: &str) -> Meta {
         result: String::new(),
         detail: String::new(),
         format: None,
+        layout: None,
         frames: 0,
     };
     for line in text.lines() {
@@ -52,6 +56,9 @@ pub fn meta(name: &str) -> Meta {
                 m.format = Some((p[0], p[1] as u16, p[2] as u8));
             }
             "frames" => m.frames = v.parse().unwrap_or(0),
+            "layout" => {
+                m.layout = u32::from_str_radix(v.trim_start_matches("0x"), 16).ok();
+            }
             _ => {}
         }
     }
@@ -188,6 +195,16 @@ fn all_fixtures_match_reference_under_any_chunking() {
                 Some((r, c, b)),
                 "{name}"
             );
+            // F1：布局按掩码位从低到高独立展开后逐位置比较。
+            let Some(mask) = m.layout else {
+                panic!("{name}: 有效夹具缺少 layout");
+            };
+            let bits: Vec<u8> = (0..18u8).filter(|b| mask & (1 << b) != 0).collect();
+            let got: Vec<u8> = one
+                .format
+                .map(|f| f.layout().positions().iter().map(|p| *p as u8).collect())
+                .unwrap_or_default();
+            assert_eq!(got, bits, "{name}: 声道布局");
         }
         // 逐字节（大夹具也跑，整帧门槛保证解析次数为 O(log F)）。
         let bytewise = run(&mut dec, &data, || 1, |n| n);

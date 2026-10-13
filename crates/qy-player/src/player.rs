@@ -188,6 +188,9 @@ impl<B: Backend> Player<'_, B> {
                 if let Some(e) = self.res.engine.decoder().flac_error() {
                     self.report.messages.push(format!("FLAC 错误明细：{e:?}"));
                 }
+                if let Some(d) = self.res.engine.decoder().wav_detail() {
+                    self.report.messages.push(format!("WAV 错误明细：{d}"));
+                }
                 return false;
             }
         }

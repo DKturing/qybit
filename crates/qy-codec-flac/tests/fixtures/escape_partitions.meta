@@ -1,5 +1,6 @@
 result ok
 detail -
 format 16000 1 16
+layout 0x4
 frames 256
 origin 手写：固定 2 阶，escape 12 位/0 位，Rice 参数 0 与 14

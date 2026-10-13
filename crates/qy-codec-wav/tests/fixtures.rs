@@ -173,6 +173,22 @@ fn check_against_expect(name: &str, out: &Outcome, exp: &Expect) {
     }
     if exp.result.is_ok() {
         assert_eq!(out.mask, exp.mask, "{name}: 声道掩码");
+        // F1：布局独立推出——掩码为空或 0 时按单/双声道默认，否则样本按掩码位从低到高。
+        let (ch, layout) = match out.format {
+            Some(f) => (f.channels(), f.layout()),
+            None => panic!("{name}: 格式未知"),
+        };
+        let expect_mask = match exp.mask {
+            None | Some(0) => match ch {
+                1 => 0x4,
+                2 => 0x3,
+                _ => panic!("{name}: 多声道必须声明掩码"),
+            },
+            Some(m) => m,
+        };
+        let bits: Vec<u8> = (0..18u8).filter(|b| expect_mask & (1 << b) != 0).collect();
+        let got: Vec<u8> = layout.positions().iter().map(|p| *p as u8).collect();
+        assert_eq!(got, bits, "{name}: 声道布局");
     }
 }
 
@@ -283,4 +299,33 @@ fn eof_before_end_is_truncated_not_need_input() {
         let out = run(&mut dec, &data[..cut], || usize::MAX, |n| n);
         assert_eq!(out.result, Err(DecodeError::Truncated), "cut={cut}");
     }
+}
+
+/// F1：多于 2 声道而布局未完整声明时按 Unsupported 拒绝，并给出“未定义布局”的明细。
+#[test]
+fn undefined_layout_reports_detail() {
+    use qy_codec_wav::WavDetail;
+    let cases = [
+        ("unsup_6ch_pcm_tag1", None),
+        ("unsup_6ch_mask0", Some(0)),
+        ("unsup_6ch_mask_fewer_bits", Some(0x7)),
+        ("unsup_6ch_mask_reserved_bit", Some(0x1F | (1 << 20))),
+        ("unsup_3ch", None),
+    ];
+    let mut dec = new_decoder();
+    for (name, mask) in cases {
+        let data = fs::read(fixtures_dir().join(format!("{name}.wav"))).unwrap_or_default();
+        let out = run(&mut dec, &data, || usize::MAX, |n| n);
+        assert_eq!(out.result, Err(DecodeError::Unsupported), "{name}");
+        let channels = if name == "unsup_3ch" { 3 } else { 6 };
+        assert_eq!(
+            dec.last_detail(),
+            Some(WavDetail::UndefinedLayout { channels, mask }),
+            "{name}"
+        );
+        assert!(out.format.is_none(), "{name}: 拒绝时不得报告格式");
+    }
+    // reset 清除明细。
+    dec.reset();
+    assert_eq!(dec.last_detail(), None);
 }

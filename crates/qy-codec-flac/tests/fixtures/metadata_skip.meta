@@ -1,5 +1,6 @@
 result ok
 detail -
 format 48000 2 24
+layout 0x3
 frames 1000
 origin 手写：填充、注释、100 KB 图片与保留类型元数据

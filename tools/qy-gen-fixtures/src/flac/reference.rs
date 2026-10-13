@@ -33,6 +33,22 @@ pub fn seeds(name: &str) -> &'static str {
         "rate_384k_stereo_24" => "smooth 384000",
         "metadata_skip" | "unknown_max_frame" | "lying_max_frame" => "smooth 707",
         "short_tail_frame" => "smooth 808",
+        "cli_16_3ch_48k" => "smooth 31（声道签名）",
+        "cli_16_4ch_44k_quad" => "smooth 32（声道签名）",
+        "cli_24_5ch_48k" => "smooth 33（声道签名）",
+        "cli_24_6ch_96k_51" => "smooth 34（声道签名）",
+        "cli_16_6ch_48k_51_side" => "smooth 35（声道签名）",
+        "cli_24_7ch_48k_61" => "smooth 36（声道签名）",
+        "cli_24_8ch_48k_71" => "smooth 37（声道签名）",
+        "crafted_3ch_no_tag" => "smooth 1201（声道签名）",
+        "crafted_6ch_no_tag" => "smooth 1202（声道签名）",
+        "crafted_6ch_tag_side_lowercase" => "smooth 1203（声道签名）",
+        "crafted_2ch_tag_side" => "smooth 1204",
+        "err_mask_tag_count_mismatch"
+        | "err_mask_tag_bad_hex"
+        | "err_mask_tag_conflict"
+        | "err_mask_tag_reserved_bit" => "smooth 1101（声道签名）",
+        "err_vorbis_comment_overrun" => "smooth 1102",
         n if n.starts_with("err_") => "smooth 909 / 1001–1004（错误夹具）",
         _ => "无（确定性构造）",
     }
@@ -210,6 +226,32 @@ pub fn libflac_reference(path: &Path, bits: u32, tmp: &Path) -> Result<(Vec<i64>
         return Ok((samples, "raw"));
     }
     Ok((libflac_decode(path, tmp)?, "wav"))
+}
+
+/// libFLAC 解码输出 WAV 的声道掩码（F1 布局的独立参考）：EXTENSIBLE 时为 `dwChannelMask`，
+/// 格式码 1（单/双声道默认布局）时为 `None`。
+pub fn libflac_mask(path: &Path, tmp: &Path) -> Result<Option<u32>> {
+    let out = tmp.join("mask.wav");
+    run(Command::new("flac")
+        .args(["--silent", "--force", "--decode", "-o"])
+        .arg(&out)
+        .arg(path))?;
+    let w = std::fs::read(&out)?;
+    let mut i = 12;
+    while i + 8 <= w.len() {
+        let size = u32::from_le_bytes([w[i + 4], w[i + 5], w[i + 6], w[i + 7]]) as usize;
+        if &w[i..i + 4] == b"fmt " {
+            let body = &w[i + 8..(i + 8 + size).min(w.len())];
+            if body.len() >= 24 && u16::from_le_bytes([body[0], body[1]]) == 0xFFFE {
+                return Ok(Some(u32::from_le_bytes([
+                    body[20], body[21], body[22], body[23],
+                ])));
+            }
+            return Ok(None);
+        }
+        i += 8 + size + (size & 1);
+    }
+    Err("libFLAC 输出的 WAV 缺少 fmt chunk".into())
 }
 
 /// 要求 Xiph flac ≥ 1.4.0（32 位支持）。

@@ -13,7 +13,7 @@
 //! SD 卡最坏读取延迟加余量推出后回写。
 
 use qy_core::engine::{BIP_MARGIN_FRAMES, Capabilities, PACK_SCRATCH_BYTES, queue_bytes};
-use qy_core::{INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES};
+use qy_core::{INPUT_WINDOW_BYTES, MAX_CHANNELS, PCM_WORK_SAMPLES};
 
 #[cfg(feature = "flac")]
 use qy_codec_flac::Capacity;
@@ -97,6 +97,13 @@ impl Profile {
         }
     }
 
+    /// 提高能力声明中的最大声道数，不改变队列预算（字节数仍按构造时的参考声道数计算；
+    /// 声道更多时可承载的采样率相应降低，超出时引擎按“队列不足”拒绝）。
+    pub const fn with_max_channels(mut self, channels: u16) -> Self {
+        self.caps.max_channels = channels;
+        self
+    }
+
     /// 启用/停用 WAV。
     pub const fn with_wav(mut self, on: bool) -> Self {
         self.wav = on;
@@ -166,12 +173,14 @@ impl Profile {
     }
 }
 
-/// 桌面：不设采样率上限；队列按 768 kHz / 双声道 / C32 / 500 ms 分配（3 072 000 字节），
-/// FLAC 桌面容量（块 65 535、32 位、1 MiB 窗口），`rtrb` 队列。
+/// 桌面：不设采样率上限；队列按 768 kHz / 双声道 / C32 / 500 ms 分配（3 072 000 字节，
+/// 等于 192 kHz / 8 声道 / C32 / 500 ms），最多 18 声道（布局可描述的上限，F1），FLAC 桌面
+/// 多声道容量（块 65 535、8 声道、32 位），`rtrb` 队列。
 #[cfg(feature = "flac")]
 pub const DESKTOP: Profile =
     Profile::new("Desktop", u32::MAX, 768_000, 2, 32, 4, 500, QueueKind::Ring)
-        .with_flac(Capacity::DESKTOP);
+        .with_flac(Capacity::DESKTOP_MULTICHANNEL)
+        .with_max_channels(MAX_CHANNELS);
 
 /// 嵌入式完整版：WAV + FLAC，≤ 96 kHz、双声道、≤ 24 位（I²S 32 位槽位），
 /// FLAC 块 ≤ 4608（[`Capacity::MCU`]），预填 250 ms（暂定），静态队列。
@@ -211,15 +220,17 @@ mod tests {
         let d = DESKTOP.budget();
         // 768000 × 0.5 = 384000 帧 × 8 字节。
         assert_eq!(d.queue, 3_072_000);
-        assert_eq!(d.input_window, 1 << 20);
+        // F1：FLAC 8 声道不压缩帧上界 16 + ⌈(64 + 65535 × 256) / 8⌉ + 2。
+        assert_eq!(d.input_window, 2_097_146);
         assert_eq!(d.wav_pcm, 4096 * 2 * 4);
-        assert_eq!(d.flac_workspace, 65_535 * 2 * 8);
-        assert_eq!(d.flac_pcm, 65_535 * 2 * 4);
+        assert_eq!(d.flac_workspace, 65_535 * 8 * 8);
+        assert_eq!(d.flac_pcm, 65_535 * 8 * 4);
         assert_eq!(d.pack_scratch, 4096 * 8);
         assert_eq!(
             d.total,
-            3_072_000 + (1 << 20) + 32_768 + 1_048_560 + 524_280 + 32_768
+            3_072_000 + 2_097_146 + 32_768 + 4_194_240 + 2_097_120 + 32_768
         );
+        assert_eq!(DESKTOP.caps.max_channels, 18);
         assert_eq!(DESKTOP.caps.max_rate, u32::MAX);
 
         let f = EMBEDDED_FULL.budget();

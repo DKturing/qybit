@@ -1,0 +1,6 @@
+result ok
+detail -
+format 44100 2 16
+layout 0x600
+frames 700
+origin 手写：双声道、掩码标签 0x600：侧左、侧右

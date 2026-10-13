@@ -71,6 +71,53 @@ fn s32le(vals: &[i64]) -> Vec<u8> {
         .collect()
 }
 
+/// RFC 9639 §9.1.3：1–8 声道独立分配的默认布局（WAVE 声道掩码）。5、6 声道的
+/// “back/surround” 取侧环绕，与 libFLAC 1.4.3 `src/flac/decode.c` 的默认掩码表一致。
+fn default_mask(ch: u32) -> u32 {
+    [0x4, 0x3, 0x7, 0x33, 0x607, 0x60F, 0x70F, 0x63F][(ch as usize).clamp(1, 8) - 1]
+}
+
+/// 按声道可辨识（F1）：每个样本的低 4 位改为声道号，任何交换、截取或重复都会改变样本。
+fn channel_signed(vals: Vec<i64>, ch: usize) -> Vec<i64> {
+    vals.into_iter()
+        .enumerate()
+        .map(|(i, v)| (v & !0xF) | (i % ch) as i64)
+        .collect()
+}
+
+/// 多声道 WAV（WAVE_FORMAT_EXTENSIBLE，容器 = 有效位，`dwChannelMask` = `mask`）。
+fn wav_ext(vals: &[i64], rate: u32, ch: u16, bits: u16, mask: u32) -> Vec<u8> {
+    let bpsamp = usize::from(bits / 8);
+    let mut data = Vec::with_capacity(vals.len() * bpsamp);
+    for &v in vals {
+        data.extend_from_slice(&(v as u32).to_le_bytes()[..bpsamp]);
+    }
+    let align = ch * (bits / 8);
+    let mut fmt = Vec::new();
+    fmt.extend_from_slice(&0xFFFEu16.to_le_bytes());
+    fmt.extend_from_slice(&ch.to_le_bytes());
+    fmt.extend_from_slice(&rate.to_le_bytes());
+    fmt.extend_from_slice(&(rate * u32::from(align)).to_le_bytes());
+    fmt.extend_from_slice(&align.to_le_bytes());
+    fmt.extend_from_slice(&bits.to_le_bytes());
+    fmt.extend_from_slice(&22u16.to_le_bytes());
+    fmt.extend_from_slice(&bits.to_le_bytes());
+    fmt.extend_from_slice(&mask.to_le_bytes());
+    fmt.extend_from_slice(&[
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
+        0x71,
+    ]);
+    let mut w = b"RIFF".to_vec();
+    w.extend_from_slice(&((4 + 8 + fmt.len() + 8 + data.len()) as u32).to_le_bytes());
+    w.extend_from_slice(b"WAVEfmt ");
+    w.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+    w.extend_from_slice(&fmt);
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    w.extend_from_slice(&data);
+    w
+}
+
 /// 最小 PCM WAV（格式码 1）。
 fn wav(vals: &[i64], rate: u32, ch: u16, bits: u16) -> Vec<u8> {
     let bpsamp = usize::from(bits / 8);
@@ -612,6 +659,8 @@ struct Fixture {
     samples: Vec<i64>,
     /// 由 libFLAC 校验（错误夹具与本项目不支持的格式不校验）。
     libflac_check: bool,
+    /// 期望声道布局的 WAVE 掩码（F1）；`None` 为该声道数的 RFC 9639 默认布局。
+    mask: Option<u32>,
     origin: String,
 }
 
@@ -624,6 +673,7 @@ fn crafted(name: &str, s: &Stream, samples: Vec<i64>, origin: &str) -> Fixture {
         format: Some((s.rate, s.channels, s.bits)),
         samples,
         libflac_check: true,
+        mask: None,
         origin: format!("手写：{origin}"),
     }
 }
@@ -1031,6 +1081,71 @@ fn crafted_cases() -> Vec<Fixture> {
         "STREAMINFO 最大帧长度谎报为 100",
     ));
 
+    // F1：多声道手写流（按声道可辨识的信号）。
+    let vals = channel_signed(smooth(1201, 1500, 3, 16, 0.5), 3);
+    let frames = encode_blocks(&vals, 3, 44_100, 16, 512, Assign::Indep, &|_| {
+        vec![
+            sub(Kind::Verbatim),
+            sub(Kind::Fixed(2, rice(8))),
+            sub(Kind::Fixed(1, rice(8))),
+        ]
+    });
+    v.push(crafted(
+        "crafted_3ch_no_tag",
+        &stream(44_100, 3, 16, frames),
+        vals,
+        "3 声道独立分配、无掩码标签：RFC 9639 默认布局 L R C（原 err_unsupported_3ch）",
+    ));
+    let vals = channel_signed(smooth(1202, 1200, 6, 24, 0.5), 6);
+    let frames = encode_blocks(&vals, 6, 48_000, 24, 576, Assign::Indep, &|_| {
+        vec![sub(Kind::Fixed(2, rice(12))); 6]
+    });
+    v.push(crafted(
+        "crafted_6ch_no_tag",
+        &stream(48_000, 6, 24, frames),
+        vals,
+        "6 声道、无掩码标签：默认 5.1 侧环绕（0x60F，与 libFLAC 一致）",
+    ));
+    let vals = channel_signed(smooth(1203, 1200, 6, 16, 0.5), 6);
+    let frames = encode_blocks(&vals, 6, 48_000, 16, 1200, Assign::Indep, &|_| {
+        vec![sub(Kind::Fixed(1, rice(9))); 6]
+    });
+    let mut s = stream(48_000, 6, 16, frames);
+    let long = [b"COMMENT=".as_slice(), &[b'x'; 100]].concat();
+    s.meta = vec![(
+        4,
+        vorbis_comment_with(&[
+            b"TITLE=qybit".as_slice(),
+            &long,
+            b"waveformatextensible_channel_mask=0x60f".as_slice(),
+        ]),
+    )];
+    let mut f = crafted(
+        "crafted_6ch_tag_side_lowercase",
+        &s,
+        vals,
+        "6 声道、小写标签名与十六进制 0x60f（5.1 侧环绕），前有普通注释与 100 字节长注释",
+    );
+    f.mask = Some(0x60F);
+    v.push(f);
+    let vals = smooth(1204, 700, 2, 16, 0.5);
+    let frames = encode_blocks(&vals, 2, 44_100, 16, 700, Assign::Indep, &|_| {
+        vec![sub(Kind::Verbatim); 2]
+    });
+    let mut s = stream(44_100, 2, 16, frames);
+    s.meta = vec![(
+        4,
+        vorbis_comment_with(&[b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x0600".as_slice()]),
+    )];
+    let mut f = crafted(
+        "crafted_2ch_tag_side",
+        &s,
+        vals,
+        "双声道、掩码标签 0x600：侧左、侧右",
+    );
+    f.mask = Some(0x600);
+    v.push(f);
+
     // 完整短尾帧：固定块 512，最后一帧 17。
     let vals = smooth(808, 512 * 2 + 17, 1, 16, 0.6);
     let frames = encode_blocks(&vals, 1, 22_050, 16, 512, Assign::Indep, &|_| {
@@ -1052,6 +1167,19 @@ fn vorbis_comment() -> Vec<u8> {
     let mut b = (vendor.len() as u32).to_le_bytes().to_vec();
     b.extend_from_slice(vendor);
     b.extend_from_slice(&0u32.to_le_bytes());
+    b
+}
+
+/// VORBIS_COMMENT（§8.6）：vendor 与给定字段（每个字段前为 32 位小端长度）。
+fn vorbis_comment_with(fields: &[&[u8]]) -> Vec<u8> {
+    let vendor = b"qybit-gen";
+    let mut b = (vendor.len() as u32).to_le_bytes().to_vec();
+    b.extend_from_slice(vendor);
+    b.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+    for f in fields {
+        b.extend_from_slice(&(f.len() as u32).to_le_bytes());
+        b.extend_from_slice(f);
+    }
     b
 }
 
@@ -1088,6 +1216,7 @@ fn err_fixture(
         format,
         samples,
         libflac_check: false,
+        mask: None,
         origin: format!("手写错误：{origin}"),
     }
 }
@@ -1382,17 +1511,72 @@ fn error_cases() -> Vec<Fixture> {
     let frames = encode_blocks(&tri, 3, 44_100, 16, 64, Assign::Indep, &|_| {
         vec![sub(Kind::Verbatim); 3]
     });
-    let mut f3 = err_fixture(
-        "err_unsupported_3ch",
-        stream_bytes(&stream(44_100, 3, 16, frames)),
-        "Unsupported",
-        "ChannelsNotImplemented",
+    let _ = frames;
+    // F1：声道掩码标签的错误形式（布局无法确认，拒绝）。
+    let mc = |tags: &[&[u8]]| {
+        let vals = channel_signed(smooth(1101, 512, 6, 16, 0.5), 6);
+        let frames = encode_blocks(&vals, 6, 48_000, 16, 512, Assign::Indep, &|_| {
+            vec![sub(Kind::Fixed(1, rice(9))); 6]
+        });
+        let mut s = stream(48_000, 6, 16, frames);
+        s.meta = vec![(4, vorbis_comment_with(tags))];
+        stream_bytes(&s)
+    };
+    for (name, tags, origin) in [
+        (
+            "err_mask_tag_count_mismatch",
+            &[b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x0007".as_slice()][..],
+            "6 声道，掩码只有 3 位",
+        ),
+        (
+            "err_mask_tag_bad_hex",
+            &[b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0xZZ".as_slice()][..],
+            "掩码不是十六进制",
+        ),
+        (
+            "err_mask_tag_conflict",
+            &[
+                b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x003F".as_slice(),
+                b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x060F".as_slice(),
+            ][..],
+            "两个掩码标签不一致",
+        ),
+        (
+            "err_mask_tag_reserved_bit",
+            &[b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x10001F".as_slice()][..],
+            "掩码含第 20 位（无扬声器位置）",
+        ),
+    ] {
+        v.push(err_fixture(
+            name,
+            mc(tags),
+            "Unsupported",
+            "BadChannelMask",
+            None,
+            vec![],
+            origin,
+        ));
+    }
+    // 注释字段长度越过块边界。
+    let vals = smooth(1102, 256, 2, 16, 0.5);
+    let frames = encode_blocks(&vals, 2, 44_100, 16, 256, Assign::Indep, &|_| {
+        vec![sub(Kind::Verbatim); 2]
+    });
+    let mut s = stream(44_100, 2, 16, frames);
+    let mut body = vorbis_comment_with(&[b"TITLE=x".as_slice()]);
+    let n = body.len();
+    // 最后一个字段的长度 7 改为 70：越过块尾。
+    body[n - 11..n - 7].copy_from_slice(&70u32.to_le_bytes());
+    s.meta = vec![(4, body)];
+    v.push(err_fixture(
+        "err_vorbis_comment_overrun",
+        stream_bytes(&s),
+        "Malformed",
+        "BadVorbisComment",
         None,
         vec![],
-        "3 声道：多声道尚未实现（F1，libFLAC 可解）",
-    );
-    f3.libflac_check = false;
-    v.push(f3);
+        "VORBIS_COMMENT 字段长度越过块边界",
+    ));
     v
 }
 
@@ -1533,6 +1717,8 @@ struct CliCase {
     bits: u16,
     vals: Vec<i64>,
     args: &'static [&'static str],
+    /// 输入 WAV 的声道掩码（F1）；`None` 时写格式码 1（单/双声道）。
+    mask: Option<u32>,
 }
 
 // 用例逐个追加，部分用例需先计算样本，保持统一写法。
@@ -1546,6 +1732,7 @@ fn cli_cases() -> Vec<CliCase> {
         bits: 16,
         vals: smooth(11, 20_000, 2, 16, 0.5),
         args: &[],
+        mask: None,
     });
     v.push(CliCase {
         name: "cli_16_stereo_exhaustive_ms",
@@ -1554,6 +1741,7 @@ fn cli_cases() -> Vec<CliCase> {
         bits: 16,
         vals: smooth(12, 12_000, 2, 16, 0.4),
         args: &["-8", "-e", "-m"],
+        mask: None,
     });
     v.push(CliCase {
         name: "cli_24_mono_96k_lpc12",
@@ -1562,6 +1750,7 @@ fn cli_cases() -> Vec<CliCase> {
         bits: 24,
         vals: smooth(13, 15_000, 1, 24, 0.7),
         args: &["-l", "12", "-r", "6"],
+        mask: None,
     });
     v.push(CliCase {
         name: "cli_24_stereo_fixed_only",
@@ -1570,6 +1759,7 @@ fn cli_cases() -> Vec<CliCase> {
         bits: 24,
         vals: smooth(14, 9_000, 2, 24, 0.6),
         args: &["-l", "0"],
+        mask: None,
     });
     v.push(CliCase {
         name: "cli_32_stereo_192k",
@@ -1578,6 +1768,7 @@ fn cli_cases() -> Vec<CliCase> {
         bits: 32,
         vals: smooth(15, 20_000, 2, 32, 0.9),
         args: &["--lax", "-8"],
+        mask: None,
     });
     v.push(CliCase {
         name: "cli_32_noise_verbatim",
@@ -1586,6 +1777,7 @@ fn cli_cases() -> Vec<CliCase> {
         bits: 32,
         vals: noise(16, 9_000, 2, 32),
         args: &["--lax"],
+        mask: None,
     });
     let silent: Vec<i64> = smooth(17, 8_000, 2, 16, 0.5)
         .chunks(2)
@@ -1598,6 +1790,7 @@ fn cli_cases() -> Vec<CliCase> {
         bits: 16,
         vals: silent,
         args: &[],
+        mask: None,
     });
     let wasted: Vec<i64> = smooth(18, 8_000, 1, 12, 0.6)
         .iter()
@@ -1610,6 +1803,7 @@ fn cli_cases() -> Vec<CliCase> {
         bits: 16,
         vals: wasted,
         args: &[],
+        mask: None,
     });
     v.push(CliCase {
         name: "cli_24_rice2_noise",
@@ -1622,6 +1816,7 @@ fn cli_cases() -> Vec<CliCase> {
             .map(|(n, s)| ((n >> 3) + s).clamp(-(1 << 23), (1 << 23) - 1))
             .collect(),
         args: &["-8"],
+        mask: None,
     });
     v.push(CliCase {
         name: "cli_16_blocksize_1000",
@@ -1630,6 +1825,7 @@ fn cli_cases() -> Vec<CliCase> {
         bits: 16,
         vals: smooth(21, 5_500, 1, 16, 0.5),
         args: &["-b", "1000"],
+        mask: None,
     });
     v.push(CliCase {
         name: "cli_16_blocksize_16384",
@@ -1638,7 +1834,32 @@ fn cli_cases() -> Vec<CliCase> {
         bits: 16,
         vals: smooth(22, 40_000, 2, 16, 0.5),
         args: &["--lax", "-b", "16384"],
+        mask: None,
     });
+    // F1：多声道（按声道可辨识的信号；flac 从 WAVE 掩码写入 WAVEFORMATEXTENSIBLE_CHANNEL_MASK）。
+    let mc: [(&'static str, u32, u16, u16, u32, u64); 7] = [
+        ("cli_16_3ch_48k", 48_000, 3, 16, 0x7, 31),
+        ("cli_16_4ch_44k_quad", 44_100, 4, 16, 0x33, 32),
+        ("cli_24_5ch_48k", 48_000, 5, 24, 0x37, 33),
+        ("cli_24_6ch_96k_51", 96_000, 6, 24, 0x3F, 34),
+        ("cli_16_6ch_48k_51_side", 48_000, 6, 16, 0x60F, 35),
+        ("cli_24_7ch_48k_61", 48_000, 7, 24, 0x70F, 36),
+        ("cli_24_8ch_48k_71", 48_000, 8, 24, 0x63F, 37),
+    ];
+    for (name, rate, ch, bits, mask, seed) in mc {
+        v.push(CliCase {
+            name,
+            rate,
+            ch,
+            bits,
+            vals: channel_signed(
+                smooth(seed, 6_000, usize::from(ch), u32::from(bits), 0.5),
+                usize::from(ch),
+            ),
+            args: &[],
+            mask: Some(mask),
+        });
+    }
     v
 }
 
@@ -1709,6 +1930,9 @@ fn meta_text(f: &Fixture) -> String {
         None => s.push_str("format none\n"),
     }
     let ch = f.format.map_or(1, |x| x.1 as usize);
+    if f.result == "ok" {
+        let _ = writeln!(s, "layout {:#x}", f.mask.unwrap_or(default_mask(ch as u32)));
+    }
     let _ = writeln!(s, "frames {}", f.samples.len() / ch.max(1));
     let _ = writeln!(s, "origin {}", f.origin);
     s
@@ -1727,7 +1951,11 @@ pub fn generate(out: &Path) -> Result<()> {
 
     for c in cli_cases() {
         let w = tmp.join(format!("{}.wav", c.name));
-        std::fs::write(&w, wav(&c.vals, c.rate, c.ch, c.bits))?;
+        let wav_bytes = match c.mask {
+            Some(m) => wav_ext(&c.vals, c.rate, c.ch, c.bits, m),
+            None => wav(&c.vals, c.rate, c.ch, c.bits),
+        };
+        std::fs::write(&w, wav_bytes)?;
         let f = tmp.join(format!("{}.flac", c.name));
         let mut cmd = Command::new("flac");
         cmd.args(["--silent", "--force", "--no-padding"])
@@ -1752,6 +1980,7 @@ pub fn generate(out: &Path) -> Result<()> {
             format: Some((c.rate, u32::from(c.ch), u32::from(c.bits))),
             samples: c.vals,
             libflac_check: true,
+            mask: c.mask,
             origin: format!("flac 命令行：{}", c.args.join(" ")),
         });
     }
@@ -1790,6 +2019,19 @@ pub fn generate(out: &Path) -> Result<()> {
                     f.name
                 )
                 .into());
+            }
+            // F1：libFLAC 解码输出的声道掩码即布局的独立参考。
+            let want = f.mask.unwrap_or(default_mask(ch));
+            match reference::libflac_mask(&path, &tmp)? {
+                Some(m) if m == want => {}
+                None if ch <= 2 && want == default_mask(ch) => {}
+                other => {
+                    return Err(format!(
+                        "{}: libFLAC 输出布局 {other:?} 与期望 {want:#x} 不符",
+                        f.name
+                    )
+                    .into());
+                }
             }
             let keys = reference::analyze_keys(&analyze(&path, &tmp)?);
             reference::check_branches(&f.name, &keys)?;
