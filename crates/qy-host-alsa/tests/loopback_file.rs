@@ -80,10 +80,16 @@ fn started_files(b: &AlsaBackend<FileOpener, FakePriority>, r: &PlaybackReport) 
         .collect()
 }
 
+/// alsa-lib 能否打开内置 `null` 插件。CI 中（设置了 `CI`）打不开即失败，确保 A 层确实运行；
+/// 本地缺少 alsa-lib 配置时明确打印“未运行”。
 fn alsa_null_available() -> bool {
     match RealOpener.open("null") {
         Ok(_) => true,
         Err(e) => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI 中 A 层必须运行，但 alsa-lib 无法打开 null 插件（{e}）"
+            );
             eprintln!("未运行：alsa-lib 无法打开 null 插件（{e}）");
             false
         }

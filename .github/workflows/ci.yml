@@ -32,6 +32,13 @@ jobs:
       - run: cargo test --locked -p qy-codec-flac --features static-cell,test-metrics
       - run: cargo test --locked -p qy-pcm-format
       - run: cargo test --locked -p qy-pcm-format --features ring
+      - name: 上传回环 A 层报告（file 插件）
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: qybit-alsa-loopback-file
+          path: target/qybit-report/qybit-alsa-loopback-file.json
+          if-no-files-found: error
 
   # 精简 crate 的 no_std 目标编译。
   no-std:

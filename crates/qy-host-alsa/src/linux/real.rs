@@ -252,13 +252,17 @@ mod tests {
     use qy_pcm_format::alsa::confirm;
 
     /// alsa-lib 内置 `null` 插件（不是 hw 设备，只验证真实绑定的调用路径）：设置参数、
-    /// 读回并核对、写入、启动、排空。环境里没有 alsa-lib 配置时明确跳过并打印原因。
+    /// 读回并核对、写入、启动、排空。本地没有 alsa-lib 配置时明确打印“未运行”；CI 中必须运行。
     #[test]
     fn null_plugin_smoke() {
         let mut pcm = match RealPcm::open_any("null") {
             Ok(p) => p,
             Err(err) => {
-                eprintln!("跳过：无法打开 alsa-lib null 插件（{err}）");
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "CI 中必须运行，但无法打开 alsa-lib null 插件（{err}）"
+                );
+                eprintln!("未运行：无法打开 alsa-lib null 插件（{err}）");
                 return;
             }
         };
