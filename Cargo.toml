@@ -4,6 +4,7 @@ exclude = ["fuzz"]
 members = [
     "crates/qy-core",
     "crates/qy-codec-wav",
+    "crates/qy-codec-flac",
     "crates/qy-pcm-format",
     "crates/qy-host-sim",
     "crates/qy-host-wasapi",
@@ -22,11 +23,14 @@ publish = false
 [workspace.dependencies]
 qy-core = { path = "crates/qy-core" }
 qy-codec-wav = { path = "crates/qy-codec-wav" }
+qy-codec-flac = { path = "crates/qy-codec-flac" }
 qy-pcm-format = { path = "crates/qy-pcm-format" }
 qy-host-sim = { path = "crates/qy-host-sim" }
 qy-host-wasapi = { path = "crates/qy-host-wasapi" }
 # 成熟 SPSC 环形队列：存放已 pack 的完整设备帧字节（AGENTS §2，不自行编写无锁缓冲）。
 rtrb = { version = "=0.4.0", default-features = false }
+# MCU 一次性静态零缓冲（ConstStaticCell），仅 qy-codec-flac 的 static-cell 特性使用。
+static_cell = { version = "=2.1.1", default-features = false }
 # Windows SDK 绑定（WASAPI / COM），仅 Windows 目标使用。
 windows = { version = "=0.62.2", default-features = false }
 

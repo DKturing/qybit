@@ -234,6 +234,22 @@ impl<D: Decoder> Core<D> {
         })
     }
 
+    /// 用宿主声明的输入窗口容量构造核心（如 FLAC 桌面配置 1 MiB）。
+    /// 切片短于 `window` 或短于 [`INPUT_WINDOW_BYTES`] 时返回容量错误。
+    pub fn with_window(
+        input: &'static mut [u8],
+        window: usize,
+        decoder: D,
+    ) -> Result<Self, CoreError> {
+        if input.len() < window {
+            return Err(CoreError::CapacityExceeded {
+                required: window,
+                provided: input.len(),
+            });
+        }
+        Self::new(input, decoder)
+    }
+
     pub fn generation(&self) -> Generation {
         self.generation
     }

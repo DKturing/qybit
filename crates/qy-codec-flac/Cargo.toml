@@ -1,0 +1,24 @@
+[package]
+name = "qy-codec-flac"
+description = "QyBit 自有推送式 FLAC 解码器（no_std，无 alloc）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# MCU：用 static_cell::ConstStaticCell 提供的一次性静态零缓冲。
+static-cell = ["dep:static_cell"]
+
+[dependencies]
+qy-core.workspace = true
+static_cell = { workspace = true, optional = true }
+
+[dev-dependencies]
+qy-codec-wav.workspace = true
+
+[lints]
+workspace = true
