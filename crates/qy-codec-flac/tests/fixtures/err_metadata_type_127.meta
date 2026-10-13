@@ -1,0 +1,5 @@
+result Malformed
+detail BadMetadataType
+format 44100 2 16
+frames 0
+origin 手写错误：元数据块类型 127

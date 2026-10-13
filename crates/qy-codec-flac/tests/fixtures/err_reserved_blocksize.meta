@@ -1,0 +1,5 @@
+result Malformed
+detail ReservedCode
+format 44100 1 16
+frames 0
+origin 手写错误：块大小码 0（CRC-8 重算）

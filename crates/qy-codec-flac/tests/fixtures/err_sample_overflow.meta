@@ -1,0 +1,5 @@
+result Malformed
+detail SampleOverflow
+format 44100 1 16
+frames 0
+origin 手写错误：16 位预测结果 32768

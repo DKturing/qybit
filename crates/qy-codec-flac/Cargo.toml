@@ -12,10 +12,16 @@ publish.workspace = true
 default = []
 # MCU：用 static_cell::ConstStaticCell 提供的一次性静态零缓冲。
 static-cell = ["dep:static_cell"]
+# 测试统计（解析次数、输入重扫描量、样本运算量）；默认关闭，正式发布不得启用。
+test-metrics = []
 
 [dependencies]
 qy-core.workspace = true
 static_cell = { workspace = true, optional = true }
+
+[[test]]
+name = "metrics"
+required-features = ["test-metrics"]
 
 [dev-dependencies]
 qy-codec-wav.workspace = true

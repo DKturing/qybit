@@ -1,0 +1,5 @@
+result ok
+detail -
+format 48000 2 24
+frames 1000
+origin 手写：STREAMINFO 最小/最大帧长度为 0（未知）

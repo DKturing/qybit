@@ -1,0 +1,5 @@
+result Malformed
+detail BadLpcPrecision
+format 44100 1 16
+frames 0
+origin 手写错误：LPC 精度字段 0b1111（CRC 正确）

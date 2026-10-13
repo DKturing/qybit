@@ -25,9 +25,12 @@ fn desktop_capacity_matches_task_card() {
 #[test]
 fn structs_hold_no_block_sized_storage() {
     // 结构体大小与容量无关：只含切片与少量状态。
+    // 上限依据：T1 的 128 字节是经验值；T2 加入帧解析状态与 STREAMINFO 字段（另有
+    // test-metrics 统计 40 字节）后为 184 字节。最小的块缓冲（MCU：4608 × 2 × 8 字节
+    // = 73 728 字节）远大于 256，故 256 字节以内足以证明没有内嵌块大小的存储。
     let d = std::mem::size_of::<FlacDecoder>();
     let c = std::mem::size_of::<Core<WavDecoder>>();
-    assert!(d <= 128, "FlacDecoder {d} 字节");
+    assert!(d <= 256, "FlacDecoder {d} 字节");
     assert!(c <= 256, "Core {c} 字节");
 }
 

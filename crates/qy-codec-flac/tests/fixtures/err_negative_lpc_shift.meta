@@ -1,0 +1,5 @@
+result Malformed
+detail NegativeShift
+format 44100 1 16
+frames 0
+origin 手写错误：LPC 右移量 −1（CRC 正确）

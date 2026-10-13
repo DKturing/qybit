@@ -1,0 +1,78 @@
+# qy-codec-flac 夹具清单（由 cargo run -p qy-gen-fixtures -- flac 生成）
+参考工具：flac 1.4.3
+
+cli_16_stereo_44k_default: flac --silent --force --no-padding  -o cli_16_stereo_44k_default.flac cli_16_stereo_44k_default.wav
+cli_16_stereo_exhaustive_ms: flac --silent --force --no-padding -8 -e -m -o cli_16_stereo_exhaustive_ms.flac cli_16_stereo_exhaustive_ms.wav
+cli_24_mono_96k_lpc12: flac --silent --force --no-padding -l 12 -r 6 -o cli_24_mono_96k_lpc12.flac cli_24_mono_96k_lpc12.wav
+cli_24_stereo_fixed_only: flac --silent --force --no-padding -l 0 -o cli_24_stereo_fixed_only.flac cli_24_stereo_fixed_only.wav
+cli_32_stereo_192k: flac --silent --force --no-padding --lax -8 -o cli_32_stereo_192k.flac cli_32_stereo_192k.wav
+cli_32_noise_verbatim: flac --silent --force --no-padding --lax -o cli_32_noise_verbatim.flac cli_32_noise_verbatim.wav
+cli_16_constant_channel: flac --silent --force --no-padding  -o cli_16_constant_channel.flac cli_16_constant_channel.wav
+cli_16_wasted_bits: flac --silent --force --no-padding  -o cli_16_wasted_bits.flac cli_16_wasted_bits.wav
+cli_24_rice2_noise: flac --silent --force --no-padding -8 -o cli_24_rice2_noise.flac cli_24_rice2_noise.wav
+cli_16_blocksize_1000: flac --silent --force --no-padding -b 1000 -o cli_16_blocksize_1000.flac cli_16_blocksize_1000.wav
+cli_16_blocksize_16384: flac --silent --force --no-padding --lax -b 16384 -o cli_16_blocksize_16384.flac cli_16_blocksize_16384.wav
+cli_16_stereo_44k_default -> ok - (44515 字节) flac 命令行：
+cli_16_stereo_exhaustive_ms -> ok - (25696 字节) flac 命令行：-8 -e -m
+cli_24_mono_96k_lpc12 -> ok - (32805 字节) flac 命令行：-l 12 -r 6
+cli_24_stereo_fixed_only -> ok - (39505 字节) flac 命令行：-l 0
+cli_32_stereo_192k -> ok - (128654 字节) flac 命令行：--lax -8
+cli_32_noise_verbatim -> ok - (72140 字节) flac 命令行：--lax
+cli_16_constant_channel -> ok - (9048 字节) flac 命令行：
+cli_16_wasted_bits -> ok - (5297 字节) flac 命令行：
+cli_24_rice2_noise -> ok - (21765 字节) flac 命令行：-8
+cli_16_blocksize_1000 -> ok - (6372 字节) flac 命令行：-b 1000
+cli_16_blocksize_16384 -> ok - (88572 字节) flac 命令行：--lax -b 16384
+max_block_verbatim_32_stereo -> ok - (524334 字节) 手写：65535 块 verbatim，32 位极值
+side_33bit_extremes -> ok - (1680 字节) 手写：32 位 left/side、side/right、mid/side 极值，33 位侧声道 verbatim/固定/LPC
+escape_partitions -> ok - (389 字节) 手写：固定 2 阶，escape 12 位/0 位，Rice 参数 0 与 14
+rice2_partitions -> ok - (1606 字节) 手写：Rice2 参数 23、Rice2 escape 24 位
+wasted_bits -> ok - (863 字节) 手写：wasted bits 1–5，常量/verbatim/固定/LPC
+fixed_orders_and_lpc32 -> ok - (9820 字节) 手写：固定 0–4 阶，LPC 32 阶精度 15 位移 15，分区阶数 4
+variable_blocksize_uncommon -> ok - (14938 字节) 手写：可变块，块大小码 6/7/1/5 与 8/16 位非常用值，采样率/位深取自 STREAMINFO
+rate_code12_7khz -> ok - (686 字节) 手写：非常用采样率 7000 Hz
+rate_code13_11025 -> ok - (690 字节) 手写：非常用采样率 11025 Hz
+rate_code14_100k -> ok - (695 字节) 手写：非常用采样率 100000 Hz
+metadata_skip -> ok - (120001 字节) 手写：填充、注释、100 KB 图片与保留类型元数据
+unknown_max_frame -> ok - (19591 字节) 手写：STREAMINFO 最小/最大帧长度为 0（未知）
+lying_max_frame -> ok - (19591 字节) 手写：STREAMINFO 最大帧长度谎报为 100
+short_tail_frame -> ok - (1318 字节) 手写：固定块 512，尾帧 17 帧
+err_header_crc -> Malformed HeaderCrc (3404 字节) 手写错误：首帧帧头 1 位翻转
+err_frame_crc -> Malformed FrameCrc (3404 字节) 手写错误：第二帧 verbatim 样本 1 位翻转
+err_truncated_mid_frame -> Truncated Truncated (3397 字节) 手写错误：尾帧缺最后 7 字节
+err_truncated_at_frame_boundary -> Truncated Truncated (1724 字节) 手写错误：在帧边界截断，STREAMINFO 总样本数不足
+err_no_marker -> Malformed BadMarker (3404 字节) 手写错误：标记不是 fLaC
+err_first_block_not_streaminfo -> Malformed BadStreamInfo (3404 字节) 手写错误：首个元数据块不是 STREAMINFO
+err_metadata_type_127 -> Malformed BadMetadataType (3412 字节) 手写错误：元数据块类型 127
+err_negative_lpc_shift -> Malformed NegativeShift (144 字节) 手写错误：LPC 右移量 −1（CRC 正确）
+err_lpc_precision_15 -> Malformed BadLpcPrecision (144 字节) 手写错误：LPC 精度字段 0b1111（CRC 正确）
+err_partition_order -> Malformed BadPartitionOrder (54 字节) 手写错误：块 100、分区阶数 3
+err_residual_overflow -> Malformed ResidualOverflow (59 字节) 手写错误：Rice 商 2^32
+err_sample_overflow -> Malformed SampleOverflow (62 字节) 手写错误：16 位预测结果 32768
+err_nonzero_padding -> Malformed NonZeroPadding (57 字节) 手写错误：帧尾填充位为 1
+err_stream_mismatch -> Malformed StreamMismatch (100 字节) 手写错误：帧位深 24、STREAMINFO 16
+err_blocking_change -> Malformed StreamMismatch (190 字节) 手写错误：第二帧改为可变块
+err_reserved_blocksize -> Malformed ReservedCode (180 字节) 手写错误：块大小码 0（CRC-8 重算）
+err_reserved_channels -> Malformed ReservedCode (180 字节) 手写错误：声道码 11（CRC-8 重算）
+err_unsupported_3ch -> Unsupported Unsupported (438 字节) 手写错误：3 声道（libFLAC 可解）
+err_unsupported_384k -> Unsupported Unsupported (182 字节) 手写错误：384 kHz
+
+# libFLAC --analyze 分支覆盖（有效夹具合计）
+blocksize=65535: 1
+channel_assignment=INDEPENDENT: 42
+channel_assignment=LEFT_SIDE: 8
+channel_assignment=MID_SIDE: 29
+channel_assignment=RIGHT_SIDE: 3
+escape_partition: 3
+residual_type=RICE: 76
+residual_type=RICE2: 35
+type=CONSTANT: 4
+type=FIXED order=0: 2
+type=FIXED order=1: 9
+type=FIXED order=2: 45
+type=FIXED order=3: 2
+type=FIXED order=4: 2
+type=LPC: 51
+type=LPC order=32: 1
+type=VERBATIM: 18
+wasted_bits>0: 9

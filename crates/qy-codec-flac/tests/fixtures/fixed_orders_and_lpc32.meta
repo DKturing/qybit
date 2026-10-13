@@ -1,0 +1,5 @@
+result ok
+detail -
+format 48000 1 20
+frames 3840
+origin 手写：固定 0–4 阶，LPC 32 阶精度 15 位移 15，分区阶数 4

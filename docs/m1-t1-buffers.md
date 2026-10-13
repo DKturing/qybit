@@ -54,3 +54,9 @@
 
 - 256 KiB 栈测试中的“最大块解码”：需要 T2 的真实 FLAC 帧解码。T1 不用空壳实现凑数，T2 完成后加入同一测试。
 - `Core<FlacDecoder>` 的构造与播放：`FlacDecoder` 在 T2 实现 `Decoder` 之后才能交给核心。T1 中 1 MiB 窗口的核心路径暂用 WAV 解码器驱动。
+
+## T2 补完（2026-10-13）
+
+上面“未完成”的两项已在 M1 T2 完成：`no_realloc::desktop_buffers_on_256k_stack_reuse_without_allocation` 改为使用 `Core<FlacDecoder>`（1 MiB 窗口）。在 debug 构建、256 KiB 栈的线程内，以 4093 字节短读解码最大块夹具 `max_block_verbatim_32_stereo`（65535 × 2 × 32 位 verbatim，约 512 KiB 帧），共 5 轮。每轮都完整结束，样本数为 131 070，校验和与独立参考一致；整个过程零分配。
+
+为容纳 T2 的解析状态，`FlacDecoder` 结构体的大小上界由 128 调整为 256 字节，依据写在 `buffers::structs_hold_no_block_sized_storage` 中。

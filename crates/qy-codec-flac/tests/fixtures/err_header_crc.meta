@@ -1,0 +1,5 @@
+result Malformed
+detail HeaderCrc
+format 44100 2 16
+frames 0
+origin 手写错误：首帧帧头 1 位翻转

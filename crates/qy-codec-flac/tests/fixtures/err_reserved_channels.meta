@@ -1,0 +1,5 @@
+result Malformed
+detail ReservedCode
+format 44100 1 16
+frames 0
+origin 手写错误：声道码 11（CRC-8 重算）

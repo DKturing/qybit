@@ -1,0 +1,5 @@
+result Malformed
+detail StreamMismatch
+format 44100 1 16
+frames 32
+origin 手写错误：第二帧改为可变块

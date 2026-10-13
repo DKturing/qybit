@@ -1,0 +1,5 @@
+result ok
+detail -
+format 192000 2 32
+frames 20000
+origin flac 命令行：--lax -8

@@ -1,0 +1,5 @@
+result Malformed
+detail NonZeroPadding
+format 44100 1 16
+frames 0
+origin 手写错误：帧尾填充位为 1

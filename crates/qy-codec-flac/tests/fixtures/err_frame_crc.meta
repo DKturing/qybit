@@ -1,0 +1,5 @@
+result Malformed
+detail FrameCrc
+format 44100 2 16
+frames 512
+origin 手写错误：第二帧 verbatim 样本 1 位翻转

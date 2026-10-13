@@ -7,6 +7,8 @@
 //! 用法：`cargo run -p qy-gen-fixtures -- [输出目录]`（默认 `crates/qy-codec-wav/tests/fixtures`）。
 //! 固定种子，重复运行产生逐字节相同的输出（需要 PATH 中有 ffmpeg，版本记录在文档）。
 
+mod flac;
+
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -788,10 +790,26 @@ fn expect_text(c: &Case) -> String {
 }
 
 fn main() -> Result<()> {
-    let out = std::env::args().nth(1).map_or_else(
-        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/qy-codec-wav/tests/fixtures"),
-        PathBuf::from,
-    );
+    // 用法：qy-gen-fixtures [wav|flac|all] [输出目录]
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let what = args.first().map_or("all", String::as_str);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates");
+    let dir = |default: &str| {
+        args.get(1)
+            .map_or_else(|| root.join(default), PathBuf::from)
+    };
+    match what {
+        "wav" => wav_main(dir("qy-codec-wav/tests/fixtures")),
+        "flac" => flac::generate(&dir("qy-codec-flac/tests/fixtures")),
+        "all" => {
+            wav_main(root.join("qy-codec-wav/tests/fixtures"))?;
+            flac::generate(&root.join("qy-codec-flac/tests/fixtures"))
+        }
+        x => Err(format!("未知参数 {x}；用法：qy-gen-fixtures [wav|flac|all] [输出目录]").into()),
+    }
+}
+
+fn wav_main(out: PathBuf) -> Result<()> {
     std::fs::create_dir_all(&out)?;
     let cases = build_cases();
     let mut names = std::collections::HashSet::new();

@@ -1,0 +1,5 @@
+result Malformed
+detail BadPartitionOrder
+format 44100 1 16
+frames 0
+origin 手写错误：块 100、分区阶数 3

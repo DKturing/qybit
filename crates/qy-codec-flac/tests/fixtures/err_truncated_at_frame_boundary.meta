@@ -1,0 +1,5 @@
+result Truncated
+detail Truncated
+format 44100 2 16
+frames 512
+origin 手写错误：在帧边界截断，STREAMINFO 总样本数不足

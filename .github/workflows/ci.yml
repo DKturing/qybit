@@ -22,10 +22,10 @@ jobs:
         run: rustup show
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked -p qy-core -p qy-codec-wav -p qy-codec-flac -p qy-pcm-format -p qy-host-sim -p qy-gen-fixtures --all-targets -- -D warnings
-      - run: cargo clippy --locked -p qy-codec-flac --features static-cell --all-targets -- -D warnings
+      - run: cargo clippy --locked -p qy-codec-flac --features static-cell,test-metrics --all-targets -- -D warnings
       - run: cargo test --locked -p qy-core -p qy-codec-wav -p qy-host-sim
       - run: cargo test --locked -p qy-codec-flac
-      - run: cargo test --locked -p qy-codec-flac --features static-cell
+      - run: cargo test --locked -p qy-codec-flac --features static-cell,test-metrics
       - run: cargo test --locked -p qy-pcm-format
       - run: cargo test --locked -p qy-pcm-format --features ring
 
@@ -41,8 +41,10 @@ jobs:
       - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-pcm-format
       - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-flac
       - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-flac --features static-cell
+      - run: cargo build --locked --target thumbv7em-none-eabihf -p qy-codec-flac --features test-metrics
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-core -p qy-codec-wav -p qy-pcm-format -p qy-codec-flac -- -D warnings
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-codec-flac --features static-cell -- -D warnings
+      - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-codec-flac --features test-metrics -- -D warnings
 
   # Windows 宿主与 CLI 构建、测试。
   windows:

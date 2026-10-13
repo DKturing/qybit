@@ -14,7 +14,7 @@ M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-
 | --- | --- |
 | `qy-core` | sans-IO 播放核心，`no_std`、无 alloc |
 | `qy-codec-wav` | 自有推送式 WAV 解码器，`no_std`、无 alloc |
-| `qy-codec-flac` | 自有推送式 FLAC 解码器（M1，进行中：T1 缓冲接口），`no_std`、无 alloc；`static-cell` 特性提供 MCU 静态缓冲 |
+| `qy-codec-flac` | 自有推送式 FLAC 解码器（M1：T1 缓冲接口、T2 整帧解析已完成，见 [docs/m1-t2-flac.md](docs/m1-t2-flac.md)），`no_std`、无 alloc；`static-cell` 特性提供 MCU 静态缓冲，`test-metrics` 特性仅供测试统计 |
 | `qy-pcm-format` | 与平台 SDK 无关的格式字段、WAVEFORMATEX/EXTENSIBLE 纯描述与 pack，`no_std`；`ring` 特性提供宿主用的设备帧 SPSC 队列 |
 | `qy-host-sim` | 模拟宿主：真实核心/解码/pack/队列，模拟文件、时间与设备；1000 种子场景测试 |
 | `qy-host-wasapi` | WASAPI 独占宿主：跨平台渲染循环与播放驱动（可注入假 API 测试），Windows 绑定仅在 Windows 目标编译；真机测试见 `tests/device.rs`（默认忽略） |
@@ -36,9 +36,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --target thumbv7em-none-eabihf -p qy-core -p qy-codec-wav -p qy-pcm-format -p qy-codec-flac
 cargo build --target thumbv7em-none-eabihf -p qy-codec-flac --features static-cell
+cargo test -p qy-codec-flac --features test-metrics   # 含整帧重试复杂度测试
 ```
 
-WAV 测试夹具由 `cargo run -p qy-gen-fixtures` 生成（需要 PATH 中有 ffmpeg 作为第二参考），fuzz 步骤见 [docs/m0-t2-wav.md](docs/m0-t2-wav.md)。
+测试夹具由 `cargo run -p qy-gen-fixtures -- [wav|flac|all]` 生成：WAV 需要 PATH 中有 ffmpeg 作为第二参考，FLAC 需要 Xiph `flac` ≥ 1.4.0（编码、`flac -d` 交叉核对与 `--analyze` 分支覆盖），fuzz 步骤见 [docs/m0-t2-wav.md](docs/m0-t2-wav.md)。
 
 | fuzz 依赖 | 版本 | 用途 |
 | --- | --- | --- |
