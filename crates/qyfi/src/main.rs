@@ -5,7 +5,7 @@
 
 use std::process::ExitCode;
 
-const USAGE: &str = "用法:\n  qyfi list-devices\n  qyfi --device <endpoint-id> <file.wav>...";
+const USAGE: &str = "用法:\n  qybit list-devices\n  qybit --device <endpoint-id> <file.wav>...";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -16,7 +16,7 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
         Some("--version") => {
-            println!("qyfi {}", env!("CARGO_PKG_VERSION"));
+            println!("qybit {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         _ => {

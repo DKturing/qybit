@@ -17,7 +17,7 @@ M0 T3 已完成：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wa
 | `qy-pcm-format` | 与平台 SDK 无关的格式字段、WAVEFORMATEX/EXTENSIBLE 纯描述与 pack，`no_std`；`ring` 特性提供宿主用的设备帧 SPSC 队列 |
 | `qy-host-sim` | 模拟宿主 |
 | `qy-host-wasapi` | Windows WASAPI 宿主（Windows 绑定仅在 Windows 目标编译） |
-| `qyfi` | 命令行程序，二进制名 `qyfi` |
+| `qyfi` | 命令行程序，二进制名 `qybit` |
 
 ## 依赖
 

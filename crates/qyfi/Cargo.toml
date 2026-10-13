@@ -9,7 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "qyfi"
+name = "qybit"
 path = "src/main.rs"
 
 [target.'cfg(windows)'.dependencies]
