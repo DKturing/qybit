@@ -7,11 +7,48 @@
 use std::fs;
 use std::path::Path;
 
+use qy_codec_wav::WavDecoder;
+use qy_core::PCM_WORK_SAMPLES;
 use qy_core::{Decoder, Status};
-use qy_host_sim::SimHost;
 use qy_pcm_format::DeviceFormat;
 use qy_pcm_format::pack::{PackError, Pcm};
-use qy_pcm_format::ring::{DEFAULT_CAPACITY_BYTES, RingError};
+use qy_pcm_format::ring::{
+    DEFAULT_CAPACITY_BYTES, FrameConsumer, FrameProducer, PACK_SCRATCH_BYTES, RingError,
+    frame_ring, reconfigure,
+};
+
+/// 直接持有解码器、pack 暂存区与队列的生产端（不经核心状态机）。
+struct Rig {
+    decoder: WavDecoder,
+    pack_scratch: &'static mut [u8],
+    producer: FrameProducer,
+    consumer: FrameConsumer,
+    generation: u64,
+}
+
+impl Rig {
+    fn new() -> Option<Self> {
+        let pcm = Box::leak(vec![0i32; PCM_WORK_SAMPLES].into_boxed_slice());
+        let (producer, consumer) = frame_ring(DEFAULT_CAPACITY_BYTES);
+        Some(Self {
+            decoder: WavDecoder::new(pcm).ok()?,
+            pack_scratch: Box::leak(vec![0u8; PACK_SCRATCH_BYTES].into_boxed_slice()),
+            producer,
+            consumer,
+            generation: 0,
+        })
+    }
+
+    fn configure_device(&mut self, format: &DeviceFormat) -> Result<(), RingError> {
+        self.generation += 1;
+        reconfigure(
+            &mut self.producer,
+            &mut self.consumer,
+            format,
+            self.generation,
+        )
+    }
+}
 
 fn fixture(name: &str) -> Vec<u8> {
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -34,7 +71,7 @@ fn data_chunk(wav: &[u8]) -> &[u8] {
 }
 
 /// 解码 `wav` 共 `repeat` 遍，经 pack 与队列输出全部字节。
-fn pipeline(host: &mut SimHost, wav: &[u8], dev: &DeviceFormat, repeat: usize) -> Vec<u8> {
+fn pipeline(host: &mut Rig, wav: &[u8], dev: &DeviceFormat, repeat: usize) -> Vec<u8> {
     let Ok(_) = host.configure_device(dev) else {
         panic!("configure");
     };
@@ -42,7 +79,7 @@ fn pipeline(host: &mut SimHost, wav: &[u8], dev: &DeviceFormat, repeat: usize) -
     let mut out = Vec::new();
     let mut pop_buf = vec![0u8; 1000 * fb];
     let mut block = 1usize;
-    let mut pop = |host: &mut SimHost, out: &mut Vec<u8>, all: bool| loop {
+    let mut pop = |host: &mut Rig, out: &mut Vec<u8>, all: bool| loop {
         block = block * 7 % 997 + 1; // 不规则消费块
         let want = if all { pop_buf.len() } else { block * fb };
         let Ok(n) = host.consumer.pop_frames(&mut pop_buf[..want]) else {
@@ -89,7 +126,7 @@ fn pipeline(host: &mut SimHost, wav: &[u8], dev: &DeviceFormat, repeat: usize) -
 
 #[test]
 fn identity_layouts_match_raw_data_bytes_across_wraparound() {
-    let Ok(mut host) = SimHost::new() else {
+    let Some(mut host) = Rig::new() else {
         panic!("host");
     };
     let cases = [
@@ -135,7 +172,7 @@ fn identity_layouts_match_raw_data_bytes_across_wraparound() {
 #[test]
 fn widening_matches_independent_formula() {
     // 16 位源 → WASAPI 32/24：每个样本应为 s << 16 的小端 4 字节。
-    let Ok(mut host) = SimHost::new() else {
+    let Some(mut host) = Rig::new() else {
         panic!("host");
     };
     let wav = fixture("pcm16_stereo_44k.wav");
@@ -153,7 +190,7 @@ fn widening_matches_independent_formula() {
 
 #[test]
 fn producer_rejects_precision_loss_and_wrong_width() {
-    let Ok(mut host) = SimHost::new() else {
+    let Some(mut host) = Rig::new() else {
         panic!("host");
     };
     let wav = fixture("pcm32_stereo_96k.wav");

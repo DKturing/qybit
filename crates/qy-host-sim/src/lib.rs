@@ -1,13 +1,16 @@
 //! QyFi 模拟宿主。
 //!
-//! 与桌面宿主遵守同一缓冲契约：输入窗口、PCM 工作区与设备帧队列在
-//! [`SimHost::new`] 中一次性堆分配（输入窗口与工作区 `Box::leak` 为
-//! `&'static mut`），停止/换曲/设备重配置复用，不逐曲分配。
+//! 与桌面宿主遵守同一缓冲契约：输入窗口、PCM 工作区、pack 暂存区与设备帧队列在
+//! [`SimHost::new`] 中一次性堆分配（`Box::leak` 为 `&'static mut`），停止、换曲与
+//! 设备重配置复用，不逐曲分配。
 //!
-//! M0 T1 只建立资源骨架；文件/时间/设备模拟与故障注入在 T4 实现。
+//! [`sim`] 执行真实 `qy-core`、`qy-codec-wav`、pack 与 SPSC 队列，只模拟文件、
+//! 时间与设备（M0 T4）。
+
+pub mod sim;
 
 use qy_codec_wav::WavDecoder;
-use qy_core::{DecodeError, DeviceFormat, INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES};
+use qy_core::{Core, CoreError, DecodeError, DeviceFormat, INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES};
 use qy_pcm_format::ring::{
     DEFAULT_CAPACITY_BYTES, FrameConsumer, FrameProducer, PACK_SCRATCH_BYTES, RingError,
     frame_ring, reconfigure,
@@ -17,6 +20,7 @@ use qy_pcm_format::ring::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostError {
     Decoder(DecodeError),
+    Core(CoreError),
     Ring(RingError),
 }
 
@@ -27,14 +31,12 @@ fn leak_zeroed<T: Copy + Default>(len: usize) -> &'static mut [T] {
 
 /// 模拟宿主持有的长期资源。
 pub struct SimHost {
-    /// 交给核心管理的输入窗口（T4 接入核心后移交）。
-    pub input: Option<&'static mut [u8]>,
-    pub decoder: WavDecoder,
+    pub core: Core<WavDecoder>,
     /// 生产端 pack 暂存区（启动时分配一次）。
     pub pack_scratch: &'static mut [u8],
     pub producer: FrameProducer,
     pub consumer: FrameConsumer,
-    generation: u64,
+    ring_generation: u64,
 }
 
 impl SimHost {
@@ -43,23 +45,23 @@ impl SimHost {
         let input = leak_zeroed::<u8>(INPUT_WINDOW_BYTES);
         let pcm = leak_zeroed::<i32>(PCM_WORK_SAMPLES);
         let decoder = WavDecoder::new(pcm).map_err(HostError::Decoder)?;
+        let core = Core::new(input, decoder).map_err(HostError::Core)?;
         let (producer, consumer) = frame_ring(DEFAULT_CAPACITY_BYTES);
         Ok(Self {
-            input: Some(input),
-            decoder,
+            core,
             pack_scratch: leak_zeroed::<u8>(PACK_SCRATCH_BYTES),
             producer,
             consumer,
-            generation: 0,
+            ring_generation: 0,
         })
     }
 
-    /// 设备重配置：复用同一队列，核对帧宽/容量并进入新代次。
+    /// 设备重配置：复用同一队列，核对帧宽/容量，进入新队列代次并丢弃旧数据。
     pub fn configure_device(&mut self, format: &DeviceFormat) -> Result<u64, HostError> {
-        let next = self.generation + 1;
+        let next = self.ring_generation + 1;
         reconfigure(&mut self.producer, &mut self.consumer, format, next)
             .map_err(HostError::Ring)?;
-        self.generation = next;
+        self.ring_generation = next;
         Ok(next)
     }
 }

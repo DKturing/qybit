@@ -5,9 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use qy_codec_wav::WavDecoder;
-use qy_core::{
-    Action, Core, DecodeError, Decoder, Event, INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES, Status,
-};
+use qy_core::{Action, Core, Event, Fault, INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES};
 
 struct Lcg(u64);
 impl Lcg {
@@ -36,75 +34,81 @@ fn new_core() -> Core<WavDecoder> {
     core
 }
 
-fn play(
-    core: &mut Core<WavDecoder>,
-    data: &[u8],
-    seed: u64,
-) -> (Result<(), DecodeError>, Vec<i32>) {
+fn play(core: &mut Core<WavDecoder>, data: &[u8], seed: u64) -> (Result<(), Fault>, Vec<i32>) {
     let mut r = Lcg(seed);
-    let Action::Open { generation, .. } = core.start(0) else {
-        panic!("open");
-    };
-    assert_eq!(core.handle(Event::Opened { generation }), Ok(()));
+    core.play(0, 1);
     let mut pos = 0usize;
     let mut out = Vec::new();
     for _ in 0..10 * data.len() + 1000 {
-        match core.decode() {
-            Err(e) => return (Err(e), out),
-            Ok(p) => match p.status {
-                Status::Frames(_) | Status::NeedOutput => {
-                    let ch = core
-                        .decoder()
-                        .format()
-                        .map_or(1, |f| usize::from(f.channels()));
-                    let avail = core.decoder().pcm().len() / ch;
-                    let k = if seed == 0 { avail } else { r.range(1, avail) };
-                    out.extend_from_slice(&core.decoder().pcm()[..k * ch]);
-                    core.decoder_mut().release(k);
-                }
-                Status::NeedInput => {
-                    let Some(Action::Read {
+        let Some(action) = core.poll() else {
+            panic!("单线程宿主不应出现无动作等待");
+        };
+        match action {
+            Action::Open { generation, .. } => {
+                assert_eq!(core.handle(Event::Opened { generation }), Ok(()));
+            }
+            Action::Configure { generation, .. } => {
+                assert_eq!(core.handle(Event::Configured { generation }), Ok(()));
+            }
+            Action::Output { generation, frames } => {
+                let k = if seed == 0 {
+                    frames
+                } else {
+                    r.range(0, frames)
+                };
+                let Some(pcm) = core.pcm() else {
+                    panic!("Output 时应有 PCM");
+                };
+                let ch = usize::from(pcm.format().channels());
+                out.extend_from_slice(&pcm.samples()[..k * ch]);
+                assert_eq!(
+                    core.handle(Event::Output {
                         generation,
-                        request,
-                        max,
-                    }) = core.request_read()
-                    else {
-                        panic!("窗口已满仍缺输入");
-                    };
-                    if pos == data.len() {
-                        assert_eq!(
-                            core.handle(Event::ReadEof {
-                                generation,
-                                request
-                            }),
-                            Ok(())
-                        );
-                        continue;
-                    }
-                    let want = match (seed, r.range(0, 4)) {
-                        (0, _) => max,
-                        (_, 0) => 0, // 零长度短读不是 EOF
-                        (_, 1) => 1,
-                        (_, 2) => r.range(1, 64),
-                        _ => r.range(1, max),
-                    };
-                    let n = want.min(max).min(data.len() - pos);
-                    let Some(dst) = core.read_target(generation, request) else {
-                        panic!("read target");
-                    };
-                    dst[..n].copy_from_slice(&data[pos..pos + n]);
-                    pos += n;
+                        frames: k
+                    }),
+                    Ok(())
+                );
+            }
+            Action::Read {
+                generation,
+                request,
+                max,
+            } => {
+                if pos == data.len() {
                     assert_eq!(
-                        core.handle(Event::ReadDone {
+                        core.handle(Event::ReadEof {
                             generation,
-                            request,
-                            len: n
+                            request
                         }),
                         Ok(())
                     );
+                    continue;
                 }
-                Status::End => return (Ok(()), out),
-            },
+                let want = match (seed, r.range(0, 4)) {
+                    (0, _) => max,
+                    (_, 0) => 0, // 零长度短读不是 EOF
+                    (_, 1) => 1,
+                    (_, 2) => r.range(1, 64),
+                    _ => r.range(1, max),
+                };
+                let n = want.min(max).min(data.len() - pos);
+                let Some(dst) = core.read_target(generation, request) else {
+                    panic!("read target");
+                };
+                dst[..n].copy_from_slice(&data[pos..pos + n]);
+                pos += n;
+                assert_eq!(
+                    core.handle(Event::ReadDone {
+                        generation,
+                        request,
+                        len: n
+                    }),
+                    Ok(())
+                );
+            }
+            Action::Close { .. } => {}
+            Action::Finished { .. } => return (Ok(()), out),
+            Action::Failed { fault, .. } => return (Err(fault), out),
         }
     }
     panic!("解码未推进");

@@ -6,7 +6,7 @@ Rust 极简本地音频播放器。纯本地、严格保真：不重采样、不
 
 ## 当前状态
 
-M0 T3 已完成：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wav.md)），pack 与 Windows 纯格式描述（[docs/m0-t3-pack.md](docs/m0-t3-pack.md)）。尚不能播放音频：模拟验证（T4）、WASAPI 独占播放（T5）、CLI 播放（T6）均未实现。
+M0 T4 已完成：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wav.md)），pack 与 Windows 纯格式描述（[docs/m0-t3-pack.md](docs/m0-t3-pack.md)），真实路径模拟（[docs/m0-t4-sim.md](docs/m0-t4-sim.md)，`Action`/`Event`/`Decoder` 自此冻结）。尚不能在真实设备上播放：WASAPI 独占播放（T5）、CLI 播放（T6）均未实现。
 
 ## 工程结构
 
@@ -15,7 +15,7 @@ M0 T3 已完成：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wa
 | `qy-core` | sans-IO 播放核心，`no_std`、无 alloc |
 | `qy-codec-wav` | 自有推送式 WAV 解码器，`no_std`、无 alloc |
 | `qy-pcm-format` | 与平台 SDK 无关的格式字段、WAVEFORMATEX/EXTENSIBLE 纯描述与 pack，`no_std`；`ring` 特性提供宿主用的设备帧 SPSC 队列 |
-| `qy-host-sim` | 模拟宿主 |
+| `qy-host-sim` | 模拟宿主：真实核心/解码/pack/队列，模拟文件、时间与设备；1000 种子场景测试 |
 | `qy-host-wasapi` | Windows WASAPI 宿主（Windows 绑定仅在 Windows 目标编译） |
 | `qyfi` | 命令行程序，二进制名 `qybit` |
 

@@ -4,7 +4,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use qy_core::{INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES};
+use qy_core::PCM_WORK_SAMPLES;
 use qy_host_sim::SimHost;
 use qy_pcm_format::ring::DEFAULT_CAPACITY_BYTES;
 use qy_pcm_format::{DeviceFormat, Endian, Placement};
@@ -31,11 +31,7 @@ fn reconfigure_reuses_buffers_without_allocation() {
     let Ok(mut host) = SimHost::new() else {
         panic!("host init");
     };
-    assert_eq!(
-        host.input.as_ref().map(|s| s.len()),
-        Some(INPUT_WINDOW_BYTES)
-    );
-    assert_eq!(host.decoder.capacity_samples(), PCM_WORK_SAMPLES);
+    assert_eq!(host.core.decoder().capacity_samples(), PCM_WORK_SAMPLES);
     assert_eq!(host.producer.free_frames(), 0); // 未配置帧宽
 
     let formats = [
