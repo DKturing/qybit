@@ -1,6 +1,6 @@
 # QyBit GUI：极简 Rust 图形界面
 
-遵循根目录 AGENTS.md。前置：M0（Windows WAV）、M1（FLAC）、M2（ALSA/snd-aloop）全部验收完成后才开始；在此之前不创建 GUI crate，也不为 GUI 修改核心接口。
+遵循根目录 AGENTS.md。前置：M0（Windows WAV）、M1（FLAC）、M2（ALSA/snd-aloop）与 M3（QyBit Embedded Reference，播放调度已下沉到 Core）完成后才开始；在此之前不创建 GUI crate，也不为 GUI 修改核心接口。
 
 目标：为现有命令行播放器提供一个极简图形前端。GUI 只是控制与显示层，播放仍走与 CLI 相同的核心、自有解码、pack 与独占输出后端，不另建音频路径。
 

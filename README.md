@@ -1,6 +1,6 @@
 # QyBit
 
-Rust 极简本地音频播放器。纯本地、严格保真：不重采样、不降精度、不混音，设备不支持源格式时明确报错。
+QyBit Core：Rust 编写的 `no_std`、无 alloc 本地音频播放引擎，桌面播放器、CLI 与嵌入式播放器共用同一核心（定位与 MCU 缺口分析见 [docs/arch-core-mcu.md](docs/arch-core-mcu.md)）。纯本地、严格保真：不重采样、不降精度、不混音，设备不支持源格式时明确报错。
 
 长期规则见 [AGENTS.md](AGENTS.md)，阶段任务卡见 [tasks/](tasks/)。
 
