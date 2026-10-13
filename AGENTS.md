@@ -12,12 +12,12 @@
 - 格式范围：先只做无损格式（WAV、FLAC，其后 AIFF、浮点 WAV、ALAC、WavPack、APE、DSD 等，见 tasks/FORMATS.md），每种格式自行实现解码并单独立卡；有损格式（MP3、AAC、Opus 等）以后以插件形式另行设计，不进入当前核心范围。
 - M0 先完成 Windows：核心、WAV、模拟宿主、纯格式描述、WASAPI 独占、CLI。
 - M0 允许按命令行顺序播放多文件；不实现 GUI、拖放、随机播放、seek、配置保存或交互设备选择。
-- M1 实现自有 FLAC；M2 实现 ALSA 与 snd-aloop 自动回环（M2 T5 验证加强延后）；M3 为 QyBit Embedded Reference：先把播放调度下沉到 no_std 核心层，再在参考开发板上从 SD 卡经 I²S DMA 播放并验证（见 tasks/M3.md 与 docs/arch-core-mcu.md）。GUI 见 tasks/GUI.md，在 M3 之后作为薄应用层再做；macOS 另列任务，不提前扩展范围。
+- M1 实现自有 FLAC；M2 实现 ALSA 与 snd-aloop 自动回环（M2 T5 验证加强延后）；M3 为 QyBit Embedded Reference：先把播放调度下沉到 no_std 核心层，再做不绑定开发板的通用嵌入式宿主（板级只做薄适配），从 SD 卡经 I²S DMA 播放，并在用户手头任一满足最低要求的板上实测验证（见 tasks/M3.md 与 docs/arch-core-mcu.md）。GUI 见 tasks/GUI.md，在 M3 之后作为薄应用层再做；macOS 另列任务，不提前扩展范围。
 
 ## 2. 核心与数据流
 
 - `qy-core` 是 sans-IO 状态机：`#![no_std]`，不用 `alloc`，不访问文件、设备、线程或系统时钟。
-- 播放调度（预填、同格式续用、换格式排空、EOF/失败排空、背压、暂停、切歌与出错跳过策略、欠载与暂停静音的区分）属于 Core 层，同样 `no_std`、无 `alloc`；宿主只执行 I/O 与设备操作并回报结果。M3 T1 完成迁移前，桌面调度暂在 `qy-player`。
+- 播放调度（预填、同格式续用、换格式排空、EOF/失败排空、背压、暂停、切歌与出错跳过策略、欠载与暂停静音的区分）属于 Core 层，同样 `no_std`、无 `alloc`；宿主只执行 I/O 与设备操作并回报结果。M3 T1 起调度在 `qy_core::engine`，各宿主共用。
 - 核心通过 `Action` 请求宿主操作，通过 `Event` 接收结果；核心管理输入窗口与解码工作区的使用，存储由宿主以切片提供（桌面堆、MCU 静态区），容量写入任务卡，超限返回明确错误。
 - `qy-codec-wav`、`qy-codec-flac` 同样 `no_std`、无 `alloc`；调用级可暂停：缺输入时返回 `NeedInput`，下次调用继续；内部是否整帧重试由任务卡规定。不在解码器内调用 `Read/Seek` 或等待输入。
 - 解码结果使用交错、右对齐的 `i32`，携带源有效位数 N；不经浮点中转，不做音量缩放。
