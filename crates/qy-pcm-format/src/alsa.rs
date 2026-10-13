@@ -646,6 +646,8 @@ pub enum ChmapType {
 pub const CHMAP_POSITION_MASK: u32 = 0xffff;
 /// `SND_CHMAP_PHASE_INVERSE`：该声道反相。
 pub const CHMAP_PHASE_INVERSE: u32 = 1 << 16;
+/// `SND_CHMAP_DRIVER_SPEC`：驱动自定义的位置值（不是标准位置）。
+pub const CHMAP_DRIVER_SPEC: u32 = 1 << 17;
 /// `SND_CHMAP_MONO`。
 pub const CHMAP_MONO: u32 = 2;
 
@@ -733,6 +735,13 @@ pub fn layout_from_chmap(raw: &[u32]) -> Result<ChannelLayout, ChmapError> {
             return Err(ChmapError::PhaseInverse { channel: i });
         }
         let pos = p & CHMAP_POSITION_MASK;
+        // 驱动自定义位置或未知标志位：没有可确认的扬声器位置。
+        if p & !(CHMAP_POSITION_MASK | CHMAP_PHASE_INVERSE) != 0 {
+            return Err(ChmapError::UnknownPosition {
+                channel: i,
+                position: p,
+            });
+        }
         let found = CHMAP_OF_SPEAKER.iter().position(|&c| c == pos);
         let Some(bit) = found.and_then(|b| Speaker::from_bit(b as u32)) else {
             return Err(ChmapError::UnknownPosition {

@@ -83,8 +83,20 @@ pub fn test_samples(n: u8, channels: u16, frames: usize, seed: u64) -> Vec<i32> 
 /// 独立 WAV 写入：N = 16/24/32 用格式码 1（容器 = N）；N = 20 用 EXTENSIBLE 24/20
 /// （有效位左对齐写入 24 位容器，低 4 位为 0）。
 pub fn write_wav(path: &Path, rate: u32, channels: u16, n: u8, samples: &[i32]) {
+    write_wav_mask(path, rate, channels, n, samples, None);
+}
+
+/// 同 [`write_wav`]；给出 `mask` 时一律写 EXTENSIBLE 并写入该声道掩码（F1 多声道）。
+pub fn write_wav_mask(
+    path: &Path,
+    rate: u32,
+    channels: u16,
+    n: u8,
+    samples: &[i32],
+    mask: Option<u32>,
+) {
     let (container, ext) = match n {
-        16 | 24 | 32 => (n, false),
+        16 | 24 | 32 => (n, mask.is_some()),
         20 => (24, true),
         _ => panic!("不支持的测试位深 {n}"),
     };
@@ -105,7 +117,7 @@ pub fn write_wav(path: &Path, rate: u32, channels: u16, n: u8, samples: &[i32]) 
     if ext {
         fmt.extend_from_slice(&22u16.to_le_bytes());
         fmt.extend_from_slice(&u16::from(n).to_le_bytes());
-        let mask: u32 = if channels == 1 { 0x4 } else { 0x3 };
+        let mask: u32 = mask.unwrap_or(if channels == 1 { 0x4 } else { 0x3 });
         fmt.extend_from_slice(&mask.to_le_bytes());
         fmt.extend_from_slice(&[
             0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38,

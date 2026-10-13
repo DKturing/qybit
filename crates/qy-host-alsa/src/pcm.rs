@@ -4,7 +4,7 @@
 use std::fmt;
 
 use qy_pcm_format::ChannelLayout;
-use qy_pcm_format::alsa::{AlsaFormat, HwApplied, HwRequest};
+use qy_pcm_format::alsa::{AlsaFormat, ChmapType, HwApplied, HwRequest};
 
 /// alsa-lib 调用失败：调用名与正 errno。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +107,13 @@ pub trait Pcm: Send + 'static {
     fn writei(&mut self, frames: &[u8]) -> Result<usize, PcmError>;
     /// xrun 期间缺失的帧数估计（由触发时间戳与当前时间换算）；无法测得为 0。
     fn xrun_missing_frames(&mut self) -> u32;
+    /// `snd_pcm_query_chmaps`：设备支持的声道映射（类型, 原始位置值）；不支持或无法解析的
+    /// 映射不列出（F1）。
+    fn query_chmaps(&mut self) -> Vec<(ChmapType, Vec<u32>)>;
+    /// `snd_pcm_set_chmap`（在 hw_params 之后调用）。位置值不得含标志位。
+    fn set_chmap(&mut self, positions: &[u32]) -> Result<(), PcmError>;
+    /// `snd_pcm_get_chmap`：当前映射的原始位置值；设备不支持读回为 `Ok(None)`。
+    fn get_chmap(&mut self) -> Result<Option<Vec<u32>>, PcmError>;
 }
 
 /// 打开 PCM。

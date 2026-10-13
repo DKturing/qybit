@@ -17,13 +17,16 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use common::{cases, device_bytes, make_tracks, report_dir, sync_samples, test_samples, write_wav};
+use common::{
+    cases, device_bytes, make_tracks, report_dir, sync_samples, test_samples, write_wav,
+    write_wav_mask,
+};
 use qy_host_alsa::AlsaBackend;
 use qy_host_alsa::attempt::PlaybackReport;
 use qy_host_alsa::linux::{RealOpener, RealPcm};
 use qy_host_alsa::loopback::{Layer, LoopEntry, LoopReport, Verdict, align_and_compare};
-use qy_host_alsa::pcm::{Opener, PcmError};
-use qy_pcm_format::alsa::AlsaFormat;
+use qy_host_alsa::pcm::{Configured, HwPlan, Opener, Pcm, PcmError};
+use qy_pcm_format::alsa::{AlsaFormat, ChmapType};
 use qy_player::testing::FakePriority;
 use qy_player::{HostResources, play};
 
@@ -32,19 +35,89 @@ use qy_player::{HostResources, play};
 struct FileOpener {
     dir: PathBuf,
     files: Arc<Mutex<Vec<PathBuf>>>,
+    /// 测试声明的固定声道映射（ALSA 位置值）。`file` 插件本身不报告映射，多声道用例由测试
+    /// 声明一个固定映射，报告中明确标注；`None` 时原样使用 alsa-lib 的结果。
+    declared: Option<Vec<u32>>,
+}
+
+/// 真实 `file` 插件 PCM；声道映射查询/读回可由测试声明（见 [`FileOpener::declared`]），
+/// 其余调用全部原样转给 alsa-lib。
+struct FilePcm {
+    inner: RealPcm,
+    declared: Option<Vec<u32>>,
+}
+
+impl Pcm for FilePcm {
+    fn supported_formats(&mut self) -> Result<Vec<AlsaFormat>, PcmError> {
+        self.inner.supported_formats()
+    }
+    fn configure(&mut self, plan: &HwPlan) -> Result<Configured, PcmError> {
+        self.inner.configure(plan)
+    }
+    fn hw_free(&mut self) -> Result<(), PcmError> {
+        self.inner.hw_free()
+    }
+    fn start(&mut self) -> Result<(), PcmError> {
+        self.inner.start()
+    }
+    fn drop_now(&mut self) -> Result<(), PcmError> {
+        self.inner.drop_now()
+    }
+    fn drain(&mut self) -> Result<(), PcmError> {
+        self.inner.drain()
+    }
+    fn prepare(&mut self) -> Result<(), PcmError> {
+        self.inner.prepare()
+    }
+    fn wait(&mut self, timeout_ms: u32) -> Result<bool, PcmError> {
+        self.inner.wait(timeout_ms)
+    }
+    fn avail(&mut self) -> Result<u64, PcmError> {
+        self.inner.avail()
+    }
+    fn writei(&mut self, frames: &[u8]) -> Result<usize, PcmError> {
+        self.inner.writei(frames)
+    }
+    fn xrun_missing_frames(&mut self) -> u32 {
+        self.inner.xrun_missing_frames()
+    }
+    fn query_chmaps(&mut self) -> Vec<(ChmapType, Vec<u32>)> {
+        match &self.declared {
+            Some(m) => vec![(ChmapType::Fixed, m.clone())],
+            None => self.inner.query_chmaps(),
+        }
+    }
+    fn set_chmap(&mut self, positions: &[u32]) -> Result<(), PcmError> {
+        match &self.declared {
+            Some(_) => Err(PcmError {
+                call: "snd_pcm_set_chmap",
+                errno: qy_host_alsa::pcm::errno::EINVAL,
+            }),
+            None => self.inner.set_chmap(positions),
+        }
+    }
+    fn get_chmap(&mut self) -> Result<Option<Vec<u32>>, PcmError> {
+        match &self.declared {
+            Some(m) => Ok(Some(m.clone())),
+            None => self.inner.get_chmap(),
+        }
+    }
 }
 
 impl Opener for FileOpener {
-    type Pcm = RealPcm;
+    type Pcm = FilePcm;
 
-    fn open(&mut self, _name: &str) -> Result<RealPcm, PcmError> {
+    fn open(&mut self, _name: &str) -> Result<FilePcm, PcmError> {
         let mut files = self.files.lock().map_err(|_| PcmError {
             call: "FileOpener",
             errno: 0,
         })?;
         let path = self.dir.join(format!("capture-{}.raw", files.len()));
         files.push(path.clone());
-        RealOpener.open(&format!("file:FILE={},FORMAT=raw", path.display()))
+        Ok(FilePcm {
+            inner: RealOpener.open(&format!("file:FILE={},FORMAT=raw", path.display()))?,
+            declared: self.declared.clone(),
+        })
     }
 }
 
@@ -94,6 +167,106 @@ fn alsa_null_available() -> bool {
             false
         }
     }
+}
+
+/// 按扬声器位置独立重排每帧样本：`order[i]` 为设备第 i 个声道对应的源声道下标。
+fn permute(samples: &[i32], order: &[usize]) -> Vec<i32> {
+    samples
+        .chunks_exact(order.len())
+        .flat_map(|f| order.iter().map(move |&i| f[i]))
+        .collect()
+}
+
+/// F1 多声道：`file` 插件不报告声道映射，测试声明固定映射后走真实路径回环。
+/// 设备顺序与源一致时应原样提交；不一致（HDA 常见 5.1 顺序）时应按位置纯置换。
+fn multichannel_extra(dir: &Path, res: &mut HostResources) -> Vec<(String, bool, String)> {
+    // ALSA 位置值：FL=3 FR=4 RL=5 RR=6 FC=7 LFE=8 SL=9 SR=10（`asound.h`）。
+    struct Mc {
+        label: &'static str,
+        mask: u32,
+        bits: u8,
+        format: AlsaFormat,
+        map: [u32; 6],
+        /// 设备第 i 声道对应的源（WAVE 升序）声道下标。
+        order: [usize; 6],
+    }
+    let cases = [
+        Mc {
+            label: "5.1 后环绕 0x3F，设备映射与源同序（FL FR FC LFE RL RR），48k/S24_3LE",
+            mask: 0x3F,
+            bits: 24,
+            format: AlsaFormat::S24_3Le,
+            map: [3, 4, 7, 8, 5, 6],
+            order: [0, 1, 2, 3, 4, 5],
+        },
+        Mc {
+            label: "5.1 后环绕 0x3F，设备映射 HDA 序（FL FR RL RR FC LFE），48k/S16_LE",
+            mask: 0x3F,
+            bits: 16,
+            format: AlsaFormat::S16Le,
+            map: [3, 4, 5, 6, 7, 8],
+            order: [0, 1, 4, 5, 2, 3],
+        },
+        Mc {
+            label: "5.1 侧环绕 0x60F，设备映射（FL FR SL SR FC LFE），48k/S32_LE",
+            mask: 0x60F,
+            bits: 24,
+            format: AlsaFormat::S32Le,
+            map: [3, 4, 9, 10, 7, 8],
+            order: [0, 1, 4, 5, 2, 3],
+        },
+    ];
+    let mut out = Vec::new();
+    for (i, c) in cases.iter().enumerate() {
+        let sync = sync_samples(c.bits, 6, 300 + i as u64);
+        let test = test_samples(c.bits, 6, 1500, 400 + i as u64);
+        let sync_path = dir.join(format!("mc{i}-sync.wav"));
+        let test_path = dir.join(format!("mc{i}-test.wav"));
+        write_wav_mask(&sync_path, 48_000, 6, c.bits, &sync, Some(c.mask));
+        write_wav_mask(&test_path, 48_000, 6, c.bits, &test, Some(c.mask));
+        let mut b = backend(dir, Some(c.format));
+        b.opener.declared = Some(c.map.to_vec());
+        let r = play(&mut b, res, &[sync_path, test_path]);
+        let captured = started_files(&b, &r).pop().unwrap_or_default();
+        let (_, v) = align_and_compare(
+            &captured,
+            &device_bytes(&permute(&sync, &c.order), c.bits, c.format),
+            &device_bytes(&permute(&test, &c.order), c.bits, c.format),
+        );
+        let note = r
+            .streams
+            .first()
+            .and_then(|s| s.negotiation.chosen_attempt())
+            .and_then(|a| a.chmap.clone())
+            .unwrap_or_default();
+        let ok = r.software_path_intact() && r.streams.len() == 1 && v == Verdict::Match;
+        out.push((
+            format!(
+                "多声道（测试声明的固定声道映射，file 插件本身不报告映射）：{}",
+                c.label
+            ),
+            ok,
+            format!("{v:?}，流数 {}；{note}", r.streams.len()),
+        ));
+    }
+    // 设备没有任何映射时，多于 2 声道必须拒绝（不假定默认布局）。
+    {
+        let test = test_samples(16, 6, 600, 500);
+        let path = dir.join("mc-nomap.wav");
+        write_wav_mask(&path, 48_000, 6, 16, &test, Some(0x3F));
+        let mut b = backend(dir, Some(AlsaFormat::S16Le));
+        let r = play(&mut b, res, &[path]);
+        let ok = r.streams.is_empty() && !r.open_failures.is_empty();
+        out.push((
+            "多声道、设备不报告声道映射（file 插件原样）：明确拒绝".to_string(),
+            ok,
+            r.open_failures
+                .first()
+                .map(|f| f.message.clone())
+                .unwrap_or_else(|| r.summary()),
+        ));
+    }
+    out
 }
 
 #[test]
@@ -215,6 +388,8 @@ fn file_plugin_loopback_matrix() {
             format!("{v1:?} / {v2:?}，流数 {}", r.streams.len()),
         ));
     }
+
+    extra.extend(multichannel_extra(&dir, &mut res));
 
     let report = LoopReport {
         layer: Layer::File,

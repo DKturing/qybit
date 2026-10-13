@@ -555,7 +555,8 @@ impl Negotiator for SimpleNegotiator {
     ) -> Result<(DeviceFormat, Negotiation<TestAttempt>), OpenFailure<TestAttempt>> {
         let mut n = Negotiation::new(*source);
         for (c, v) in test_candidates(source) {
-            let Ok(format) = DeviceFormat::wasapi(source.sample_rate(), source.channels(), c, v)
+            let Ok(format) =
+                DeviceFormat::wasapi_layout(source.sample_rate(), source.layout(), c, v)
             else {
                 continue;
             };

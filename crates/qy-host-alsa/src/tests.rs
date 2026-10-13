@@ -417,7 +417,8 @@ fn decode_fault_drains_and_summary_reports_readback() {
     let (r, _) = run(&mut b, &["pcm16_stereo_44k.wav"]);
     let s = r.summary();
     assert!(
-        s.contains("请求 #0：44100 Hz / 2 声道 / 容器 16 位 / 有效 16 位（S16_LE）hw_params 成功，读回一致：精确采样率 44100/1 ← 已协商"),
+        // F1：报告写明声道映射的确认情况（tasks/F1.md §3）。
+        s.contains("请求 #0：44100 Hz / 2 声道 / 容器 16 位 / 有效 16 位（S16_LE）hw_params 成功，读回一致：精确采样率 44100/1；声道映射：设备不报告，按默认布局 [FL FR] ← 已协商"),
         "{s}"
     );
     assert!(
@@ -486,4 +487,116 @@ fn fake_matrix_records_capabilities_and_playback() {
     let csv = report.to_csv();
     assert_eq!(csv.lines().count(), 49);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- F1：声道映射（chmap）----
+
+/// 独立写出的 ALSA 位置值：FL=3 FR=4 RL=5 RR=6 FC=7 LFE=8。
+const HDA_51: [u32; 6] = [3, 4, 5, 6, 7, 8];
+const WAVE_51: [u32; 6] = [3, 4, 7, 8, 5, 6];
+
+/// 5.1（WAVE 顺序 FL FR FC LFE BL BR）参考样本按 `order`（源声道下标）放入 S32_LE（s << 8）。
+fn s32_51(order: &[usize; 6]) -> Vec<u8> {
+    flac_reference("cli_24_6ch_96k_51")
+        .chunks_exact(6)
+        .flat_map(|f| order.map(|i| ((f[i] << 8) as u32).to_le_bytes()))
+        .flatten()
+        .collect()
+}
+
+fn cfg_51(chmaps: Vec<(qy_pcm_format::alsa::ChmapType, Vec<u32>)>) -> FakeAlsaConfig {
+    FakeAlsaConfig {
+        supported: vec![AlsaFormat::S32Le],
+        chmaps,
+        ..FakeAlsaConfig::default()
+    }
+}
+
+#[test]
+fn chmap_var_fixed_none_readback_and_inverse() {
+    use qy_pcm_format::alsa::{CHMAP_PHASE_INVERSE, ChmapType};
+    let name = ["cli_24_6ch_96k_51.flac"];
+
+    // 可变映射：设置为源布局并读回一致，不置换。
+    let mut b = backend(cfg_51(vec![(ChmapType::Var, HDA_51.to_vec())]));
+    let (r, outs) = run(&mut b, &name);
+    assert!(r.finished && r.software_path_intact(), "{r:?}");
+    assert!(outs[0].rendered == s32_51(&[0, 1, 2, 3, 4, 5]));
+    assert!(
+        r.summary()
+            .contains("声道映射：可变，已设置并读回 FL FR FC LFE RL RR")
+    );
+
+    // 固定映射（HDA 顺序 FL FR RL RR FC LFE）：按设备顺序纯置换。
+    let mut b = backend(cfg_51(vec![(ChmapType::Fixed, HDA_51.to_vec())]));
+    let (r, outs) = run(&mut b, &name);
+    assert!(r.finished && r.software_path_intact(), "{r:?}");
+    assert!(
+        outs[0].rendered == s32_51(&[0, 1, 4, 5, 2, 3]),
+        "置换后的设备字节"
+    );
+    let s = r.summary();
+    assert!(
+        s.contains("声道映射：固定，读回 FL FR RL RR FC LFE，已按设备映射重排声道"),
+        "{s}"
+    );
+
+    // 设备不报告映射：多于 2 声道无法确认布局，打开失败、不做任何回退。
+    let mut b = backend(cfg_51(Vec::new()));
+    let (r, outs) = run(&mut b, &name);
+    assert_eq!(
+        r.fault,
+        Some((0, qy_core::engine::EngineFault::Core(Fault::Configure)))
+    );
+    assert!(outs.is_empty());
+    assert!(
+        r.summary().contains("设备不报告声道映射"),
+        "{}",
+        r.summary()
+    );
+
+    // 读回与设置不符：该格式失败。
+    let mut c = cfg_51(vec![(ChmapType::Var, HDA_51.to_vec())]);
+    c.chmap_readback = Some(HDA_51.to_vec());
+    let mut b = backend(c);
+    let (r, outs) = run(&mut b, &name);
+    assert_eq!(
+        r.fault,
+        Some((0, qy_core::engine::EngineFault::Core(Fault::Configure)))
+    );
+    assert!(outs.is_empty());
+    assert!(
+        r.summary().contains("读回的声道映射与请求不符"),
+        "{}",
+        r.summary()
+    );
+
+    // 反相声道的映射不被选用；侧环绕映射与源（后环绕）位置集合不同：都拒绝。
+    let mut inv = WAVE_51;
+    inv[5] |= CHMAP_PHASE_INVERSE;
+    let side = vec![3, 4, 7, 8, 9, 10];
+    let mut b = backend(cfg_51(vec![
+        (ChmapType::Fixed, inv.to_vec()),
+        (ChmapType::Fixed, side),
+    ]));
+    let (r, _) = run(&mut b, &name);
+    assert_eq!(
+        r.fault,
+        Some((0, qy_core::engine::EngineFault::Core(Fault::Configure)))
+    );
+    assert!(
+        r.summary().contains("没有与源扬声器位置相同的声道映射"),
+        "{}",
+        r.summary()
+    );
+
+    // 双声道 + 可变映射：设置为 FL FR 并读回。
+    let mut b = backend(FakeAlsaConfig {
+        chmaps: vec![(ChmapType::Var, vec![4, 3])],
+        ..FakeAlsaConfig::default()
+    });
+    let (r, outs) = run(&mut b, &["pcm16_stereo_44k.wav"]);
+    assert!(r.finished && r.software_path_intact(), "{r:?}");
+    assert!(outs[0].rendered == data_chunk(&fixture("pcm16_stereo_44k.wav")));
+    assert!(r.summary().contains("声道映射：可变，已设置并读回 FL FR"));
 }

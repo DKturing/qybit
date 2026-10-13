@@ -15,8 +15,11 @@ use std::time::Duration;
 
 use qy_core::{DeviceFormat, SourceFormat};
 use qy_pcm_format::alsa::{
-    AlsaFormat, ConfirmError, OpenError, candidates, check_device_name, confirm,
+    AlsaFormat, ChmapPlan, ChmapType, ConfirmError, OpenError, candidates, check_device_name,
+    chmap_position, confirm, confirm_chmap, plan_chmap,
 };
+
+use crate::chmap::chmap_text;
 use qy_pcm_format::ring::FrameConsumer;
 use qy_player::render::write::{WriteConfig, render};
 use qy_player::render::{RenderControl, RenderReport, ThreadPriority};
@@ -65,6 +68,42 @@ pub struct AlsaPending<X: Pcm, P> {
 }
 
 pub struct AlsaRunning(JoinHandle<(FrameConsumer, RenderReport)>);
+
+/// 按计划设置并读回声道映射（F1，在 hw_params 之后）。返回报告说明，失败时返回原因。
+fn apply_chmap<X: Pcm>(
+    pcm: &mut X,
+    source: &SourceFormat,
+    plan: &ChmapPlan,
+) -> Result<String, String> {
+    let read_back = |pcm: &mut X| -> Result<Vec<u32>, String> {
+        match pcm.get_chmap() {
+            Ok(Some(m)) => Ok(m),
+            Ok(None) => Err("设备不支持读回声道映射，无法确认多声道布局".into()),
+            Err(e) => Err(format!("读回声道映射失败：{e}")),
+        }
+    };
+    match plan {
+        ChmapPlan::Unqueried(l) => Ok(format!("声道映射：设备不报告，按默认布局 {l}")),
+        ChmapPlan::Set(l) => {
+            let want: Vec<u32> = l.positions().iter().map(|&s| chmap_position(s)).collect();
+            pcm.set_chmap(&want)
+                .map_err(|e| format!("设置声道映射失败：{e}"))?;
+            let got = read_back(pcm)?;
+            confirm_chmap(plan, &got).map_err(|e| format!("{e}（读回 {}）", chmap_text(&got)))?;
+            Ok(format!("声道映射：可变，已设置并读回 {}", chmap_text(&got)))
+        }
+        ChmapPlan::Fixed(l) => {
+            let got = read_back(pcm)?;
+            confirm_chmap(plan, &got).map_err(|e| format!("{e}（读回 {}）", chmap_text(&got)))?;
+            let note = if *l == source.layout() {
+                ""
+            } else {
+                "，已按设备映射重排声道（纯置换，样本值不变）"
+            };
+            Ok(format!("声道映射：固定，读回 {}{note}", chmap_text(&got)))
+        }
+    }
+}
 
 fn failure(source: &SourceFormat, attempts: Vec<Attempt>, message: String) -> OpenFailure {
     OpenFailure {
@@ -129,10 +168,38 @@ impl<O: Opener, P: ThreadPriority + Clone + Send + 'static> Backend for AlsaBack
             Some(_) => Vec::new(),
             None => candidates(source, &supported).as_slice().collect(),
         };
+        // F1：先按设备报告的声道映射确定设备布局（可变则设置为源布局，固定则按设备顺序）。
+        let maps = pcm.query_chmaps();
+        let map_refs: Vec<(ChmapType, &[u32])> =
+            maps.iter().map(|(t, m)| (*t, m.as_slice())).collect();
+        let chmap_plan = match plan_chmap(&source.layout(), &map_refs) {
+            Ok(p) => p,
+            Err(e) => {
+                let listed: Vec<String> = maps
+                    .iter()
+                    .map(|(t, m)| format!("{t:?} {}", chmap_text(m)))
+                    .collect();
+                return Err(failure(
+                    source,
+                    Vec::new(),
+                    format!(
+                        "设备 {} 不能确认源布局 {}：{e}（设备映射：{}）",
+                        self.device,
+                        source.layout(),
+                        if listed.is_empty() {
+                            "无".into()
+                        } else {
+                            listed.join("；")
+                        }
+                    ),
+                ));
+            }
+        };
         let period = (source.sample_rate() * self.period_ms / 1000).max(1);
         let mut attempts = Vec::new();
         for alsa_format in list {
-            let Ok(format) = alsa_format.device_format(source.sample_rate(), source.channels())
+            let Ok(format) =
+                alsa_format.device_format_layout(source.sample_rate(), chmap_plan.layout())
             else {
                 continue;
             };
@@ -143,6 +210,7 @@ impl<O: Opener, P: ThreadPriority + Clone + Send + 'static> Backend for AlsaBack
                 request: None,
                 applied: None,
                 mismatch: None,
+                chmap: None,
             };
             if !supported.contains(&alsa_format) {
                 attempt.mismatch = Some("设备不接受该格式（test_format）".into());
@@ -153,7 +221,7 @@ impl<O: Opener, P: ThreadPriority + Clone + Send + 'static> Backend for AlsaBack
                 format: alsa_format,
                 sample_rate: source.sample_rate(),
                 channels: source.channels(),
-                layout: source.layout(),
+                layout: chmap_plan.layout(),
                 period_frames: period,
                 periods: self.periods,
             };
@@ -162,8 +230,15 @@ impl<O: Opener, P: ThreadPriority + Clone + Send + 'static> Backend for AlsaBack
                 Ok(c) => {
                     attempt.request = Some(c.request);
                     attempt.applied = Some(c.applied);
-                    match confirm(source, &c.request, &c.applied) {
-                        Ok(confirmed) if confirmed == format => {
+                    let confirmed = confirm(source, &c.request, &c.applied);
+                    let chmap = match &confirmed {
+                        Ok(f) if *f == format => Some(apply_chmap(&mut pcm, source, &chmap_plan)),
+                        _ => None,
+                    };
+                    match (confirmed, chmap) {
+                        (Ok(_), Some(Err(why))) => attempt.mismatch = Some(why),
+                        (Ok(confirmed), Some(Ok(note))) if confirmed == format => {
+                            attempt.chmap = Some(note);
                             attempts.push(attempt);
                             let chosen = attempts.len() - 1;
                             return Ok(AlsaPending {
@@ -178,11 +253,13 @@ impl<O: Opener, P: ThreadPriority + Clone + Send + 'static> Backend for AlsaBack
                                 priority: self.priority.clone(),
                             });
                         }
-                        Ok(other) => {
+                        (Ok(other), _) => {
                             attempt.mismatch = Some(format!("核对得到的格式 {other:?} 与请求不同"));
                         }
-                        Err(ConfirmError::Mismatch(m)) => attempt.mismatch = Some(m.to_string()),
-                        Err(ConfirmError::Request(e)) => {
+                        (Err(ConfirmError::Mismatch(m)), _) => {
+                            attempt.mismatch = Some(m.to_string());
+                        }
+                        (Err(ConfirmError::Request(e)), _) => {
                             attempt.mismatch = Some(format!("请求不能无损承载源：{e:?}"));
                         }
                     }

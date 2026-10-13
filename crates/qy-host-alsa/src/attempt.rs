@@ -20,6 +20,8 @@ pub struct Attempt {
     pub applied: Option<HwApplied>,
     /// 读回与请求不一致项的说明。
     pub mismatch: Option<String>,
+    /// 声道映射的设置与读回结果（F1）。
+    pub chmap: Option<String>,
 }
 
 /// ALSA 协商记录。
@@ -51,6 +53,9 @@ impl AttemptRecord for Attempt {
                 if let Some(b) = a.significant_bits {
                     s.push_str(&format!("，有效位 {b}"));
                 }
+                if let Some(c) = &self.chmap {
+                    s.push_str(&format!("；{c}"));
+                }
             }
             (None, _, Some(m)) => s.push_str(&format!("读回不一致：{m}")),
             (None, None, None) => s.push_str("未设置"),
@@ -65,7 +70,11 @@ impl AttemptRecord for Attempt {
             .filter(|_| a.rate_den == 1)
             .and_then(|f| {
                 let ch = u16::try_from(a.channels).ok()?;
-                f.device_format(a.rate_num, ch).ok()
+                // 布局取已读回核对的设备映射（即请求布局），声道数须与读回一致。
+                let layout = self.request.map(|r| r.layout)?;
+                (layout.channels() == ch)
+                    .then(|| f.device_format_layout(a.rate_num, layout).ok())
+                    .flatten()
             });
         Some(AppliedParams {
             format,

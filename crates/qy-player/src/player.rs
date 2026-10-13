@@ -692,4 +692,44 @@ mod tests {
             assert!(outs.is_empty());
         }
     }
+
+    /// F1：多声道 FLAC（5.1 后环绕、5.1 侧环绕、3.0）经播放器与假设备：设备格式携带源布局
+    /// （掩码顺序），布局不同则重开；有效字节等于 libFLAC 参考按独立公式放置。
+    #[test]
+    fn multichannel_streams_keep_layout() {
+        let names = [
+            "cli_24_6ch_96k_51.flac",
+            "cli_16_6ch_48k_51_side.flac",
+            "crafted_3ch_no_tag.flac",
+        ];
+        let expect = [
+            (
+                place(&flac_reference("cli_24_6ch_96k_51"), 24, 24),
+                0x3Fu32,
+                96_000,
+            ),
+            (
+                place(&flac_reference("cli_16_6ch_48k_51_side"), 16, 16),
+                0x60F,
+                48_000,
+            ),
+            (
+                place(&flac_reference("crafted_3ch_no_tag"), 16, 16),
+                0x7,
+                44_100,
+            ),
+        ];
+        for device in DEVICES {
+            let mut b = backend(&ALL, device);
+            let (r, outs) = run(&mut b, &names);
+            assert!(r.finished && r.software_path_intact(), "{device:?} {r:?}");
+            assert_eq!(outs.len(), 3);
+            for (o, (bytes, mask, rate)) in outs.iter().zip(&expect) {
+                assert_eq!(o.format.layout().mask(), *mask);
+                assert!(o.format.layout().is_wave_order());
+                assert_eq!(o.format.sample_rate(), *rate);
+                check_output(o, bytes);
+            }
+        }
+    }
 }

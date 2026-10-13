@@ -629,6 +629,13 @@ fn chmap_positions_map_to_speakers() {
             })
         );
     }
+    assert_eq!(
+        layout_from_chmap(&[FL, FR | CHMAP_DRIVER_SPEC]),
+        Err(ChmapError::UnknownPosition {
+            channel: 1,
+            position: FR | CHMAP_DRIVER_SPEC
+        })
+    );
     assert_eq!(layout_from_chmap(&[FL, FL]), Err(ChmapError::Invalid));
     assert_eq!(layout_from_chmap(&[]), Err(ChmapError::Invalid));
     // 往返：每个 WAVE 位置的 ALSA 值都能映回同一位置。

@@ -11,6 +11,19 @@ pub fn write_test_wav(
     bits: u8,
     frames: u64,
 ) -> std::io::Result<u64> {
+    write_test_wav_layout(path, rate, channels, bits, frames, None)
+}
+
+/// 同 [`write_test_wav`]；给出声道掩码时写 WAVE_FORMAT_EXTENSIBLE（容器 = 有效位，
+/// `dwChannelMask` = `mask`），多声道（F1）用。
+pub fn write_test_wav_layout(
+    path: &Path,
+    rate: u32,
+    channels: u16,
+    bits: u8,
+    frames: u64,
+    mask: Option<u32>,
+) -> std::io::Result<u64> {
     let bytes = usize::from(bits / 8);
     let amp: i64 = (1i64 << (bits - 1)) / 32;
     let mut data = Vec::with_capacity(frames as usize * usize::from(channels) * bytes);
@@ -21,17 +34,30 @@ pub fn write_test_wav(
         }
     }
     let align = channels * u16::from(bits / 8);
-    let mut w = Vec::with_capacity(data.len() + 46);
+    let mut fmt = Vec::with_capacity(40);
+    fmt.extend_from_slice(&(if mask.is_some() { 0xFFFEu16 } else { 1 }).to_le_bytes());
+    fmt.extend_from_slice(&channels.to_le_bytes());
+    fmt.extend_from_slice(&rate.to_le_bytes());
+    fmt.extend_from_slice(&(rate * u32::from(align)).to_le_bytes());
+    fmt.extend_from_slice(&align.to_le_bytes());
+    fmt.extend_from_slice(&u16::from(bits).to_le_bytes());
+    if let Some(m) = mask {
+        fmt.extend_from_slice(&22u16.to_le_bytes());
+        fmt.extend_from_slice(&u16::from(bits).to_le_bytes());
+        fmt.extend_from_slice(&m.to_le_bytes());
+        // KSDATAFORMAT_SUBTYPE_PCM
+        fmt.extend_from_slice(&[
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38,
+            0x9B, 0x71,
+        ]);
+    }
+    let pad = data.len() as u32 & 1;
+    let mut w = Vec::with_capacity(data.len() + 68);
     w.extend_from_slice(b"RIFF");
-    w.extend_from_slice(&(36 + data.len() as u32 + (data.len() as u32 & 1)).to_le_bytes());
+    w.extend_from_slice(&(4 + 8 + fmt.len() as u32 + 8 + data.len() as u32 + pad).to_le_bytes());
     w.extend_from_slice(b"WAVEfmt ");
-    w.extend_from_slice(&16u32.to_le_bytes());
-    w.extend_from_slice(&1u16.to_le_bytes());
-    w.extend_from_slice(&channels.to_le_bytes());
-    w.extend_from_slice(&rate.to_le_bytes());
-    w.extend_from_slice(&(rate * u32::from(align)).to_le_bytes());
-    w.extend_from_slice(&align.to_le_bytes());
-    w.extend_from_slice(&u16::from(bits).to_le_bytes());
+    w.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+    w.extend_from_slice(&fmt);
     w.extend_from_slice(b"data");
     w.extend_from_slice(&(data.len() as u32).to_le_bytes());
     w.extend_from_slice(&data);

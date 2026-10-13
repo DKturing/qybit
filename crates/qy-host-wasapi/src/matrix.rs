@@ -40,17 +40,24 @@ pub struct MatrixItem {
     pub container_bits: u8,
     pub valid_bits: u8,
     pub descriptor: Descriptor,
+    /// 声道掩码（F1）；0 表示单/双声道默认布局。
+    pub mask: u32,
 }
 
 impl MatrixItem {
     pub fn format(&self) -> Option<DeviceFormat> {
-        DeviceFormat::wasapi(
-            self.rate,
-            self.channels,
-            self.container_bits,
-            self.valid_bits,
-        )
-        .ok()
+        if self.mask == 0 {
+            return DeviceFormat::wasapi(
+                self.rate,
+                self.channels,
+                self.container_bits,
+                self.valid_bits,
+            )
+            .ok();
+        }
+        let layout = qy_pcm_format::ChannelLayout::from_mask(self.mask)
+            .filter(|l| l.channels() == self.channels)?;
+        DeviceFormat::wasapi_layout(self.rate, layout, self.container_bits, self.valid_bits).ok()
     }
 
     pub fn frames(&self) -> u64 {
@@ -70,6 +77,7 @@ pub fn matrix_items() -> Vec<MatrixItem> {
                     container_bits: c,
                     valid_bits: b,
                     descriptor: Descriptor::Extensible,
+                    mask: 0,
                 });
             }
             v.push(MatrixItem {
@@ -78,11 +86,28 @@ pub fn matrix_items() -> Vec<MatrixItem> {
                 container_bits: 16,
                 valid_bits: 16,
                 descriptor: Descriptor::WaveFormatEx,
+                mask: 0,
+            });
+        }
+    }
+    // F1：多声道（48 kHz，EXTENSIBLE）：3.0、4.0、5.1、5.1 侧环绕、7.1。
+    for mask in MULTICHANNEL_MASKS {
+        for (c, b) in [(16u8, 16u8), (32, 24)] {
+            v.push(MatrixItem {
+                rate: 48_000,
+                channels: mask.count_ones() as u16,
+                container_bits: c,
+                valid_bits: b,
+                descriptor: Descriptor::Extensible,
+                mask,
             });
         }
     }
     v
 }
+
+/// 矩阵中的多声道布局（WAVE 声道掩码）。
+pub const MULTICHANNEL_MASKS: [u32; 5] = [0x7, 0x33, 0x3F, 0x60F, 0x63F];
 
 /// 请求的格式描述字段（由纯描述构造，与 SDK 映射逐字段相同）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,7 +248,7 @@ pub struct MatrixReport {
     pub sequential: Option<Sequential>,
 }
 
-pub use qy_player::signal::write_test_wav;
+pub use qy_player::signal::{write_test_wav, write_test_wav_layout};
 
 fn first_attempt(n: &Negotiation) -> Option<&Attempt> {
     n.chosen
@@ -300,12 +325,13 @@ pub fn run_matrix<B: Backend<Attempt = Attempt>>(
             "qybit-matrix-{i:02}-{}-{}ch-n{}.wav",
             item.rate, item.channels, item.valid_bits
         ));
-        let frames = write_test_wav(
+        let frames = write_test_wav_layout(
             &path,
             item.rate,
             item.channels,
             item.valid_bits,
             item.frames(),
+            (item.mask != 0).then_some(item.mask),
         )?;
         let mut backend = backend_for(item);
         let report = play(&mut backend, res, std::slice::from_ref(&path));
@@ -674,9 +700,19 @@ mod tests {
     }
 
     #[test]
-    fn matrix_has_60_items_in_fixed_order() {
+    fn matrix_has_70_items_in_fixed_order() {
         let items = matrix_items();
-        assert_eq!(items.len(), 60);
+        // M0 T6 的 60 项 + F1 的 10 项多声道（5 种布局 × 16/16、32/24）。
+        assert_eq!(items.len(), 70);
+        for it in items.iter().filter(|i| i.mask != 0) {
+            let Some(r) = Requested::of(it) else {
+                panic!("{it:?}");
+            };
+            assert_eq!(r.format_tag, 0xFFFE);
+            assert_eq!(r.channel_mask, Some(it.mask), "{it:?}");
+            assert_eq!(r.channels, it.mask.count_ones() as u16);
+            assert_eq!(r.block_align, r.channels * u16::from(it.container_bits / 8));
+        }
         assert_eq!(
             items
                 .iter()
@@ -707,7 +743,8 @@ mod tests {
                 channels: 1,
                 container_bits: 16,
                 valid_bits: 16,
-                descriptor: Descriptor::Extensible
+                descriptor: Descriptor::Extensible,
+                mask: 0,
             }
         );
     }
@@ -720,6 +757,7 @@ mod tests {
             container_bits: 32,
             valid_bits: 24,
             descriptor: Descriptor::Extensible,
+            mask: 0,
         });
         assert_eq!(
             r,
@@ -742,6 +780,7 @@ mod tests {
             container_bits: 16,
             valid_bits: 16,
             descriptor: Descriptor::WaveFormatEx,
+            mask: 0,
         });
         assert_eq!(
             r,
@@ -778,7 +817,15 @@ mod tests {
             Ok(e) => e,
             Err(e) => panic!("{e}"),
         };
-        assert_eq!(entries.len(), 60);
+        assert_eq!(entries.len(), 70);
+        // F1：多声道项经假设备完整播放。
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.item.mask != 0 && e.played_ok())
+                .count(),
+            10
+        );
         for e in &entries {
             let ok = e.item.rate <= 96_000
                 && supported.contains(&(e.item.container_bits, e.item.valid_bits));
@@ -817,6 +864,7 @@ mod tests {
             container_bits: 16,
             valid_bits: 16,
             descriptor: Descriptor::Extensible,
+            mask: 0,
         };
         let report = MatrixReport {
             device: DeviceMeta {

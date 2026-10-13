@@ -34,7 +34,8 @@ impl Negotiator for WasapiNegotiator {
                 .collect(),
         };
         for ((c, v), descriptor) in list {
-            let Ok(format) = DeviceFormat::wasapi(source.sample_rate(), source.channels(), c, v)
+            let Ok(format) =
+                DeviceFormat::wasapi_layout(source.sample_rate(), source.layout(), c, v)
             else {
                 continue;
             };

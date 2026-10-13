@@ -294,7 +294,8 @@ fn negotiate(
         Err(e) => return Err(fail(negotiation, format!("找不到设备 {id}: {e}"))),
     };
     for &((c, v), descriptor) in list {
-        let Ok(format) = DeviceFormat::wasapi(source.sample_rate(), source.channels(), c, v) else {
+        let Ok(format) = DeviceFormat::wasapi_layout(source.sample_rate(), source.layout(), c, v)
+        else {
             continue;
         };
         let mut attempt = Attempt {

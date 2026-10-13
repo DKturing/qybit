@@ -14,6 +14,7 @@
 pub mod api;
 pub mod attempt;
 pub mod backend;
+pub mod chmap;
 pub mod dump;
 pub mod loopback;
 pub mod matrix;

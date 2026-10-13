@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use alsa::pcm::{Access as A, Format, HwParams, PCM};
 use alsa::{Direction, Output, ValueOr};
-use qy_pcm_format::alsa::{Access, AlsaFormat, HwApplied, HwRequest};
+use qy_pcm_format::alsa::{Access, AlsaFormat, ChmapType, HwApplied, HwRequest};
 
 use crate::dump::parse_hw_setup;
 use crate::pcm::{Configured, HwPlan, Opener, Pcm, PcmError, errno};
@@ -25,6 +25,15 @@ fn e(call: &'static str, err: alsa::Error) -> PcmError {
         call,
         errno: err.errno().saturating_abs(),
     }
+}
+
+/// 映射的原始位置值：经 alsa-lib 自己的文本形式（`snd_pcm_chmap_print`）严格解析
+/// （见 [`crate::chmap`]），不经 alsa crate 会 `unwrap` 的枚举转换；打印或解析失败为 `None`。
+fn chmap_positions(m: &alsa::pcm::Chmap) -> Option<Vec<u32>> {
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    write!(text, "{m}").ok()?;
+    crate::chmap::parse_chmap_text(&text)
 }
 
 fn to_alsa(f: AlsaFormat) -> Format {
@@ -243,6 +252,47 @@ impl Pcm for RealPcm {
         let played = elapsed.saturating_mul(u128::from(self.rate)) / 1_000_000_000;
         let missing = played.saturating_sub(u128::try_from(delay.max(0)).unwrap_or(0));
         u32::try_from(missing).unwrap_or(u32::MAX)
+    }
+
+    fn query_chmaps(&mut self) -> Vec<(ChmapType, Vec<u32>)> {
+        self.pcm
+            .query_chmaps()
+            .filter_map(|(t, m)| {
+                let t = match t {
+                    alsa::pcm::ChmapType::None => ChmapType::None,
+                    alsa::pcm::ChmapType::Fixed => ChmapType::Fixed,
+                    alsa::pcm::ChmapType::Var => ChmapType::Var,
+                    alsa::pcm::ChmapType::Paired => ChmapType::Paired,
+                };
+                Some((t, chmap_positions(&m)?))
+            })
+            .collect()
+    }
+
+    fn set_chmap(&mut self, positions: &[u32]) -> Result<(), PcmError> {
+        let all = alsa::pcm::ChmapPosition::all();
+        let list: Option<Vec<alsa::pcm::ChmapPosition>> = positions
+            .iter()
+            .map(|&p| all.get(p as usize).copied())
+            .collect();
+        let Some(list) = list else {
+            return Err(PcmError {
+                call: "snd_pcm_set_chmap",
+                errno: errno::EINVAL,
+            });
+        };
+        let map = alsa::pcm::Chmap::from(&list[..]);
+        self.pcm
+            .set_chmap(&map)
+            .map_err(|x| e("snd_pcm_set_chmap", x))
+    }
+
+    fn get_chmap(&mut self) -> Result<Option<Vec<u32>>, PcmError> {
+        match self.pcm.get_chmap() {
+            Ok(m) => Ok(chmap_positions(&m)),
+            // alsa crate 对 NULL 返回 unsupported：设备不支持读回。
+            Err(_) => Ok(None),
+        }
     }
 }
 

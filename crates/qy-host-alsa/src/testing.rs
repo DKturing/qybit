@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use qy_pcm_format::alsa::{Access, AlsaFormat, HwApplied, HwRequest};
+use qy_pcm_format::alsa::{Access, AlsaFormat, ChmapType, HwApplied, HwRequest};
 
 use crate::pcm::{Configured, HwPlan, Opener, Pcm, PcmError, errno};
 
@@ -70,6 +70,12 @@ pub struct FakeAlsaConfig {
     pub fail_write: Option<(u64, i32)>,
     /// 每个 PCM 预留的播放记录字节数。
     pub reserve_bytes: usize,
+    /// `snd_pcm_query_chmaps` 返回的映射（F1）；默认为空（设备不报告映射）。
+    pub chmaps: Vec<(ChmapType, Vec<u32>)>,
+    /// 读回映射时返回该值，而不是设备当前映射（模拟读回不符）。
+    pub chmap_readback: Option<Vec<u32>>,
+    /// `snd_pcm_set_chmap` 失败的 errno。
+    pub set_chmap_errno: Option<i32>,
 }
 
 impl Default for FakeAlsaConfig {
@@ -90,6 +96,9 @@ impl Default for FakeAlsaConfig {
             xrun_missing: 37,
             fail_write: None,
             reserve_bytes: 8 << 20,
+            chmaps: Vec::new(),
+            chmap_readback: None,
+            set_chmap_errno: None,
         }
     }
 }
@@ -153,6 +162,7 @@ impl Opener for FakeOpener {
             writes: 0,
             running_writes: 0,
             rng: self.config.seed,
+            chmap: None,
         })
     }
 
@@ -176,6 +186,8 @@ pub struct FakePcm {
     writes: u64,
     running_writes: u64,
     rng: u64,
+    /// 当前声道映射（configure 后为该声道数的第一个映射；set_chmap 后为设置值）。
+    chmap: Option<Vec<u32>>,
 }
 
 fn err(call: &'static str, errno: i32) -> PcmError {
@@ -254,6 +266,12 @@ impl Pcm for FakePcm {
             resample: false,
             significant_bits: self.cfg.significant_bits,
         };
+        self.chmap = self
+            .cfg
+            .chmaps
+            .iter()
+            .find(|(_, m)| m.len() == usize::from(plan.channels))
+            .map(|(_, m)| m.clone());
         self.block_align =
             usize::from(plan.format.container_bits() / 8) * usize::from(plan.channels);
         self.buffer_frames = buffer;
@@ -379,6 +397,37 @@ impl Pcm for FakePcm {
 
     fn xrun_missing_frames(&mut self) -> u32 {
         self.cfg.xrun_missing
+    }
+
+    fn query_chmaps(&mut self) -> Vec<(ChmapType, Vec<u32>)> {
+        self.cfg.chmaps.clone()
+    }
+
+    fn set_chmap(&mut self, positions: &[u32]) -> Result<(), PcmError> {
+        if let Some(e) = self.cfg.set_chmap_errno {
+            return Err(err("snd_pcm_set_chmap", e));
+        }
+        // 只有该声道数的可变映射可以设置，且位置集合必须相同。
+        let mut want = positions.to_vec();
+        want.sort_unstable();
+        let ok = self.cfg.chmaps.iter().any(|(t, m)| {
+            let mut s = m.clone();
+            s.sort_unstable();
+            *t == ChmapType::Var && s == want
+        });
+        if !ok {
+            return Err(err("snd_pcm_set_chmap", errno::EINVAL));
+        }
+        self.chmap = Some(positions.to_vec());
+        Ok(())
+    }
+
+    fn get_chmap(&mut self) -> Result<Option<Vec<u32>>, PcmError> {
+        Ok(self
+            .cfg
+            .chmap_readback
+            .clone()
+            .or_else(|| self.chmap.clone()))
     }
 }
 
