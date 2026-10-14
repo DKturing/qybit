@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-exclude = ["fuzz", "crates/qy-mcu-demo", "crates/qy-board-stm32f411"]
+exclude = ["fuzz", "crates/qy-mcu-demo", "crates/qy-board"]
 members = [
     "crates/qy-core",
     "crates/qy-codec-wav",

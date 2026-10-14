@@ -27,7 +27,7 @@ M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-
 | `qybit` | 命令行程序，二进制名 `qybit` |
 | `qy-bench` | 桌面吞吐基准（R1 §6，开发工具，不发布）：解码 + pack 实时倍数、高规格端到端余量与读取延迟影响 |
 | `qy-mcu-demo` | MCU 演示（thumbv7em，不在主工作区，单独构建）：运行 `qy-host-embedded`，闪存中的 FAT16 “SD 卡”镜像、软件模拟 DMA 与串口命令脚本，在 QEMU 中由 `qy-host-sim/tests/mcu_demo.rs` 核对 |
-| `qy-board-stm32f411` | 板级适配示例（thumbv7em，不在主工作区）：STM32F411 的 SDIO、I²S2 + DMA、USART2，只做外设初始化与接口实现；只验证能编译，未在实物上运行 |
+| `qy-board` | 板级适配层（MCU 目标，不在主工作区）：每块板一个模块，按 Cargo 特性选择，只做外设初始化与 `qy-host-embedded` 接口实现；现有 `stm32f411`（SDIO、I²S2 + DMA、USART2）。只验证能编译，未在实物上运行 |
 
 ## 依赖
 
@@ -42,7 +42,7 @@ M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-
 | `cortex-m-rt` / `cortex-m` / `cortex-m-semihosting` | =0.7.5 / =0.7.7 / =0.5.0 | Cortex-M 运行时、MSP/WFI、临界区与半主机输出，仅 `qy-mcu-demo` 与板级示例（板级示例不用半主机） |
 | `embedded-sdmmc` | =0.10.0 | 块设备（SD 卡、eMMC、U 盘、闪存镜像等）上的 FAT16、FAT32 读取（no_std，无 alloc），`qy-host-embedded` |
 | `embedded-storage` | =0.3.2 | 按偏移读取的存储设备标准接口（no_std，无依赖），`qy-host-embedded` 的无文件系统曲目存储 |
-| `stm32f4xx-hal` / `stm32f4` | =0.23.0 / =0.16.0 | STM32F4 HAL 与 PAC（打开 `rt`），仅板级适配示例 `qy-board-stm32f411` |
+| `stm32f4xx-hal` / `stm32f4` | =0.23.0 / =0.16.0 | STM32F4 HAL 与 PAC（打开 `rt`），仅 `qy-board` 的 `stm32f411` 特性 |
 
 ## 本地检查
 
@@ -57,7 +57,7 @@ cargo test -p qy-pcm-format --features ring,static-queue
 cargo build --target thumbv7em-none-eabihf -p qy-pcm-format --features static-queue
 cargo build --target thumbv7em-none-eabihf -p qy-codec-auto --no-default-features --features wav
 cargo build --target thumbv7em-none-eabihf -p qy-host-embedded
-(cd crates/qy-board-stm32f411 && cargo build --release --target thumbv7em-none-eabihf)   # 板级示例，只编译
+(cd crates/qy-board && cargo build --release --target thumbv7em-none-eabihf --features stm32f411)   # 板级适配，按板选特性，只编译
 ```
 
 MCU 演示（需要 `qemu-system-arm` ≥ 8，`mps2-an386`）：

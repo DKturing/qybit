@@ -105,13 +105,15 @@ jobs:
           QY_MCU_DEMO_ELF: crates/qy-mcu-demo/target/qy-mcu-demo-full.elf
           QY_MCU_DEMO_LITE_ELF: crates/qy-mcu-demo/target/qy-mcu-demo-lite.elf
         run: cargo test --locked -p qy-host-sim --test mcu_demo -- --nocapture
-      # M3 T2 板级适配示例（STM32F411）：只验证能编译，未在实物上运行。
-      - name: 板级适配示例（STM32F411，只编译）
-        working-directory: crates/qy-board-stm32f411
+      # M3 T2 板级适配层 qy-board：每块板一个特性，逐板只验证能编译，未在实物上运行。
+      - name: 板级适配层（逐板只编译）
+        working-directory: crates/qy-board
         run: |
           cargo fmt -- --check
-          cargo clippy --locked --release --target thumbv7em-none-eabihf -- -D warnings
-          cargo build --locked --release --target thumbv7em-none-eabihf
+          for board in stm32f411; do
+            cargo clippy --locked --release --target thumbv7em-none-eabihf --features "$board" -- -D warnings
+            cargo build --locked --release --target thumbv7em-none-eabihf --features "$board"
+          done
       - name: 上传 MCU 演示报告
         uses: actions/upload-artifact@v4
         with:

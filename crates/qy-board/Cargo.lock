@@ -335,7 +335,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "qy-board-stm32f411"
+name = "qy-board"
 version = "0.0.0"
 dependencies = [
  "cortex-m",

@@ -1,0 +1,57 @@
+[package]
+name = "qy-board"
+description = "QyBit 板级适配层（M3 T2）：每块板一个模块，按 Cargo 特性选择；只做外设初始化与接口实现"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/DKturing/qybit"
+publish = false
+
+# 只为 MCU 目标构建，不属于主工作区。各板只验证能编译，未在实物上运行。
+[workspace]
+
+[[bin]]
+name = "qy-board"
+path = "src/main.rs"
+test = false
+bench = false
+
+# 每块板一个特性，带上该板的 HAL 与运行时依赖；一次只选一块。
+[features]
+stm32f411 = ["dep:stm32f4xx-hal", "dep:stm32f4", "dep:cortex-m", "dep:cortex-m-rt"]
+
+[dependencies]
+qy-core = { path = "../qy-core" }
+qy-codec-auto = { path = "../qy-codec-auto", default-features = false, features = ["wav"] }
+qy-pcm-format = { path = "../qy-pcm-format", features = ["static-queue"] }
+qy-host-embedded = { path = "../qy-host-embedded" }
+# 与 qy-host-embedded 同一版本：SD 卡块设备接口。
+embedded-sdmmc = { version = "=0.10.0", default-features = false }
+# 一次性静态零缓冲（与 qy-codec-flac 的 static-cell 特性同一版本）。
+static_cell = { version = "=2.1.1", default-features = false }
+# 板 stm32f411：STM32F4 HAL（2025-09-22 发布）：时钟、GPIO、SDIO、I²S（stm32_i2s_v12x）、DMA、USART。
+stm32f4xx-hal = { version = "=0.23.0", features = ["stm32f411", "i2s", "sdio-host"], optional = true }
+# HAL 所用的 PAC（同一版本），只为打开 `rt` 特性（中断向量与 `#[interrupt]`）。
+stm32f4 = { version = "=0.16.0", features = ["rt"], optional = true }
+# Cortex-M 板：中断屏蔽临界区与 NVIC。
+cortex-m = { version = "=0.7.7", features = ["critical-section-single-core"], optional = true }
+# Cortex-M 板：运行时（向量表、复位、链接脚本）。
+cortex-m-rt = { version = "=0.7.5", optional = true }
+
+[profile.release]
+codegen-units = 1
+lto = true
+debug = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

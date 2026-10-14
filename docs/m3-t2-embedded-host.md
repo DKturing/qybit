@@ -13,7 +13,7 @@
 - `tools/qy-fat-image`：测试与构建用的 FAT16 镜像生成工具（std）；
 - `crates/qy-pcm-format`：新增槽位表示 `Endian::HalfWordSwapped`；
 - `crates/qy-mcu-demo`：QEMU 演示改为运行 `qy-host-embedded`；
-- `crates/qy-board-stm32f411`：板级适配示例，只验证能编译；
+- `crates/qy-board`：板级适配层，每块板一个模块与同名特性（现有 `stm32f411`），只验证能编译；
 - 测试：
   - `qy-host-embedded/tests/embedded_sim.rs`（宿主侧仿真，9 个场景）；
   - `budget`、`command` 单元测试；
@@ -196,9 +196,11 @@ STM32F4 的 SPI/I²S 数据寄存器是 16 位。经 16 位 DMA 发送 32 位槽
 
 `.bss` 不变，大缓冲仍全部静态分配。栈增加，是因为宿主（含 `embedded-sdmmc` 卷管理器的 512 字节块缓存）放在 `main` 的栈帧里，远小于栈区。`.data` 的 600 字节是共享状态的静态初值。
 
-## 7. 板级适配示例（STM32F411，只编译）
+## 7. 板级适配（`qy-board`，只编译）
 
-`crates/qy-board-stm32f411`：只说明一块板的适配有多薄，不代表推荐型号；**未在实物上运行**。
+`crates/qy-board`：板级适配层，与板无关的部分全在 `qy-host-embedded` / `qy-core`。每块板一个模块（`src/<板>/`，含该板的 `memory.x`）和一个同名 Cargo 特性（带上该板的 HAL 依赖），一次只构建一块板：`cargo build --release --target thumbv7em-none-eabihf --features stm32f411`。不选特性时编译报错并提示。新增一块板只加模块、特性和 `memory.x`，不改通用代码。
+
+现有的板只有 `stm32f411`，用来说明一块板的适配有多薄，不代表推荐型号；**未在实物上运行**。以下为该板的实现。
 
 | 外设 | 实现 |
 | --- | --- |
