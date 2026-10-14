@@ -1,4 +1,4 @@
-//! 按文件头选择解码器的 fuzz 目标（含文件开头的 ID3v2 标签）。
+//! 按文件头选择解码器的 fuzz 目标（WAV、AIFF、FLAC，含文件开头的 ID3v2 标签）。
 //!
 //! 输入首字节为分块/取出种子，第二字节为标签参数（位 0：是否在文件前另加一个合规的 ID3v2 标签；
 //! 位 1：v2.3/v2.4；位 2：标签尾（仅 v2.4）；位 3–7：声明长度 × 37），其余为文件内容。检查：不 panic；
@@ -7,6 +7,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use qy_codec_aiff::AiffDetail;
 use qy_codec_auto::{AutoDecoder, Codec};
 use qy_codec_flac::{Capacity, FlacError};
 use qy_codec_wav::WavDetail;
@@ -22,6 +23,7 @@ struct Outcome {
     samples: Vec<i32>,
     flac: Option<FlacError>,
     wav: Option<WavDetail>,
+    aiff: Option<AiffDetail>,
     magic: Option<[u8; 4]>,
     repairs: Vec<Repair>,
     skipped: u64,
@@ -75,6 +77,7 @@ fn run(
         samples,
         flac: dec.flac_error(),
         wav: dec.wav_detail(),
+        aiff: dec.aiff_detail(),
         magic: dec.unrecognized().map(|u| u.magic),
         repairs: (0..dec.repair_count()).filter_map(|i| dec.repair(i)).collect(),
         skipped: dec.skipped_tag_bytes(),

@@ -121,6 +121,40 @@ impl Opener for FileOpener {
     }
 }
 
+/// 写一个 AIFF（AIFF 1.3）：COMM（18 字节，80 位扩展精度采样率）+ SSND；样本大端、左对齐补码。
+fn write_aiff(path: &Path, rate: u32, ch: u16, bits: u16, samples: &[i32]) {
+    let bytes = usize::from(bits.div_ceil(8));
+    let mut data = Vec::new();
+    for &s in samples {
+        let w = (s as u32) << (8 * bytes as u32 - u32::from(bits));
+        data.extend_from_slice(&w.to_be_bytes()[4 - bytes..]);
+    }
+    let lz = u64::from(rate).leading_zeros();
+    let mut comm = Vec::new();
+    comm.extend_from_slice(&ch.to_be_bytes());
+    comm.extend_from_slice(&((samples.len() / usize::from(ch)) as u32).to_be_bytes());
+    comm.extend_from_slice(&bits.to_be_bytes());
+    comm.extend_from_slice(&(16383 + 63 - lz as u16).to_be_bytes());
+    comm.extend_from_slice(&(u64::from(rate) << lz).to_be_bytes());
+    let mut body = b"AIFF".to_vec();
+    body.extend_from_slice(b"COMM");
+    body.extend_from_slice(&18u32.to_be_bytes());
+    body.extend_from_slice(&comm);
+    body.extend_from_slice(b"SSND");
+    body.extend_from_slice(&(8 + data.len() as u32).to_be_bytes());
+    body.extend_from_slice(&[0; 8]);
+    body.extend_from_slice(&data);
+    if data.len() % 2 == 1 {
+        body.push(0);
+    }
+    let mut file = b"FORM".to_vec();
+    file.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    file.extend_from_slice(&body);
+    if let Err(e) = std::fs::write(path, file) {
+        panic!("{e}");
+    }
+}
+
 fn tmpdir(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("qybit-loop-file-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -392,6 +426,31 @@ fn file_plugin_loopback_matrix() {
             "不同格式换曲后重新打开（44.1k/2ch/S16_LE → 96k/1ch/S24_3LE）".to_string(),
             ok,
             format!("{v1:?} / {v2:?}，流数 {}", r.streams.len()),
+        ));
+    }
+
+    // F2：AIFF 曲目接在 WAV 之后，同一流内连续；样本大端左对齐写入，期望按设备格式独立放置。
+    {
+        let case = qy_host_alsa::loopback::LoopCase {
+            rate: 48_000,
+            channels: 2,
+            format: AlsaFormat::S24_3Le,
+            source_bits: 24,
+        };
+        let t = make_tracks(&dir, "aiff", &case, 2000, 21);
+        let aiff = test_samples(24, 2, 1500, 22);
+        let aiff_path = dir.join("aiff-track.aiff");
+        write_aiff(&aiff_path, 48_000, 2, 24, &aiff);
+        let mut b = backend(&dir, None);
+        let r = play(&mut b, &mut res, &[t.sync_path, t.test_path, aiff_path]);
+        let captured = started_files(&b, &r).pop().unwrap_or_default();
+        let want = [t.test_bytes, device_bytes(&aiff, 24, AlsaFormat::S24_3Le)].concat();
+        let (_, v) = align_and_compare(&captured, &t.sync_bytes, &want);
+        let ok = r.software_path_intact() && r.streams.len() == 1 && v == Verdict::Match;
+        extra.push((
+            "AIFF 曲目接在 WAV 之后（48 kHz/2ch/24 位，F2）".to_string(),
+            ok,
+            format!("{v:?}，流数 {}", r.streams.len()),
         ));
     }
 
