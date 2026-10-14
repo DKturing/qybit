@@ -30,12 +30,16 @@
 格式描述默认用 `WAVEFORMATEXTENSIBLE`。
 
 **16/16 的 WAVEFORMATEX 候选**（2026-10-14 起，`attempt::attempts`）：
-- 行为：源为标准单声道 `[FC]` 或立体声 `[FL FR]` 时，16/16 的 EXTENSIBLE 被拒后，紧接着用同参数的 `WAVEFORMATEX` 再试一次，然后才是 24/24 等更大的候选。
+- 行为：源为标准立体声 `[FL FR]` 时，16/16 的 EXTENSIBLE 被拒后，紧接着用同参数的 `WAVEFORMATEX` 再试一次，然后才是 24/24 等更大的候选。
 - 不改变什么：两种描述只是格式结构不同，承载的字节完全相同（同一 pack 结果），不改变采样率、位数、声道或样本。
-- 原因：真机矩阵中出现过只接受其中一种描述的驱动，例如单声道只接受 `WAVEFORMATEX`。
-- 依据：Microsoft Learn `WAVEFORMATEX`：`nChannels` 为 1 是单声道、2 是立体声，没有声道掩码；`WAVE_FORMAT_PCM` 的位数为 8 或 16。`WAVEFORMATEXTENSIBLE` 能描述 `WAVEFORMATEX` 能描述的任何格式。
-- 限制：其他布局（如只占左声道位置的单声道、侧环绕双声道、多声道）不用 `WAVEFORMATEX`，以免丢失声道位置；`WaveFormatEx::from_device` 对这些布局返回 `UndefinedLayout`。
-- 记录：每次尝试的描述类型与 HRESULT 都写入协商记录与报告。矩阵逐项测试仍可用 `forced` 只测指定的描述类型。
+- 原因：有的驱动只接受其中一种描述。
+- 依据：Microsoft Learn `WAVEFORMATEX`：`nChannels` 为 2 是立体声，没有声道掩码；`WAVE_FORMAT_PCM` 的位数为 8 或 16。`WAVEFORMATEXTENSIBLE` 能描述 `WAVEFORMATEX` 能描述的任何格式。
+- 单声道不用 `WAVEFORMATEX`：
+  - 它没有声道掩码，声音送到哪个扬声器由驱动决定。
+  - 真机上出现过这种情况：驱动拒绝单声道 EXTENSIBLE `[FC]`，却接受同参数的 `WAVEFORMATEX` 单声道，消耗了全部数据、没有任何错误，但没有可闻输出。这种“成功”比明确报错更糟。
+  - 因此单声道只用 EXTENSIBLE `[FC]`，被拒即按“设备不支持”报告。
+- 其他布局（侧环绕双声道、多声道）同样不用 `WAVEFORMATEX`；格式层 `WaveFormatEx::from_device` 只接受标准单声道与立体声，矩阵仍可逐项测试单声道 `WAVEFORMATEX`。
+- 记录：每次尝试的描述类型与 HRESULT 都写入协商记录与报告。
 
 明确不做的事：不用 `AUTOCONVERTPCM`、`SRC_DEFAULT_QUALITY` 等转换标志，不回退到共享模式，不调用 `GetMixFormat`。
 

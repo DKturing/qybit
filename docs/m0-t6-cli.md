@@ -40,7 +40,7 @@
 
 本阶段默认输出仍用 EXTENSIBLE，没有加入运行时的描述类型回退。是否为 16/16 加入同参数的 WAVEFORMATEX 回退，要根据真机矩阵结果再决定。
 
-后续（2026-10-14）：真机矩阵中出现过 16 位单声道只接受 `WAVEFORMATEX` 的驱动，已为标准单声道与立体声加入该候选，见 [m0-t5-wasapi.md](m0-t5-wasapi.md)“16/16 的 WAVEFORMATEX 候选”。
+后续（2026-10-14）：真机矩阵中出现过 16 位单声道只接受 `WAVEFORMATEX` 的驱动，先为标准单声道与立体声加入了该候选；随后真机上单声道 `WAVEFORMATEX` 被接受却没有可闻输出，现只对标准立体声使用，见 [m0-t5-wasapi.md](m0-t5-wasapi.md)“16/16 的 WAVEFORMATEX 候选”。
 
 ## 自动测试（不需要 DAC）
 
