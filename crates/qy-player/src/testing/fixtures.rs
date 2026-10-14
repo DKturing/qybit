@@ -115,6 +115,16 @@ pub fn flac_reference(stem: &str) -> Vec<i32> {
         .collect()
 }
 
+/// ffmpeg 第二参考（`.ffmpeg.s32le`，左对齐到 32 位）还原为 N 位样本。
+pub fn ffmpeg_reference(wav_name: &str, n: u8) -> Vec<i32> {
+    let stem = wav_name.trim_end_matches(".wav");
+    std::fs::read(fixture_path(&format!("{stem}.ffmpeg.s32le")))
+        .unwrap_or_default()
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) >> (32 - u32::from(n)))
+        .collect()
+}
+
 /// 独立公式：N 位样本放入容器 C 的高位（WASAPI 左对齐），小端取 C/8 字节。
 pub fn place(samples: &[i32], n: u8, c: u8) -> Vec<u8> {
     samples

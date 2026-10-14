@@ -50,8 +50,24 @@ fn samples(seed: u64, frames: usize, ch: usize, v: u32) -> Vec<i64> {
         .collect()
 }
 
-/// 有效位左对齐写入 C 位容器（小端）；`dirty` 时低位填充随机非零位。
+/// 有效位左对齐写入 C 位容器（小端）；`dirty` 时低位填充随机非零位。8 位容器按 WAVE 规范为
+/// 无符号、偏移 128（W1）。
 fn encode(vals: &[i64], c: u32, v: u32, dirty_seed: Option<u64>) -> Vec<u8> {
+    if c == 8 {
+        let mut r = dirty_seed.map(Lcg);
+        return vals
+            .iter()
+            .map(|&s| {
+                let mut x = s << (8 - v);
+                if let Some(r) = r.as_mut()
+                    && v < 8
+                {
+                    x |= (1 + r.next() % ((1u64 << (8 - v)) - 1)) as i64;
+                }
+                (x + 128) as u8
+            })
+            .collect();
+    }
     let mut r = dirty_seed.map(Lcg);
     let mask = if c == 64 { u64::MAX } else { (1u64 << c) - 1 };
     let mut out = Vec::with_capacity(vals.len() * (c / 8) as usize);
@@ -189,6 +205,10 @@ struct Case {
     c: u32,
     mask: Option<u32>,
     ffmpeg: bool,
+    /// W1：期望的结构修正（文本形式，见 `expect_text`），由生成器按构造独立给出。
+    repairs: Vec<String>,
+    /// W1 R5：期望的 `DataShort` 明细（声明长度，缺少的字节数）。
+    short: Option<(u32, u64)>,
 }
 
 fn err_case(name: &'static str, data: Vec<u8>, result: &'static str) -> Case {
@@ -203,6 +223,8 @@ fn err_case(name: &'static str, data: Vec<u8>, result: &'static str) -> Case {
         c: 0,
         mask: None,
         ffmpeg: false,
+        repairs: Vec::new(),
+        short: None,
     }
 }
 
@@ -232,6 +254,8 @@ fn ok_pcm(
         c: bits,
         mask: None,
         ffmpeg: true,
+        repairs: Vec::new(),
+        short: None,
     });
 }
 
@@ -257,6 +281,8 @@ fn ok_ext(
         c,
         mask: Some(e.mask),
         ffmpeg: dirty.is_none(),
+        repairs: Vec::new(),
+        short: None,
     });
 }
 
@@ -282,6 +308,8 @@ fn manual(
         c: v,
         mask: None,
         ffmpeg,
+        repairs: Vec::new(),
+        short: None,
     });
 }
 
@@ -525,41 +553,19 @@ fn build_cases() -> Vec<Case> {
         v[..100].to_vec(),
         false,
     );
+    // W1 R5：data 声明 400 字节，源中只有 203 字节。
+    set_short(cs, 400, 400 - (50 * 4 + 3));
     cs.push(err_case("trunc_in_fmt", full[..20].to_vec(), "Truncated"));
     cs.push(err_case(
         "trunc_riff_header",
         full[..7].to_vec(),
         "Truncated",
     ));
-    let v = samples(21, 10, 1, 16);
-    let data = riff_with(
-        &[
-            fmt_pcm(pcm(1, 44_100, 16)),
-            chunk(b"data", &encode(&v, 16, 16, None)),
-        ],
-        10,
-        b"RIFF",
-        b"WAVE",
-    );
-    manual(
-        cs,
-        "trunc_riff_claims_more",
-        data,
-        "Truncated",
-        (44_100, 1, 16),
-        v,
-        false,
-    );
     cs.push(err_case("trunc_empty_file", Vec::new(), "Truncated"));
 
     // ---- 合法但不支持 ----
     let d = chunk(b"data", &[0u8; 8]);
     let un = "Unsupported";
-    cs.push(err_case(
-        "unsup_8bit",
-        riff(&[fmt_pcm(pcm(2, 44_100, 8)), d.clone()]),
-        un,
-    ));
     cs.push(err_case(
         "unsup_float_tag3",
         riff(&[
@@ -694,21 +700,6 @@ fn build_cases() -> Vec<Case> {
         ma,
     ));
     cs.push(err_case(
-        "mal_chunk_beyond_riff",
-        riff_with(
-            &[fmt_pcm(pcm(2, 44_100, 16)), d.clone()],
-            -4,
-            b"RIFF",
-            b"WAVE",
-        ),
-        ma,
-    ));
-    cs.push(err_case(
-        "mal_data_not_frame_multiple",
-        riff(&[fmt_pcm(pcm(2, 44_100, 16)), chunk(b"data", &[0u8; 6])]),
-        ma,
-    ));
-    cs.push(err_case(
         "mal_cbsize_small",
         riff(&[
             fmt_ext(Ext {
@@ -821,13 +812,476 @@ fn build_cases() -> Vec<Case> {
         vec![0; 4],
         false,
     );
+    w1_cases(cs);
     cases
 }
 
+/// 给最后加入的夹具设置期望的修正与明细。
+fn set_repairs(cs: &mut [Case], repairs: &[String]) {
+    if let Some(c) = cs.last_mut() {
+        c.repairs = repairs.to_vec();
+    }
+}
+
+fn set_short(cs: &mut [Case], declared: u32, missing: u64) {
+    if let Some(c) = cs.last_mut() {
+        c.short = Some((declared, missing));
+    }
+}
+
+/// 写一个 chunk 头（不写体）：用于声明长度与实际内容不同的情形。
+fn chunk_head(id: &[u8; 4], size: u32) -> Vec<u8> {
+    let mut b = id.to_vec();
+    b.extend_from_slice(&size.to_le_bytes());
+    b
+}
+
+/// 用给定的 RIFF 长度字段拼出整个文件（`body` 从 “WAVE” 之后开始）。
+fn riff_raw(size: u32, body: &[u8]) -> Vec<u8> {
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(body);
+    out
+}
+
+fn riff_placeholder(file: &[u8]) -> String {
+    format!("RIFF:placeholder:{}:{}", u32::MAX, file.len() - 8)
+}
+
+fn riff_mismatch(declared: u32, file: &[u8]) -> String {
+    format!("RIFF:mismatch:{declared}:{}", file.len() - 8)
+}
+
+/// W1：真实世界文件头的容错（tasks/W1.md §1）与 8 位 PCM（§2）。每个夹具的期望（样本、修正、
+/// 明细）由这里按构造独立给出。真实来源的头部结构核对见 docs/w1-wav-tolerance.md。
+fn w1_cases(cs: &mut Vec<Case>) {
+    let list = chunk(b"LIST", b"INFOISFT\x0e\x00\x00\x00Lavf60.16.100\x00");
+
+    // ---- R1 + R2：ffmpeg 输出到管道（RIFF 与 data 都是 0xFFFFFFFF，data 前有 LIST）----
+    let v = samples(101, 200, 1, 16);
+    let mut body = fmt_pcm(pcm(1, 44_100, 16));
+    body.extend_from_slice(&list);
+    body.extend_from_slice(&chunk_head(b"data", u32::MAX));
+    body.extend_from_slice(&encode(&v, 16, 16, None));
+    let file = riff_raw(u32::MAX, &body);
+    let r = vec![
+        riff_placeholder(&file),
+        format!("data:placeholder:{}:{}", u32::MAX, 400),
+    ];
+    manual(cs, "fix_ffmpeg_pipe", file, "ok", (44_100, 1, 16), v, true);
+    set_repairs(cs, &r);
+
+    // 同上，EXTENSIBLE 24 位双声道，源末尾多出不足一帧的 4 字节（R2 + R4）。
+    let v = samples(102, 150, 2, 24);
+    let mut body = fmt_ext(ext(2, 48_000, 24, 24, 3));
+    body.extend_from_slice(&chunk_head(b"data", u32::MAX));
+    body.extend_from_slice(&encode(&v, 24, 24, None));
+    body.extend_from_slice(&[1, 2, 3, 4]);
+    let file = riff_raw(u32::MAX, &body);
+    let r = vec![
+        "partial:4".to_string(),
+        riff_placeholder(&file),
+        format!("data:placeholder:{}:{}", u32::MAX, 150 * 6),
+    ];
+    cs.push(Case {
+        name: "fix_pipe_ext24_partial_tail",
+        data: file,
+        result: "ok",
+        fmt: Some((48_000, 2, 24)),
+        vals: v,
+        ch: 2,
+        v: 24,
+        c: 24,
+        mask: Some(3),
+        ffmpeg: true,
+        repairs: r,
+        short: None,
+    });
+
+    // RIFF 占位、data 长度正确（只有 R1）：data 之后的 LIST 照常跳过。
+    let v = samples(103, 64, 2, 16);
+    let mut body = fmt_pcm(pcm(2, 44_100, 16));
+    body.extend_from_slice(&chunk(b"data", &encode(&v, 16, 16, None)));
+    body.extend_from_slice(&list);
+    let file = riff_raw(u32::MAX, &body);
+    let r = vec![riff_placeholder(&file)];
+    manual(
+        cs,
+        "fix_riff_placeholder",
+        file,
+        "ok",
+        (44_100, 2, 16),
+        v,
+        true,
+    );
+    set_repairs(cs, &r);
+
+    // R1 刚好不成立：RIFF = 0xFFFFFFFE 不是占位值，按 R3（RIFF 偏长）处理。
+    let v = samples(104, 32, 1, 16);
+    let body = [
+        fmt_pcm(pcm(1, 8_000, 16)),
+        chunk(b"data", &encode(&v, 16, 16, None)),
+    ]
+    .concat();
+    let file = riff_raw(0xFFFF_FFFE, &body);
+    let r = vec![riff_mismatch(0xFFFF_FFFE, &file)];
+    manual(cs, "fix_riff_fffffffe", file, "ok", (8_000, 1, 16), v, true);
+    set_repairs(cs, &r);
+
+    // R2 刚好不成立：data = 0xFFFFFFFE 不是占位值，源比声明短（R5）。
+    let v = samples(105, 40, 1, 16);
+    let mut body = fmt_pcm(pcm(1, 8_000, 16));
+    body.extend_from_slice(&chunk_head(b"data", 0xFFFF_FFFE));
+    body.extend_from_slice(&encode(&v, 16, 16, None));
+    let file = riff_raw(u32::MAX, &body);
+    manual(
+        cs,
+        "trunc_data_fffffffe",
+        file,
+        "Truncated",
+        (8_000, 1, 16),
+        v,
+        true,
+    );
+    set_short(cs, 0xFFFF_FFFE, u64::from(0xFFFF_FFFEu32) - 80);
+
+    // RIFF 占位而 data 长度为 0：意图不明，拒绝。
+    let mut body = fmt_pcm(pcm(1, 8_000, 16));
+    body.extend_from_slice(&chunk_head(b"data", 0));
+    body.extend_from_slice(&encode(&samples(106, 8, 1, 16), 16, 16, None));
+    cs.push(err_case(
+        "mal_riff_placeholder_data_zero",
+        riff_raw(u32::MAX, &body),
+        "Malformed",
+    ));
+
+    // ---- R3：RIFF 长度与源不符，data 完整 ----
+    // RIFF 偏短 4 字节：data 越出 RIFF（原 mal_chunk_beyond_riff，体为全零；现改用已知样本）。
+    let v = samples(107, 50, 2, 16);
+    let body = [
+        fmt_pcm(pcm(2, 44_100, 16)),
+        chunk(b"data", &encode(&v, 16, 16, None)),
+    ]
+    .concat();
+    let declared = (body.len() + 4 - 4) as u32;
+    let file = riff_raw(declared, &body);
+    let r = vec![riff_mismatch(declared, &file)];
+    manual(cs, "fix_riff_short", file, "ok", (44_100, 2, 16), v, true);
+    set_repairs(cs, &r);
+
+    // RIFF 偏长 8 字节（写入程序把文件总长写进 RIFF 长度）。
+    let v = samples(108, 50, 1, 24);
+    let body = [
+        fmt_pcm(pcm(1, 48_000, 24)),
+        chunk(b"data", &encode(&v, 24, 24, None)),
+    ]
+    .concat();
+    let declared = (body.len() + 4 + 8) as u32;
+    let file = riff_raw(declared, &body);
+    let r = vec![riff_mismatch(declared, &file)];
+    manual(
+        cs,
+        "fix_riff_is_file_size",
+        file,
+        "ok",
+        (48_000, 1, 24),
+        v,
+        true,
+    );
+    set_repairs(cs, &r);
+
+    // RIFF 偏长 10 字节（原 trunc_riff_claims_more：data 完整，源在 RIFF 声明结束之前结束）。
+    let v = samples(21, 10, 1, 16);
+    let body = [
+        fmt_pcm(pcm(1, 44_100, 16)),
+        chunk(b"data", &encode(&v, 16, 16, None)),
+    ]
+    .concat();
+    let declared = (body.len() + 4 + 10) as u32;
+    let file = riff_raw(declared, &body);
+    let r = vec![riff_mismatch(declared, &file)];
+    manual(cs, "fix_riff_long", file, "ok", (44_100, 1, 16), v, true);
+    set_repairs(cs, &r);
+
+    // fuzz 发现（分块与一次性输入结果不同）：RIFF 偏长不足一个块头（2 字节），data 之后源结束；
+    // 以及 RIFF 偏长 5 字节、源中只有 3 字节残余。两者都要等源结束才能判断，结果与分块无关。
+    let v = samples(119, 12, 2, 16);
+    let body = [
+        fmt_pcm(pcm(2, 44_100, 16)),
+        chunk(b"data", &encode(&v, 16, 16, None)),
+    ]
+    .concat();
+    let declared = (body.len() + 4 + 2) as u32;
+    let file = riff_raw(declared, &body);
+    let r = vec![riff_mismatch(declared, &file)];
+    manual(
+        cs,
+        "fix_riff_long_by_2",
+        file,
+        "ok",
+        (44_100, 2, 16),
+        v,
+        true,
+    );
+    set_repairs(cs, &r);
+    let v = samples(120, 12, 1, 24);
+    let mut body = [
+        fmt_pcm(pcm(1, 48_000, 24)),
+        chunk(b"data", &encode(&v, 24, 24, None)),
+    ]
+    .concat();
+    body.extend_from_slice(&[0xEE, 0xEE, 0xEE]);
+    let declared = (body.len() + 4 + 2) as u32;
+    let file = riff_raw(declared, &body);
+    let r = vec![riff_mismatch(declared, &file)];
+    manual(
+        cs,
+        "fix_riff_long_partial_tail",
+        file,
+        "ok",
+        (48_000, 1, 24),
+        v,
+        true,
+    );
+    set_repairs(cs, &r);
+
+    // data 之后的 LIST 越出 RIFF（RIFF 偏短 8 字节）：样本完整。
+    let v = samples(109, 30, 2, 16);
+    let body = [
+        fmt_pcm(pcm(2, 44_100, 16)),
+        chunk(b"data", &encode(&v, 16, 16, None)),
+        list.clone(),
+    ]
+    .concat();
+    let declared = (body.len() + 4 - 8) as u32;
+    let file = riff_raw(declared, &body);
+    let r = vec![riff_mismatch(declared, &file)];
+    manual(
+        cs,
+        "fix_list_after_data_beyond_riff",
+        file,
+        "ok",
+        (44_100, 2, 16),
+        v,
+        true,
+    );
+    set_repairs(cs, &r);
+
+    // data 之后的块被源截断（RIFF 声明完整的 LIST，源在 LIST 体中间结束）。
+    let v = samples(110, 30, 1, 16);
+    let full = riff(&[
+        fmt_pcm(pcm(1, 44_100, 16)),
+        chunk(b"data", &encode(&v, 16, 16, None)),
+        list.clone(),
+    ]);
+    let file = full[..full.len() - 10].to_vec();
+    let declared = (full.len() - 8) as u32;
+    let r = vec![riff_mismatch(declared, &file)];
+    manual(
+        cs,
+        "fix_trailing_chunk_cut",
+        file,
+        "ok",
+        (44_100, 1, 16),
+        v,
+        true,
+    );
+    set_repairs(cs, &r);
+
+    // R3 不成立：data 之前的块越出 RIFF（无法判断是 RIFF 还是该块长度写错），拒绝。
+    let v = samples(111, 8, 1, 16);
+    let body = [
+        fmt_pcm(pcm(1, 44_100, 16)),
+        list.clone(),
+        chunk(b"data", &encode(&v, 16, 16, None)),
+    ]
+    .concat();
+    let declared = (4 + 24 + 8) as u32; // RIFF 结束在 LIST 体中间
+    cs.push(err_case(
+        "mal_chunk_before_data_beyond_riff",
+        riff_raw(declared, &body),
+        "Malformed",
+    ));
+
+    // ---- R4：data 长度不是整帧 ----
+    // 16 位双声道（4 字节一帧），data 长 4k + 2：丢弃 2 字节（原 mal_data_not_frame_multiple）。
+    let v = samples(112, 40, 2, 16);
+    let mut d = encode(&v, 16, 16, None);
+    d.extend_from_slice(&[0x55, 0xAA]);
+    let file = riff(&[fmt_pcm(pcm(2, 44_100, 16)), chunk(b"data", &d)]);
+    manual(
+        cs,
+        "fix_data_partial_frame",
+        file,
+        "ok",
+        (44_100, 2, 16),
+        v,
+        true,
+    );
+    set_repairs(cs, &["partial:2".to_string()]);
+
+    // data 长 4k + 1（奇数，含填充字节），其后还有 LIST：丢弃 1 字节，LIST 照常跳过。
+    let v = samples(113, 33, 2, 16);
+    let mut d = encode(&v, 16, 16, None);
+    d.push(0x7F);
+    let file = riff(&[
+        fmt_pcm(pcm(2, 44_100, 16)),
+        chunk(b"data", &d),
+        list.clone(),
+    ]);
+    manual(
+        cs,
+        "fix_data_odd_partial_then_list",
+        file,
+        "ok",
+        (44_100, 2, 16),
+        v,
+        true,
+    );
+    set_repairs(cs, &["partial:1".to_string()]);
+
+    // 24 位 6 声道 5.1（18 字节一帧），data 长 18k + 17。
+    let v = samples(114, 20, 6, 24);
+    let mut d = encode(&v, 24, 24, None);
+    d.extend_from_slice(&[0x11; 17]);
+    let file = riff(&[fmt_ext(ext(6, 48_000, 24, 24, 0x3F)), chunk(b"data", &d)]);
+    cs.push(Case {
+        name: "fix_ext24_6ch_partial_frame",
+        data: file,
+        result: "ok",
+        fmt: Some((48_000, 6, 24)),
+        vals: v,
+        ch: 6,
+        v: 24,
+        c: 24,
+        mask: Some(0x3F),
+        ffmpeg: true,
+        repairs: vec!["partial:17".to_string()],
+        short: None,
+    });
+
+    // R3 + R4：RIFF 偏短，data 不是整帧。
+    let v = samples(115, 25, 1, 24);
+    let mut d = encode(&v, 24, 24, None);
+    d.extend_from_slice(&[9, 9]);
+    let body = [fmt_pcm(pcm(1, 48_000, 24)), chunk(b"data", &d)].concat();
+    let declared = (body.len() + 4 - 6) as u32;
+    let file = riff_raw(declared, &body);
+    let r = vec!["partial:2".to_string(), riff_mismatch(declared, &file)];
+    manual(
+        cs,
+        "fix_riff_short_partial_frame",
+        file,
+        "ok",
+        (48_000, 1, 24),
+        v,
+        true,
+    );
+    set_repairs(cs, &r);
+
+    // ---- R5：data 声明长度超过源 ----
+    // 截在帧边界：声明 400 字节，源中只有 30 帧（120 字节）。
+    let v = samples(116, 100, 2, 16);
+    let full = riff(&[
+        fmt_pcm(pcm(2, 44_100, 16)),
+        chunk(b"data", &encode(&v, 16, 16, None)),
+    ]);
+    manual(
+        cs,
+        "trunc_data_short_frame_boundary",
+        full[..44 + 120].to_vec(),
+        "Truncated",
+        (44_100, 2, 16),
+        v[..60].to_vec(),
+        true,
+    );
+    set_short(cs, 400, 280);
+
+    // arecord 流式输出 / 录音被中止（实测 alsa-utils 1.2.9）：RIFF = 0x80000024，
+    // data = 0x80000000（不是整帧，S24_3LE 双声道 6 字节一帧），源只有若干帧加半帧。
+    let v = samples(117, 120, 2, 24);
+    let mut body = fmt_pcm(pcm(2, 48_000, 24));
+    body.extend_from_slice(&chunk_head(b"data", 0x8000_0000));
+    body.extend_from_slice(&encode(&v, 24, 24, None));
+    body.extend_from_slice(&[1, 2, 3]);
+    let file = riff_raw(0x8000_0024, &body);
+    manual(
+        cs,
+        "trunc_arecord_placeholder",
+        file,
+        "Truncated",
+        (48_000, 2, 24),
+        v,
+        true,
+    );
+    set_short(cs, 0x8000_0000, 0x8000_0000 - (120 * 6 + 3));
+
+    // 修正与已有拒绝情形的组合：RIFF 为占位值不改变 fmt 矛盾与重复 data 的拒绝。
+    let mut body = fmt_pcm(Pcm {
+        align: Some(6),
+        ..pcm(2, 44_100, 16)
+    });
+    body.extend_from_slice(&chunk_head(b"data", u32::MAX));
+    body.extend_from_slice(&[0u8; 12]);
+    cs.push(err_case(
+        "mal_pipe_block_align",
+        riff_raw(u32::MAX, &body),
+        "Malformed",
+    ));
+    let v = samples(118, 4, 1, 16);
+    let d = chunk(b"data", &encode(&v, 16, 16, None));
+    let body = [fmt_pcm(pcm(1, 44_100, 16)), d.clone(), d].concat();
+    manual(
+        cs,
+        "mal_riff_placeholder_dup_data",
+        riff_raw(u32::MAX, &body),
+        "Malformed",
+        (44_100, 1, 16),
+        v,
+        false,
+    );
+
+    // ---- 8 位 PCM（W1 §2）：无符号、偏移 128；含 0、128、255 等极值 ----
+    // 单声道 301 帧：data 为奇数长度，含填充字节。
+    ok_pcm(cs, "pcm8_mono_8k_odd", pcm(1, 8_000, 8), 301, 120, &[], &[]);
+    ok_pcm(cs, "pcm8_stereo_44k", pcm(2, 44_100, 8), 101, 121, &[], &[]);
+    ok_ext(cs, "ext8_stereo", ext(2, 22_050, 8, 8, 3), 90, 122, None);
+    ok_ext(cs, "ext6in8_mono", ext(1, 11_025, 8, 6, 4), 70, 123, None);
+    ok_ext(
+        cs,
+        "ext6in8_dirty_pad_bits",
+        ext(1, 11_025, 8, 6, 4),
+        70,
+        124,
+        Some(125),
+    );
+    // 8 位 + R4：双声道 2 字节一帧，data 长 2k + 1（奇数，含填充）。
+    let v = samples(126, 50, 2, 8);
+    let mut d = encode(&v, 8, 8, None);
+    d.push(0x80);
+    let file = riff(&[fmt_pcm(pcm(2, 8_000, 8)), chunk(b"data", &d)]);
+    manual(
+        cs,
+        "fix_pcm8_partial_frame",
+        file,
+        "ok",
+        (8_000, 2, 8),
+        v,
+        true,
+    );
+    set_repairs(cs, &["partial:1".to_string()]);
+}
+
 fn ffmpeg_ref(path: &Path, _ch: usize, c: u32) -> Result<Vec<i32>> {
+    let input_codec = if c == 8 {
+        "pcm_u8".to_string()
+    } else {
+        format!("pcm_s{c}le")
+    };
     // 显式指定输入解码器：ffmpeg 6.1 会把 C32/V24 的 EXTENSIBLE PCM 误识别为 pcm_f24le。
     let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-c:a", &format!("pcm_s{c}le"), "-i"])
+        .args(["-v", "error", "-c:a", &input_codec, "-i"])
         .arg(path)
         // 不加 -ac：保持源声道布局原样输出，不让 ffmpeg 插入重混（F1：侧环绕等布局无法“转换”）。
         .args(["-f", "s32le", "-c:a", "pcm_s32le", "-"])
@@ -855,6 +1309,17 @@ fn expect_text(c: &Case) -> String {
             let _ = writeln!(s, "mask {m}");
         }
         None => s.push_str("mask none\n"),
+    }
+    if c.repairs.is_empty() {
+        s.push_str("repairs none\n");
+    } else {
+        let _ = writeln!(s, "repairs {}", c.repairs.join(";"));
+    }
+    match c.short {
+        Some((declared, missing)) => {
+            let _ = writeln!(s, "detail data-short:{declared}:{missing}");
+        }
+        None => s.push_str("detail none\n"),
     }
     let _ = writeln!(s, "samples {}", c.vals.len());
     for frame in c.vals.chunks(c.ch.max(1)) {

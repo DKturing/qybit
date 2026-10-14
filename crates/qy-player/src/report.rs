@@ -119,6 +119,8 @@ pub struct PlaybackReport<A> {
     pub fault: Option<(u32, EngineFault)>,
     /// 按出错策略跳过的曲目（[`qy_core::engine::ErrorPolicy::Skip`]）。
     pub skipped: Vec<(u32, EngineFault)>,
+    /// 曲目的结构修正（W1：只修正结构，不改样本）。
+    pub repairs: Vec<(u32, qy_core::engine::Repair)>,
     /// I/O 错误等附加说明。
     pub messages: Vec<String>,
     pub finished: bool,
@@ -134,6 +136,7 @@ impl<A> Default for PlaybackReport<A> {
             open_failures: Vec::new(),
             fault: None,
             skipped: Vec::new(),
+            repairs: Vec::new(),
             messages: Vec::new(),
             finished: false,
             device_error: false,
@@ -328,6 +331,13 @@ impl<A: AttemptRecord> PlaybackReport<A> {
         for (track, fault) in &self.skipped {
             let _ = writeln!(o, "曲目 {} 已跳过：{}", track + 1, fault_text(fault));
         }
+        for (track, r) in &self.repairs {
+            let _ = writeln!(
+                o,
+                "曲目 {} 按规则修正文件结构：{r}（样本未改动）",
+                track + 1
+            );
+        }
         if let Some((track, fault)) = self.fault {
             let _ = writeln!(o, "曲目 {} 失败：{}", track + 1, fault_text(&fault));
         }
@@ -338,6 +348,11 @@ impl<A: AttemptRecord> PlaybackReport<A> {
             o.push_str(
                 "结论：全部曲目已播放，无欠载、无错误。这只说明软件路径与协商正常，不证明设备端 bit-perfect。\n",
             );
+            if !self.repairs.is_empty() {
+                o.push_str(
+                    "部分曲目的文件结构不规范，已按规则修正后播放：软件路径无损，但这不说明文件本身完好。\n",
+                );
+            }
         } else if self.finished && self.underrun_events() > 0 {
             let _ = writeln!(
                 o,

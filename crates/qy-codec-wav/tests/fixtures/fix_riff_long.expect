@@ -1,6 +1,8 @@
-result Truncated
+result ok
 format 44100 1 16
 mask none
+repairs RIFF:mismatch:66:56
+detail none
 samples 10
 32767
 -32768

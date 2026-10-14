@@ -3,11 +3,13 @@
 //! 夹具由 `tools/qy-gen-fixtures`（`cargo run -p qy-gen-fixtures`） 从已知整数样本构造，期望值不经本解码器得出；
 //! 有效夹具另附 ffmpeg 解码的 s32le 参考。每个夹具分别以一次性、逐字节、
 //! 固定种子随机分块输入，并以随机部分取走输出驱动，结果必须与期望逐样本一致。
+//! W1：结构修正（`repairs`）与 R5 的 `DataShort` 明细也由生成器按构造独立给出，必须完全一致。
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use qy_codec_wav::WavDecoder;
+use qy_codec_wav::{WavDecoder, WavDetail};
+use qy_core::engine::{Repair, Resources};
 use qy_core::{DecodeError, Decoder, PCM_WORK_SAMPLES, SourceFormat, Status};
 
 /// 随机分块的固定种子数。
@@ -17,6 +19,8 @@ struct Expect {
     result: Result<(), DecodeError>,
     format: Option<(u32, u16, u8)>,
     mask: Option<u32>,
+    repairs: Vec<String>,
+    detail: Option<String>,
     samples: Vec<i32>,
 }
 
@@ -51,6 +55,15 @@ fn parse_expect(text: &str) -> Expect {
         "none" => None,
         m => m.parse().ok(),
     };
+    let mut repairs: Vec<String> = match field("repairs").as_str() {
+        "none" => Vec::new(),
+        r => r.split(';').map(str::to_owned).collect(),
+    };
+    repairs.sort();
+    let detail = match field("detail").as_str() {
+        "none" => None,
+        d => Some(d.to_owned()),
+    };
     let count: usize = field("samples").parse().unwrap_or(0);
     let samples: Vec<i32> = lines
         .flat_map(|l| l.split(' ').map(|x| x.parse::<i32>().unwrap_or(i32::MIN)))
@@ -60,7 +73,27 @@ fn parse_expect(text: &str) -> Expect {
         result,
         format,
         mask,
+        repairs,
+        detail,
         samples,
+    }
+}
+
+/// 修正的文本形式（与生成器的 `.expect` 一致）。
+fn repair_text(r: Repair) -> String {
+    let id = |c: [u8; 4]| String::from_utf8_lossy(&c).into_owned();
+    match r {
+        Repair::LengthPlaceholder {
+            chunk,
+            declared,
+            read,
+        } => format!("{}:placeholder:{declared}:{read}", id(chunk)),
+        Repair::LengthMismatch {
+            chunk,
+            declared,
+            actual,
+        } => format!("{}:mismatch:{declared}:{actual}", id(chunk)),
+        Repair::PartialFrameDropped { bytes } => format!("partial:{bytes}"),
     }
 }
 
@@ -83,6 +116,8 @@ struct Outcome {
     result: Result<(), DecodeError>,
     format: Option<SourceFormat>,
     mask: Option<u32>,
+    repairs: Vec<String>,
+    detail: Option<String>,
     samples: Vec<i32>,
 }
 
@@ -135,10 +170,26 @@ fn run(
             }
         }
     };
+    // 引擎经 `Resources` 取修正，与解码器自己的列表一致。
+    let via_trait: Vec<Repair> = (0..dec.repair_count())
+        .filter_map(|i| dec.repair(i))
+        .collect();
+    assert_eq!(via_trait, dec.repairs().collect::<Vec<_>>());
+    assert_eq!(dec.repair(dec.repair_count()), None);
+    let mut repairs: Vec<String> = via_trait.into_iter().map(repair_text).collect();
+    repairs.sort();
+    let detail = match dec.last_detail() {
+        Some(WavDetail::DataShort { declared, missing }) => {
+            Some(format!("data-short:{declared}:{missing}"))
+        }
+        _ => None,
+    };
     Outcome {
         result,
         format: dec.format(),
         mask: dec.channel_mask(),
+        repairs,
+        detail,
         samples,
     }
 }
@@ -161,6 +212,8 @@ fn fixture_names() -> Vec<String> {
 fn check_against_expect(name: &str, out: &Outcome, exp: &Expect) {
     assert_eq!(out.result, exp.result, "{name}: 结果");
     assert_eq!(out.samples, exp.samples, "{name}: 样本");
+    assert_eq!(out.repairs, exp.repairs, "{name}: 修正");
+    assert_eq!(out.detail, exp.detail, "{name}: 明细");
     if let Some((rate, ch, bits)) = exp.format {
         let f = out.format.unwrap_or_else(|| panic!("{name}: 格式未知"));
         assert_eq!(
@@ -195,7 +248,7 @@ fn check_against_expect(name: &str, out: &Outcome, exp: &Expect) {
 #[test]
 fn fixtures_match_independent_reference() {
     let names = fixture_names();
-    assert!(names.len() >= 50, "夹具数量 {}", names.len());
+    assert!(names.len() >= 80, "夹具数量 {}", names.len());
     let mut dec = new_decoder();
     for name in &names {
         let dir = fixtures_dir();
@@ -210,6 +263,7 @@ fn fixtures_match_independent_reference() {
         let ff = dir.join(format!("{name}.ffmpeg.s32le"));
         if let Ok(raw) = fs::read(&ff) {
             let bits = one_shot.format.map_or(32, |f| u32::from(f.bits()));
+            // 8 位 EXTENSIBLE（V < 8）：ffmpeg 不看有效位，输出整个 8 位容器；填充位为 0 时相同。
             let reference: Vec<i32> = raw
                 .chunks_exact(4)
                 .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))

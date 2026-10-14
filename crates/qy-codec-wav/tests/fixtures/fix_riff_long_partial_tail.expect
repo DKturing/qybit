@@ -1,0 +1,18 @@
+result ok
+format 48000 1 24
+mask none
+repairs RIFF:mismatch:77:75
+detail none
+samples 12
+8388607
+-8388608
+0
+-1
+1
+8388606
+-8388607
+-2379933
+-3669378
+-656458
+4496694
+-2386046

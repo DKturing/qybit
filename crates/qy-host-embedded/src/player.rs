@@ -18,7 +18,7 @@ use core::fmt;
 
 use qy_core::engine::{
     Engine, EngineFault, EngineStats, ErrorPolicy, HostAction, HostEvent, PlaybackPlan, Poll,
-    Resources, Wait,
+    Repair, Resources, Wait,
 };
 use qy_core::{Decoder, DeviceFormat, Fault};
 use qy_pcm_format::frames_for_millis;
@@ -53,6 +53,8 @@ pub enum Notice {
     Unsupported { error: SelectError },
     /// 曲目出错，已跳过。
     Skipped { track: u32, fault: EngineFault },
+    /// 曲目在不改样本的前提下做过的一条结构修正（W1）。
+    Repaired { track: u32, repair: Repair },
     /// 播放列表结束。
     Finished,
     /// 播放失败并停止。
@@ -76,6 +78,8 @@ pub struct Counters {
     pub protocol_errors: u32,
     /// 通知队列满而丢弃的通知数。
     pub notices_dropped: u32,
+    /// 结构修正条数（W1：只修正结构，不改样本）。
+    pub repairs: u32,
 }
 
 /// 状态快照。
@@ -384,6 +388,10 @@ where
                 self.count_fault(fault);
                 self.notice(Notice::Skipped { track, fault });
             }
+            HostAction::Repaired { track, repair } => {
+                self.counters.repairs = self.counters.repairs.saturating_add(1);
+                self.notice(Notice::Repaired { track, repair });
+            }
             HostAction::Finished => {
                 self.notice(Notice::Finished);
             }
@@ -583,7 +591,8 @@ pub fn write_status(w: &mut impl fmt::Write, s: &Status) -> fmt::Result {
         w,
         "queued={} underruns={} underrun_frames={} paused_fills={} data_frames={} \
          open_errors={} read_errors={} decode_errors={} unsupported={} skipped={} \
-         output_errors={} feeder_errors={} protocol_errors={} stale={} notices_dropped={}",
+         output_errors={} feeder_errors={} protocol_errors={} stale={} notices_dropped={} \
+         repairs={}",
         s.queued_frames,
         o.underruns,
         o.underrun_frames,
@@ -598,7 +607,8 @@ pub fn write_status(w: &mut impl fmt::Write, s: &Status) -> fmt::Result {
         o.errors,
         c.protocol_errors + s.engine.protocol_errors,
         s.engine.stale,
-        c.notices_dropped
+        c.notices_dropped,
+        c.repairs
     )?;
     // R1 水位：当前设备流的最低队列帧数（及毫秒）、低水位与临界次数。
     let m = &o.watermark;
@@ -627,6 +637,7 @@ pub fn write_notice(w: &mut impl fmt::Write, n: &Notice) -> fmt::Result {
         Notice::Plan { plan } => write_plan(w, plan),
         Notice::Unsupported { error } => writeln!(w, "EVENT unsupported reason={error:?}"),
         Notice::Skipped { track, fault } => writeln!(w, "EVENT skip track={track} fault={fault:?}"),
+        Notice::Repaired { track, repair } => writeln!(w, "EVENT repaired track={track} {repair}"),
         Notice::Finished => writeln!(w, "EVENT finished"),
         Notice::Failed { track, fault } => {
             writeln!(w, "EVENT failed track={track} fault={fault:?}")

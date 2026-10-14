@@ -165,6 +165,86 @@ pub trait Resources {
     fn demand(&self) -> Option<DecoderDemand> {
         None
     }
+
+    /// 当前曲目已做的结构修正条数（W1）。修正只决定“读到哪里为止”和“丢弃不完整的尾部”，
+    /// 不改变、不编造样本。
+    fn repair_count(&self) -> usize {
+        0
+    }
+
+    /// 第 `index` 条结构修正；越界时为 `None`。
+    fn repair(&self, index: usize) -> Option<Repair> {
+        let _ = index;
+        None
+    }
+}
+
+/// 每首曲目最多报告的结构修正条数。
+pub const MAX_REPAIRS: usize = 4;
+
+/// 解码器对源文件结构做的修正（W1，报告用）。只修正结构：样本值都来自文件原样。
+/// `chunk` 为容器中块的 4 字节标识（如 WAV 的 `RIFF`、`data`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Repair {
+    /// 长度字段是流式写入程序留下的占位值（未回填），按读到源末尾处理；`read` 为实际读到的字节数。
+    LengthPlaceholder {
+        chunk: [u8; 4],
+        declared: u32,
+        read: u64,
+    },
+    /// 长度字段与源的实际长度不符，以数据块的声明长度为准；`actual` 为源中该块实际的字节数。
+    LengthMismatch {
+        chunk: [u8; 4],
+        declared: u32,
+        actual: u64,
+    },
+    /// 数据长度不是整帧，丢弃末尾不足一帧的字节。
+    PartialFrameDropped { bytes: u32 },
+}
+
+/// 4 字节块标识按 ASCII 显示（不可显示的字节以 `?` 代替）。
+struct ChunkId([u8; 4]);
+
+impl fmt::Display for ChunkId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for &b in &self.0 {
+            let c = if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                '?'
+            };
+            fmt::Write::write_char(f, c)?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for Repair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::LengthPlaceholder {
+                chunk,
+                declared,
+                read,
+            } => write!(
+                f,
+                "{} 长度为流式占位值 {declared:#x}（写入程序未回填），按读到文件末尾处理，实际 {read} 字节",
+                ChunkId(chunk)
+            ),
+            Self::LengthMismatch {
+                chunk,
+                declared,
+                actual,
+            } => write!(
+                f,
+                "{} 声明长度 {declared} 字节与文件实际的 {actual} 字节不符，以 data 的声明长度为准",
+                ChunkId(chunk)
+            ),
+            Self::PartialFrameDropped { bytes } => {
+                write!(f, "丢弃数据末尾不足一帧的 {bytes} 字节")
+            }
+        }
+    }
 }
 
 /// 解码器的需求与容量（文件头声明值，不可信，只用于报告）。
@@ -307,6 +387,9 @@ pub enum HostAction {
     ResumeDevice,
     /// 曲目出错，按策略跳过并继续下一首。
     TrackSkipped { track: u32, fault: EngineFault },
+    /// 第 `track` 首在不改样本的前提下做过的一条结构修正（W1）。在该曲目关闭时、按解码器记录的
+    /// 顺序逐条给出；宿主据此在报告中写明。
+    Repaired { track: u32, repair: Repair },
     /// 播放列表正常结束，设备中的音频已播完。
     Finished,
     /// 播放失败并停止；失败前已入队的音频已播完。
@@ -379,6 +462,8 @@ pub struct EngineStats {
     pub skipped: u32,
     /// 累计入队的设备帧数（宿主可据此统计每个设备流入队的帧数）。
     pub frames_pushed: u64,
+    /// 累计报告的结构修正条数（W1）。
+    pub repairs: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,6 +516,8 @@ pub struct Engine<D: Decoder + Resources, S: FrameSink> {
     paused: bool,
     track_count: u32,
     reject: Option<EngineFault>,
+    /// 当前打开的曲目（核心关闭它时据此报告结构修正，W1）。
+    open_track: Option<u32>,
     outbox: [Option<HostAction>; OUTBOX],
     out_len: usize,
     /// 曲目边界：(曲目, 该曲目第一帧在累计入队帧中的位置)，按入队顺序。
@@ -452,6 +539,7 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
             paused: false,
             track_count: 0,
             reject: None,
+            open_track: None,
             outbox: [None; OUTBOX],
             out_len: 0,
             marks: [(0, 0); MARKS],
@@ -846,6 +934,7 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
             };
             match action {
                 Action::Open { generation, track } => {
+                    self.open_track = Some(track);
                     return Poll::Action(HostAction::Open { generation, track });
                 }
                 Action::Read {
@@ -860,6 +949,7 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
                     });
                 }
                 Action::Close { generation } => {
+                    self.report_repairs();
                     return Poll::Action(HostAction::Close { generation });
                 }
                 Action::Configure { generation, format } => self.on_configure(generation, format),
@@ -957,6 +1047,21 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
         });
         self.maybe_start(pushed == 0);
         (pushed == 0).then_some(Wait::QueueFull)
+    }
+
+    /// 核心关闭曲目时（解码器尚未复位），把解码器记录的结构修正逐条交给宿主。此时控制队列为空
+    /// （`poll` 先取完控制动作才推进核心），修正至多 [`MAX_REPAIRS`] 条，放得下。
+    fn report_repairs(&mut self) {
+        let Some(track) = self.open_track.take() else {
+            return;
+        };
+        let n = self.core.decoder().repair_count().min(MAX_REPAIRS);
+        for i in 0..n {
+            if let Some(repair) = self.core.decoder().repair(i) {
+                self.stats.repairs = self.stats.repairs.saturating_add(1);
+                self.push(HostAction::Repaired { track, repair });
+            }
+        }
     }
 
     fn fail_now(&mut self, fault: EngineFault) {

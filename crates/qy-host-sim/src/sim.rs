@@ -157,6 +157,8 @@ pub struct Report {
     pub fault: Option<(u32, EngineFault)>,
     /// 按策略跳过的曲目。
     pub skipped: Vec<(u32, EngineFault)>,
+    /// 曲目的结构修正（W1，不计入摘要）。
+    pub repairs: Vec<(u32, qy_core::engine::Repair)>,
     /// 暂停期间设备输出的静音帧（不计欠载）。
     pub pause_silence_frames: u64,
     /// 已执行的播放控制（tick、控制）。
@@ -592,6 +594,7 @@ impl Sim<'_> {
                 }
             }
             HostAction::TrackSkipped { track, fault } => self.report.skipped.push((track, fault)),
+            HostAction::Repaired { track, repair } => self.report.repairs.push((track, repair)),
             HostAction::Finished => {
                 self.report.finished = true;
                 self.phase = Phase::Done;

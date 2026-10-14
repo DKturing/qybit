@@ -205,6 +205,14 @@ impl qy_core::engine::Resources for AutoDecoder {
     fn demand(&self) -> Option<qy_core::engine::DecoderDemand> {
         dispatch_ref!(self, d => d.demand(), None)
     }
+
+    fn repair_count(&self) -> usize {
+        dispatch_ref!(self, d => d.repair_count(), 0)
+    }
+
+    fn repair(&self, index: usize) -> Option<qy_core::engine::Repair> {
+        dispatch_ref!(self, d => d.repair(index), None)
+    }
 }
 
 impl Decoder for AutoDecoder {

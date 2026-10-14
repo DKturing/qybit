@@ -219,6 +219,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 self.report.messages.push("桌面渲染循环尚未实现暂停".into());
             }
             HostAction::TrackSkipped { track, fault } => self.report.skipped.push((track, fault)),
+            HostAction::Repaired { track, repair } => self.report.repairs.push((track, repair)),
             HostAction::Finished => {
                 self.report.finished = !self.report.device_error;
                 return false;
@@ -401,7 +402,8 @@ mod tests {
     use super::*;
     use crate::testing::{
         FakeBackend, FakeDevice, FakeOutput, TestAttempt, WCall, check_calls, check_write_calls,
-        data_chunk, fixture, fixture_path, flac_fixture_path, flac_reference, place,
+        data_chunk, ffmpeg_reference, fixture, fixture_path, flac_fixture_path, flac_reference,
+        place,
     };
     use qy_core::engine::EngineFault;
     use qy_core::{DecodeError, Fault};
@@ -602,6 +604,48 @@ mod tests {
             assert!(w.low_frames() > 0 && w.critical_frames() > 0, "{w:?}");
             assert_eq!(r.exit_code(), 0, "{s}");
         }
+    }
+
+    /// W1：修正按曲目写入报告（不改样本：设备字节等于独立参考）；R5 截断写明缺少的字节数；
+    /// 结论只说软件路径无损，不说文件完好。
+    #[test]
+    fn summary_reports_repairs_and_data_short() {
+        let mut b = backend(&ALL, FakeDevice::Packet);
+        let (r, outs) = run(
+            &mut b,
+            &["fix_riff_short.wav", "fix_data_partial_frame.wav"],
+        );
+        let s = r.summary();
+        assert_eq!(r.repairs.len(), 2, "{s}");
+        assert!(
+            s.contains("曲目 1 按规则修正文件结构：RIFF 声明长度"),
+            "{s}"
+        );
+        assert!(
+            s.contains("曲目 2 按规则修正文件结构：丢弃数据末尾不足一帧的 2 字节（样本未改动）"),
+            "{s}"
+        );
+        assert!(s.contains("软件路径无损，但这不说明文件本身完好"), "{s}");
+        assert_eq!(r.exit_code(), 0, "{s}");
+        // 期望字节取 ffmpeg 第二参考，按独立公式放置（16 位源 → 设备 16/16）。
+        let mut want = place(&ffmpeg_reference("fix_riff_short.wav", 16), 16, 16);
+        want.extend(place(
+            &ffmpeg_reference("fix_data_partial_frame.wav", 16),
+            16,
+            16,
+        ));
+        assert!(!want.is_empty());
+        assert_eq!(outs.len(), 1, "{s}");
+        check_output(&outs[0], &want);
+
+        let mut b = backend(&ALL, FakeDevice::Packet);
+        let (r, _) = run(&mut b, &["trunc_data_short_frame_boundary.wav"]);
+        let s = r.summary();
+        assert!(
+            s.contains("WAV 错误明细：文件比 data 声明的 400 字节短 280 字节"),
+            "{s}"
+        );
+        assert!(r.repairs.is_empty(), "{s}");
     }
 
     #[test]

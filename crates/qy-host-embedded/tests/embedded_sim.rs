@@ -847,3 +847,61 @@ fn prev_after_finish_resumes_and_blocks_scan() {
     );
     assert_eq!(notices.last(), Some(&Notice::Finished));
 }
+
+/// W1：不规范的 WAV 头（ffmpeg 管道占位长度、不足一帧的尾部）与 8 位 PCM 在 MCU 宿主上照常播放，
+/// 设备字节等于 ffmpeg 第二参考；每条修正有 `EVENT repaired` 通知，`status` 给出修正计数；
+/// R5 截断的曲目播放完整帧后跳过（解码错误计数）。
+#[test]
+fn w1_repairs_counted_and_bit_exact() {
+    let tracks = vec![
+        fixture("A.WAV", "fix_ffmpeg_pipe.wav", 44_100, 1, 16),
+        fixture("B.WAV", "fix_data_partial_frame.wav", 44_100, 2, 16),
+        fixture(
+            "C.WAV",
+            "trunc_data_short_frame_boundary.wav",
+            44_100,
+            2,
+            16,
+        ),
+        fixture("D.WAV", "pcm8_stereo_44k.wav", 44_100, 2, 8),
+    ];
+    let Ok((mut p, w, n)) = setup(disk(image(&tracks)), caps(), TIMING, ErrorPolicy::Skip) else {
+        panic!("时序应满足");
+    };
+    assert_eq!(n, 4);
+    assert!(p.play(0));
+    let mut notices = Vec::new();
+    run(&mut p, &w, 30_000_000, &mut notices, |_, _, _| {});
+    let s = p.status();
+    assert_eq!(notices.last(), Some(&Notice::Finished));
+    assert_eq!(s.output.underruns, 0);
+    // 曲目 0：RIFF 与 data 占位（2 条）；曲目 1：丢弃 2 字节（1 条）。
+    let repaired: Vec<u32> = notices
+        .iter()
+        .filter_map(|n| match n {
+            Notice::Repaired { track, .. } => Some(*track),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(repaired, vec![0, 0, 1]);
+    assert_eq!(s.counters.repairs, 3);
+    assert_eq!((s.counters.decode_errors, s.counters.skipped), (1, 1));
+    let mut line = String::new();
+    let _ = qy_host_embedded::player::write_status(&mut line, &s);
+    assert!(line.contains(" repairs=3"), "{line}");
+    let mut ev = String::new();
+    for n in &notices {
+        let _ = qy_host_embedded::player::write_notice(&mut ev, n);
+    }
+    assert!(
+        ev.contains("EVENT repaired track=1 丢弃数据末尾不足一帧的 2 字节"),
+        "{ev}"
+    );
+    // 截断曲目 C 只有前 30 帧完整（声明 100 帧）。
+    let limit = [None, None, Some(30), None];
+    check_segments(
+        &w,
+        &expected(&tracks, &[true; 4], &limit),
+        "W1 修正播放列表",
+    );
+}

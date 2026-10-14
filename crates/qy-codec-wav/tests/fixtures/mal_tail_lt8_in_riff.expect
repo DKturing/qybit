@@ -1,6 +1,8 @@
 result Malformed
 format 44100 2 16
 mask none
+repairs none
+detail none
 samples 4
 0 0
 0 0

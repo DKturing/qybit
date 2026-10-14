@@ -1,6 +1,8 @@
 result ok
 format 44100 1 16
 mask 1
+repairs none
+detail none
 samples 64
 32767
 -32768

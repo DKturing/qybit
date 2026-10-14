@@ -1,6 +1,8 @@
 result ok
 format 44100 4 24
 mask 51
+repairs none
+detail none
 samples 440
 8388607 -8388608 0 -1
 1 8388606 -8388607 3855772

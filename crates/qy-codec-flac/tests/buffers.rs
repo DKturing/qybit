@@ -150,11 +150,14 @@ fn structs_hold_no_block_sized_storage() {
     // 结构体大小与容量无关：只含切片与少量状态。
     // 上限依据：T1 的 128 字节是经验值；T2 加入帧解析状态与 STREAMINFO 字段（另有
     // test-metrics 统计 40 字节）后为 184 字节。最小的块缓冲（MCU：4608 × 2 × 8 字节
-    // = 73 728 字节）远大于 256，故 256 字节以内足以证明没有内嵌块大小的存储。
+    // = 73 728 字节）远大于上限，故上限以内足以证明没有内嵌块大小的存储。
+    // W1：WavDecoder 由 128 增至 176 字节（RIFF 长度用法与声明值、源的绝对偏移、data 占位读取量、
+    // RIFF 实际长度、丢弃的尾部字节数与 data 状态的尾部/声明长度字段，都是标量），
+    // Core<WavDecoder> 由 232 增至 280 字节，Core 的上限相应由 256 调为 320；FlacDecoder 不变。
     let d = std::mem::size_of::<FlacDecoder>();
     let c = std::mem::size_of::<Core<WavDecoder>>();
     assert!(d <= 256, "FlacDecoder {d} 字节");
-    assert!(c <= 256, "Core {c} 字节");
+    assert!(c <= 320, "Core {c} 字节");
 }
 
 #[test]

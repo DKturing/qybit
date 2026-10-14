@@ -1,6 +1,8 @@
 result ok
 format 96000 1 20
 mask 4
+repairs none
+detail none
 samples 151
 524287
 -524288
