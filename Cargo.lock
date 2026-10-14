@@ -397,8 +397,11 @@ dependencies = [
 name = "qybit"
 version = "0.0.0"
 dependencies = [
+ "qy-codec-auto",
+ "qy-core",
  "qy-host-alsa",
  "qy-host-wasapi",
+ "qy-pcm-format",
  "qy-player",
 ]
 

@@ -9,6 +9,9 @@ pub const USAGE: &str = "\
                                              按顺序播放 WAV/FLAC（按文件头识别）；Ctrl+C 停止并输出报告
   qybit matrix --device <设备> [--out <目录>]
                                              运行设备格式矩阵，写出 JSON/CSV 报告
+  qybit decode <输入> <输出.wav>              诊断：自有解码 + pack 写成标准 WAV，可用任何播放器试听
+  qybit tone <输出.wav> [--rate 44100] [--bits 16|24|32] [--seconds 5] [--freq 1000]
+                                             诊断：写一个正弦测试音 WAV
   qybit --version | --help
 
 设备：Windows 为 WASAPI 端点 ID（独占模式）；Linux 为 ALSA hw:卡,设备 或 hw:CARD=名称,DEV=n
@@ -21,7 +24,7 @@ PowerShell 会把未加引号的 {…} 当成脚本块，端点 ID 要加单引�
 
 退出码：0 完整播放；2 播放完成但有欠载；1 失败（含设备不支持、打开失败、设备错误、中断）。";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     ListDevices,
     Play {
@@ -32,6 +35,17 @@ pub enum Command {
     Matrix {
         device: String,
         out: PathBuf,
+    },
+    Decode {
+        input: PathBuf,
+        out: PathBuf,
+    },
+    Tone {
+        out: PathBuf,
+        rate: u32,
+        bits: u8,
+        seconds: f64,
+        freq: f64,
     },
     Version,
     Help,
@@ -47,6 +61,59 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             None => Ok(Command::ListDevices),
             Some(x) => Err(format!("list-devices 不接受参数：{x}")),
         },
+        Some("decode") => match (it.next(), it.next(), it.next()) {
+            (Some(i), Some(o), None) if !i.starts_with('-') && !o.starts_with('-') => {
+                Ok(Command::Decode {
+                    input: PathBuf::from(i),
+                    out: PathBuf::from(o),
+                })
+            }
+            _ => Err("decode 需要两个参数：<输入文件> <输出.wav>".into()),
+        },
+        Some("tone") => {
+            let out = match it.next() {
+                Some(o) if !o.starts_with('-') => PathBuf::from(o),
+                _ => return Err("tone 需要输出文件：qybit tone <输出.wav>".into()),
+            };
+            let (mut rate, mut bits, mut seconds, mut freq) = (44_100u32, 16u8, 5.0f64, 1000.0f64);
+            while let Some(a) = it.next() {
+                let v = value(&mut it, a)?;
+                let bad = || format!("{a} 的值无效：{v}");
+                match a {
+                    "--rate" => rate = v.parse().ok().filter(|&r| r > 0).ok_or_else(bad)?,
+                    "--bits" => {
+                        bits = match v.as_str() {
+                            "16" => 16,
+                            "24" => 24,
+                            "32" => 32,
+                            _ => return Err(bad()),
+                        }
+                    }
+                    "--seconds" => {
+                        seconds = v
+                            .parse()
+                            .ok()
+                            .filter(|&x: &f64| x > 0.0 && x <= 600.0)
+                            .ok_or_else(bad)?
+                    }
+                    "--freq" => {
+                        freq = v
+                            .parse()
+                            .ok()
+                            .filter(|&x: &f64| x > 0.0 && x < f64::from(rate) / 2.0)
+                            .ok_or_else(bad)?
+                    }
+                    x => return Err(format!("未知参数：{x}")),
+                }
+            }
+            Ok(Command::Tone {
+                out,
+                rate,
+                bits,
+                seconds,
+                freq,
+            })
+        }
         Some("matrix") => {
             let mut device = None;
             let mut out = None;
@@ -178,6 +245,30 @@ mod tests {
                 "{r:?}"
             );
         }
+    }
+
+    #[test]
+    fn parses_diagnostics() {
+        assert_eq!(
+            p(&["decode", "a.wav", "out.wav"]),
+            Ok(Command::Decode {
+                input: "a.wav".into(),
+                out: "out.wav".into()
+            })
+        );
+        assert!(p(&["decode", "a.wav"]).is_err());
+        assert_eq!(
+            p(&["tone", "t.wav", "--rate", "48000", "--bits", "24"]),
+            Ok(Command::Tone {
+                out: "t.wav".into(),
+                rate: 48_000,
+                bits: 24,
+                seconds: 5.0,
+                freq: 1000.0
+            })
+        );
+        assert!(p(&["tone", "t.wav", "--bits", "20"]).is_err());
+        assert!(p(&["tone"]).is_err());
     }
 
     #[test]

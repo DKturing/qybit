@@ -6,6 +6,7 @@
 //! 不宣称设备端 bit-perfect。
 
 mod args;
+mod diag;
 
 use std::process::ExitCode;
 
@@ -26,7 +27,28 @@ fn main() -> ExitCode {
             println!("qybit {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
+        Ok(Command::Decode { input, out }) => report(diag::decode(&input, &out)),
+        Ok(Command::Tone {
+            out,
+            rate,
+            bits,
+            seconds,
+            freq,
+        }) => report(diag::tone(&out, rate, bits, seconds, freq)),
         Ok(cmd) => run(cmd),
+    }
+}
+
+fn report(r: Result<String, String>) -> ExitCode {
+    match r {
+        Ok(m) => {
+            println!("{m}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("错误：{e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -125,7 +147,9 @@ fn run(cmd: Command) -> ExitCode {
                 }
             }
         }
-        Command::Help | Command::Version => ExitCode::SUCCESS,
+        Command::Help | Command::Version | Command::Decode { .. } | Command::Tone { .. } => {
+            ExitCode::SUCCESS
+        }
     }
 }
 
@@ -212,7 +236,9 @@ fn run(cmd: Command) -> ExitCode {
                 }
             }
         }
-        Command::Help | Command::Version => ExitCode::SUCCESS,
+        Command::Help | Command::Version | Command::Decode { .. } | Command::Tone { .. } => {
+            ExitCode::SUCCESS
+        }
     }
 }
 
