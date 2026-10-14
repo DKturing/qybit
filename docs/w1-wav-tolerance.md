@@ -203,6 +203,13 @@ cargo +nightly fuzz run wav_decode corpus/wav_decode_w1b -- \
     - 记录：初始语料为全部 WAV/FLAC 夹具 × 3 种前缀，`cargo +nightly fuzz run auto_decode -- -max_total_time=600 -max_len=1048576 -seed=1`，开发机（4 核），600 秒、233419 次执行，0 崩溃。
     - 首轮发现的问题出在测试工具：给 v2.3 标签加了只在 v2.4 定义的标签尾。已改为只给 v2.4 加标签尾，解码器未改。
 
+**修正后的真机试听**（同一台 LG UltraFine，WASAPI 独占，2026-10-14，用户报告）：
+
+- 换用普通 PCM WAV（44.1 kHz / 16 位立体声）：独占打开 44.1 kHz / 16 位，448 帧缓冲；播放约 126 秒后用户按 Ctrl+C 中断。期间欠载 0 次，队列最低 557 ms，用户听感干净。
+- b.flac（开头为 ID3v2.3 标签）：拉取 `43fffd7` 并重新编译后可以播放，用户听感干净。
+- 这些是人耳试听，没有回录证据，不证明设备端 bit-perfect。
+- 系统音量滑块不起作用，符合预期：独占模式绕过 Windows 混音器，软件增益恒为 1。音量需由设备端控制（README “使用（Windows）”）。
+
 ## 7. 范围外
 
 - RF64 / BW64（超过 4 GB 的录音与广播文件）：另列；
