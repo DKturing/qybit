@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | F1 | 多声道（[任务卡](F1.md)，插在 M3 T2 之前；软件部分已完成、真实多声道设备未运行，见 [docs/f1-multichannel.md](../docs/f1-multichannel.md)） | FLAC 1–8 声道（RFC 9639 声道分配）、WAV EXTENSIBLE 声道掩码；声道顺序精确映射到 WASAPI 声道掩码、ALSA 声道映射（chmap）；设备不支持该布局时明确拒绝 | 不改变样本 |
 | W1 | 真实世界 WAV 的容错与 8 位 PCM（[任务卡](W1.md)，用户 2026-10-14 加入，排在 F2 之前；已完成，见 [docs/w1-wav-tolerance.md](../docs/w1-wav-tolerance.md)） | 流式占位长度、RIFF 长度写错、不完整尾帧等意图明确的情形可播放并报告修正；有歧义的照旧拒绝；8 位无符号 PCM 精确转为有符号 | 不改变样本 |
-| F2 | AIFF / AIFF-C（未压缩）（[任务卡](F2.md)，草案待审定） | 大端 PCM，容器与有效位处理同 WAV；AIFF-C 只支持 `NONE`/`sowt` 等未压缩类型 | 不改变样本 |
+| F2 | AIFF / AIFF-C（未压缩）（[任务卡](F2.md)，已审定，待实施；规范出处见 [docs/specs.md](../docs/specs.md)） | 大端 PCM，容器与有效位处理同 WAV；AIFF-C 只支持 `NONE`/`sowt` 等未压缩类型 | 不改变样本 |
 | F3 | 浮点 PCM（WAV/AIFF-C 的 32/64 位浮点） | 设备接受相同浮点格式时原样输出；不接受时严格路径拒绝。是否提供“明确开启、报告中标注样本已改变”的转换模式，另行由用户决定 | 原样输出时不改变 |
 | F4 | ALAC | 自行实现 Apple Lossless 解码（MP4/M4A 容器的必要子集） | 不改变样本 |
 | F5 | WavPack（无损模式） | 自行实现；混合/有损模式不在范围内 | 不改变样本 |

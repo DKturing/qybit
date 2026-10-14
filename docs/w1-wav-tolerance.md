@@ -190,7 +190,7 @@ cargo +nightly fuzz run wav_decode corpus/wav_decode_w1b -- \
 - 依据：
   - ID3v2.4.0 结构规范 §3.1：10 字节标签头为 `ID3`、主/次版本（不为 `FF`）、标志、4 字节 syncsafe 长度（每字节最高位为 0），长度不含标签头；v2.4 标志位 4 置位时另有 10 字节标签尾。
   - 参考解码器 libFLAC `stream_decoder.c` 的 `skip_id3v2_tag_` 同样在找 `fLaC` 前跳过 ID3v2；ffmpeg 的格式探测也是如此。
-  - RFC 9639（正文取自 IETF 工作组仓库 `ietf-wg-cellar/flac-specification` 清理前的最后版本 `c311d21`，即 RFC 的源文本）§“Format principles”：FLAC 码流以 `fLaC` 标记开头。RFC 不涉及文件前置的 ID3 标签，因此跳过标签是文件层的兼容处理；交给 FLAC 解码器的码流仍以 `fLaC` 开头，码流解析不变。
+  - RFC 9639 §6（Format Layout Overview）：FLAC 码流以 `fLaC`（0x664C6143）标记开头；版本见 [specs.md](specs.md)。RFC 不涉及文件前置的 ID3 标签，因此跳过标签是文件层的兼容处理；交给 FLAC 解码器的码流仍以 `fLaC` 开头，码流解析不变。
 - 拒绝：
   - 标签头不合规则（版本字节为 `FF`、长度字节最高位为 1）时，按无法识别拒绝并说明；
   - 声明长度超出文件时按截断（Truncated）拒绝；
