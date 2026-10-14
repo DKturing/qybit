@@ -351,9 +351,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "qy-codec-aiff"
+version = "0.0.0"
+dependencies = [
+ "qy-core",
+]
+
+[[package]]
 name = "qy-codec-auto"
 version = "0.0.0"
 dependencies = [
+ "qy-codec-aiff",
  "qy-codec-wav",
  "qy-core",
 ]

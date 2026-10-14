@@ -349,6 +349,9 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 if let Some(w) = d.wav_detail() {
                     details.push(format!("WAV 错误明细：{w}"));
                 }
+                if let Some(a) = d.aiff_detail() {
+                    details.push(format!("AIFF 错误明细：{a}"));
+                }
                 if let Some(u) = d.unrecognized() {
                     details.push(format!("无法识别的文件：{u}"));
                 }
@@ -797,6 +800,56 @@ mod tests {
         let mut b = backend(&ALL, FakeDevice::Packet);
         let r = play(&mut b, &mut res, &files[..1]);
         assert!(r.finished && r.software_path_intact());
+    }
+
+    /// F2：AIFF 曲目的设备字节等于独立参考（大端样本按设备格式 pack 为小端）；规范之外的
+    /// AIFF-C 类型按“扩展”拒绝，实时输出写明明细。
+    #[test]
+    fn aiff_plays_bit_exact_and_reports_rejections() {
+        use crate::testing::aiff_fixture_path;
+        let files = [
+            aiff_fixture_path("aiff_16_stereo_44k.aiff"),
+            aiff_fixture_path("ext_sowt.aiff"),
+        ];
+        let mut b = backend(&ALL, FakeDevice::Packet);
+        let Ok(mut res) = HostResources::new() else {
+            panic!("res");
+        };
+        let mut lines = Vec::new();
+        let r = play_with(
+            &mut b,
+            &mut res,
+            &mut Files(&files),
+            PlayControl {
+                on_line: &mut |l: &str| lines.push(l.to_string()),
+                stop: None,
+            },
+        );
+        let all = lines.join("\n");
+        assert!(!r.finished, "{all}");
+        assert!(
+            all.contains("AIFF 错误明细：AIFF-C 规范之外的扩展") && all.contains("'sowt'"),
+            "{all}"
+        );
+        // 独立参考：.expect 中的样本按 16 位小端写出。
+        let text = std::fs::read_to_string(
+            aiff_fixture_path("aiff_16_stereo_44k.aiff").with_extension("expect"),
+        )
+        .unwrap_or_default();
+        let want: Vec<u8> = text
+            .lines()
+            .skip(4)
+            .flat_map(|l| {
+                l.split(' ')
+                    .filter_map(|x| x.parse::<i16>().ok())
+                    .flat_map(i16::to_le_bytes)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(want.len(), 600 * 4);
+        let outs = b.outputs();
+        assert_eq!(outs.len(), 1);
+        check_output(&outs[0], &want);
     }
 
     /// 文件开头的 ID3v2 标签：跳过后设备字节与无标签文件相同，实时输出写明跳过的字节数。

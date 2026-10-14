@@ -7,6 +7,7 @@
 //! 用法：`cargo run -p qy-gen-fixtures -- [输出目录]`（默认 `crates/qy-codec-wav/tests/fixtures`）。
 //! 固定种子，重复运行产生逐字节相同的输出（需要 PATH 中有 ffmpeg，版本记录在文档）。
 
+mod aiff;
 mod flac;
 
 use std::fmt::Write as _;
@@ -1426,7 +1427,7 @@ fn expect_text(c: &Case) -> String {
 }
 
 fn main() -> Result<()> {
-    // 用法：qy-gen-fixtures [wav|flac|all] [输出目录]
+    // 用法：qy-gen-fixtures [wav|flac|aiff|all] [输出目录]
     let args: Vec<String> = std::env::args().skip(1).collect();
     let what = args.first().map_or("all", String::as_str);
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates");
@@ -1437,11 +1438,15 @@ fn main() -> Result<()> {
     match what {
         "wav" => wav_main(dir("qy-codec-wav/tests/fixtures")),
         "flac" => flac::generate(&dir("qy-codec-flac/tests/fixtures")),
+        "aiff" => aiff::generate(&dir("qy-codec-aiff/tests/fixtures")),
         "all" => {
             wav_main(root.join("qy-codec-wav/tests/fixtures"))?;
-            flac::generate(&root.join("qy-codec-flac/tests/fixtures"))
+            flac::generate(&root.join("qy-codec-flac/tests/fixtures"))?;
+            aiff::generate(&root.join("qy-codec-aiff/tests/fixtures"))
         }
-        x => Err(format!("未知参数 {x}；用法：qy-gen-fixtures [wav|flac|all] [输出目录]").into()),
+        x => Err(
+            format!("未知参数 {x}；用法：qy-gen-fixtures [wav|flac|aiff|all] [输出目录]").into(),
+        ),
     }
 }
 

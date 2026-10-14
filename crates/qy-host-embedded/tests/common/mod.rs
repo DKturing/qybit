@@ -454,6 +454,7 @@ pub fn setup_with<S: Storage>(
     let budget = PROFILE.budget();
     let decoder = match AutoDecoder::empty()
         .with_wav(leak(PCM_WORK_SAMPLES))
+        .and_then(AutoDecoder::with_aiff)
         .and_then(|d| {
             d.with_flac(
                 flac,

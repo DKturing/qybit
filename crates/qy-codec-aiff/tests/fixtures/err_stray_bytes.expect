@@ -1,0 +1,5 @@
+result malformed
+format 44100 2 16
+detail violation:stray-bytes:4
+samples 2
+0 0

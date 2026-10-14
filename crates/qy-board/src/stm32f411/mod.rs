@@ -515,7 +515,11 @@ fn main() -> ! {
             cortex_m::asm::wfi();
         }
     };
-    let Ok(decoder) = AutoDecoder::empty().with_wav(wav_pcm) else {
+    // WAV 与 AIFF 共用流式工作区（F2）。
+    let Ok(decoder) = AutoDecoder::empty()
+        .with_wav(wav_pcm)
+        .and_then(AutoDecoder::with_aiff)
+    else {
         loop {
             cortex_m::asm::wfi();
         }

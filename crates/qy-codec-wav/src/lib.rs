@@ -341,6 +341,12 @@ impl WavDecoder {
         self.pcm.len()
     }
 
+    /// 交还 PCM 工作区（所有权转移，不复制）。`qy-codec-auto` 用它让 WAV 与 AIFF 解码器共用
+    /// 同一块工作区（F2）。
+    pub fn into_pcm(self) -> &'static mut [i32] {
+        self.pcm
+    }
+
     /// 最近一次拒绝的明细（新曲目 `reset` 后清除）。
     pub fn last_detail(&self) -> Option<WavDetail> {
         self.detail

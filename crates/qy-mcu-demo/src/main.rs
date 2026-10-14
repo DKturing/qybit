@@ -352,8 +352,10 @@ enum SetupError {
 }
 
 fn setup() -> Result<DemoPlayer, SetupError> {
+    // WAV 与 AIFF 共用流式工作区（F2）。
     let wav = AutoDecoder::empty()
         .with_wav(WAV_PCM.try_take().ok_or(SetupError::Buffers)?)
+        .and_then(AutoDecoder::with_aiff)
         .map_err(|_| SetupError::Buffers)?;
     #[cfg(feature = "full")]
     let wav = wav

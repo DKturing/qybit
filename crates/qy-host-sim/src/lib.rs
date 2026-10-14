@@ -67,7 +67,12 @@ impl SimHost {
 
     /// 按给定 FLAC 容量一次性分配；每个实例拥有独立、不重叠的工作区。
     pub fn with_capacity(cap: Capacity) -> Result<Self, HostError> {
-        Self::build(Some(cap), SIM_CAPABILITIES, SIM_CAPABILITIES.queue_bytes)
+        Self::build(
+            Some(cap),
+            true,
+            SIM_CAPABILITIES,
+            SIM_CAPABILITIES.queue_bytes,
+        )
     }
 
     /// 按配置档分配：FLAC 容量（未启用时不加入 FLAC 解码器）、能力声明与队列大小取自配置档；
@@ -75,6 +80,7 @@ impl SimHost {
     pub fn with_profile(profile: &Profile) -> Result<Self, HostError> {
         Self::build(
             profile.flac_capacity(),
+            profile.aiff_enabled(),
             profile.caps,
             profile.queue_storage_bytes(),
         )
@@ -82,6 +88,7 @@ impl SimHost {
 
     fn build(
         cap: Option<Capacity>,
+        aiff: bool,
         caps: Capabilities,
         queue_bytes: usize,
     ) -> Result<Self, HostError> {
@@ -101,6 +108,12 @@ impl SimHost {
         let decoder = AutoDecoder::empty()
             .with_wav(wav_pcm)
             .map_err(HostError::Decoder)?;
+        // WAV 与 AIFF 共用流式工作区（F2）。
+        let decoder = if aiff {
+            decoder.with_aiff().map_err(HostError::Decoder)?
+        } else {
+            decoder
+        };
         let decoder = match cap {
             Some(c) => decoder
                 .with_flac(c, workspace, flac_pcm)

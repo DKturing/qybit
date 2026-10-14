@@ -1,0 +1,4 @@
+result malformed
+format 44100 2 16
+detail violation:chunk-size:zzzz:2147483648
+samples 0

@@ -4,7 +4,8 @@
 //! - 设备帧队列：预算采样率 × 预填时长 × 声道 × 容器字节（[`queue_bytes`]），静态队列再加
 //!   [`BIP_MARGIN_FRAMES`] 帧。这是 RAM 的最大头，WAV 与 FLAC 共用；
 //! - 输入窗口：FLAC 不压缩帧上界（[`Capacity::for_limits`]），不小于核心最小窗口；
-//! - WAV PCM 工作区：固定 [`PCM_WORK_SAMPLES`] 个 `i32`（流式解码，大小与格式无关）；
+//! - 流式 PCM 工作区：固定 [`PCM_WORK_SAMPLES`] 个 `i32`（流式解码，大小与格式无关），WAV 与 AIFF
+//!   共用一块（F2），启用 AIFF 不增加 RAM；
 //! - FLAC 工作区（`i64`）与 PCM（`i32`）：块大小 × 声道；
 //! - pack 暂存区：只有 `rtrb` 队列需要（静态队列直接 pack 进队列存储）。
 //!
@@ -40,6 +41,8 @@ pub struct Profile {
     pub queue: QueueKind,
     /// 是否启用 WAV（需要 `wav` 特性）。
     pub wav: bool,
+    /// 是否启用 AIFF / AIFF-C（需要 `aiff` 特性；与 WAV 共用流式工作区）。
+    pub aiff: bool,
     /// FLAC 容量；`None` 表示不启用 FLAC。
     #[cfg(feature = "flac")]
     pub flac: Option<Capacity>,
@@ -49,6 +52,7 @@ pub struct Profile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     pub input_window: usize,
+    /// 流式 PCM 工作区（WAV 与 AIFF 共用）。
     pub wav_pcm: usize,
     pub flac_workspace: usize,
     pub flac_pcm: usize,
@@ -92,6 +96,7 @@ impl Profile {
             container_bytes,
             queue,
             wav: true,
+            aiff: true,
             #[cfg(feature = "flac")]
             flac: None,
         }
@@ -107,6 +112,12 @@ impl Profile {
     /// 启用/停用 WAV。
     pub const fn with_wav(mut self, on: bool) -> Self {
         self.wav = on;
+        self
+    }
+
+    /// 启用/停用 AIFF。
+    pub const fn with_aiff(mut self, on: bool) -> Self {
+        self.aiff = on;
         self
     }
 
@@ -126,6 +137,11 @@ impl Profile {
     /// 本构建是否实际启用 WAV。
     pub const fn wav_enabled(&self) -> bool {
         cfg!(feature = "wav") && self.wav
+    }
+
+    /// 本构建是否实际启用 AIFF。
+    pub const fn aiff_enabled(&self) -> bool {
+        cfg!(feature = "aiff") && self.aiff
     }
 
     /// 队列存储字节数：数据预算；静态队列另加 [`BIP_MARGIN_FRAMES`] 帧。
@@ -151,7 +167,7 @@ impl Profile {
             ws = c.workspace_len() * 8;
             pcm = c.pcm_len() * 4;
         }
-        let wav_pcm = if self.wav_enabled() {
+        let wav_pcm = if self.wav_enabled() || self.aiff_enabled() {
             PCM_WORK_SAMPLES * 4
         } else {
             0
@@ -182,7 +198,7 @@ pub const DESKTOP: Profile =
         .with_flac(Capacity::DESKTOP_MULTICHANNEL)
         .with_max_channels(qy_core::MAX_CHANNELS);
 
-/// 嵌入式完整版：WAV + FLAC，≤ 96 kHz、双声道、≤ 24 位（I²S 32 位槽位），
+/// 嵌入式完整版：WAV + AIFF + FLAC，≤ 96 kHz、双声道、≤ 24 位（I²S 32 位槽位），
 /// FLAC 块 ≤ 4608（[`Capacity::MCU`]），预填 250 ms（暂定），静态队列。
 #[cfg(feature = "flac")]
 pub const EMBEDDED_FULL: Profile = Profile::new(
@@ -197,8 +213,8 @@ pub const EMBEDDED_FULL: Profile = Profile::new(
 )
 .with_flac(Capacity::MCU);
 
-/// 嵌入式精简版：只有 WAV，≤ 48 kHz、双声道、16 位，预填 250 ms（暂定），静态队列。
-/// 只开 `wav` 特性即可构建（不链接 FLAC）。
+/// 嵌入式精简版：WAV + AIFF（共用流式工作区，不链接 FLAC），≤ 48 kHz、双声道、16 位，预填 250 ms
+/// （暂定），静态队列。只开 `wav`（或再加 `aiff`）特性即可构建。
 pub const EMBEDDED_LITE: Profile = Profile::new(
     "Embedded Lite",
     48_000,

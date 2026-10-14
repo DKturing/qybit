@@ -135,3 +135,10 @@ pub fn place(samples: &[i32], n: u8, c: u8) -> Vec<u8> {
         })
         .collect()
 }
+
+/// `qy-codec-aiff` 的夹具路径（F2）。
+pub fn aiff_fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../qy-codec-aiff/tests/fixtures")
+        .join(name)
+}

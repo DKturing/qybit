@@ -20,7 +20,7 @@ hold = []
 
 [dependencies]
 qy-core = { path = "../qy-core" }
-qy-codec-auto = { path = "../qy-codec-auto", default-features = false, features = ["wav"] }
+qy-codec-auto = { path = "../qy-codec-auto", default-features = false, features = ["wav", "aiff"] }
 qy-codec-flac = { path = "../qy-codec-flac", optional = true }
 qy-pcm-format = { path = "../qy-pcm-format", features = ["static-queue"] }
 qy-host-embedded = { path = "../qy-host-embedded" }

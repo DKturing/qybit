@@ -1,9 +1,13 @@
 //! 按文件头选择自有解码器（M1 T3；M3 T1 起各格式可按需链接）。
 //!
-//! `#![no_std]`、无 alloc、静态分发：持有 [`WavDecoder`] 与/或 [`FlacDecoder`]，各自使用
-//! 宿主启动时提供的独立工作区；每首曲目开始时（`reset` 之后）读取前 4 字节：
-//! `RIFF`/`RIFX`/`RF64`/`BW64` 交给 WAV 解码器（后者再区分支持与否），`fLaC` 交给 FLAC
-//! 解码器，其他返回 `Unsupported`。不依据文件扩展名。
+//! `#![no_std]`、无 alloc、静态分发：持有 WAV、AIFF（F2）与/或 FLAC 解码器；每首曲目开始时
+//! （`reset` 之后）读取文件头：`RIFF`/`RIFX`/`RF64`/`BW64` 交给 WAV 解码器（后者再区分支持与否），
+//! `FORM` + 形式类型 `AIFF`/`AIFC`（共 12 字节）交给 AIFF 解码器，`fLaC` 交给 FLAC 解码器，其他返回
+//! `Unsupported`。不依据文件扩展名。
+//!
+//! 工作区：FLAC 使用独立的工作区；WAV 与 AIFF 都是流式 PCM 容器，共用一块 PCM 工作区，同一时刻只由
+//! 其中一个解码器持有。识别出另一种容器时把工作区移交给它（所有权转移，不复制、不重新分配，
+//! 不使用 `unsafe`），因此启用 AIFF 不增加 RAM。
 //!
 //! 文件开头的 ID3v2 标签（常见于被标签软件写过的 FLAC）先按标签头声明的长度跳过，再识别其后的
 //! 容器。依据：ID3v2.4.0 结构规范 §3.1（10 字节标签头：`ID3`、主/次版本各 1 字节且不为 `FF`、
@@ -12,18 +16,22 @@
 //! ffmpeg 的格式探测同样在识别前跳过 ID3v2。可连续多个标签；标签头不合规则时按无法识别拒绝。
 //! 跳过的是元数据，不是音频，样本不受影响；跳过的字节数见 [`AutoDecoder::skipped_tag_bytes`]。
 //!
-//! 特性 `wav`、`flac`（默认都开）决定链接哪些解码器；只开 `wav` 时不链接 FLAC 代码。
+//! 特性 `wav`、`flac`、`aiff`（默认都开）决定链接哪些解码器；只开 `wav` 时不链接 FLAC 与 AIFF 代码。
 //! 已链接但宿主未提供工作区的格式，与未链接的格式一样按 `Unsupported` 拒绝（[`Codec::Disabled`]）。
 //! 各配置档的资源预算见 [`profile`]。
 #![no_std]
 
 pub mod profile;
 
+#[cfg(feature = "aiff")]
+use qy_codec_aiff::{AiffDecoder, AiffDetail};
 #[cfg(feature = "flac")]
 use qy_codec_flac::{Capacity, FlacDecoder, FlacError, InitError};
 #[cfg(feature = "wav")]
 use qy_codec_wav::WavDecoder;
-use qy_core::{DecodeError, Decoder, INPUT_WINDOW_BYTES, Progress, SourceFormat, Status};
+use qy_core::{
+    DecodeError, Decoder, INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES, Progress, SourceFormat, Status,
+};
 
 /// 当前曲目使用的解码器。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +40,8 @@ pub enum Codec {
     Unknown,
     Wav,
     Flac,
+    /// AIFF / AIFF-C（F2）。
+    Aiff,
     /// 文件头不是支持的容器。
     Unrecognized,
     /// 可识别的容器，但本构建未链接或宿主未启用该解码器。
@@ -45,14 +55,72 @@ pub enum AutoInitError {
     Wav(DecodeError),
     #[cfg(feature = "flac")]
     Flac(InitError),
+    /// 流式 PCM 工作区不足 [`PCM_WORK_SAMPLES`]。
+    Stream(DecodeError),
+    /// 启用 AIFF 之前没有提供流式 PCM 工作区（[`AutoDecoder::with_wav`] 或
+    /// [`AutoDecoder::with_stream_pcm`]）。
+    NoStreamBuffer,
+}
+
+/// 流式 PCM 容器（WAV、AIFF）共用的工作区，同一时刻只由一个解码器持有。
+enum Stream {
+    /// 未提供工作区。
+    None,
+    /// 工作区空闲。
+    Idle(&'static mut [i32]),
+    #[cfg(feature = "wav")]
+    Wav(WavDecoder),
+    #[cfg(feature = "aiff")]
+    Aiff(AiffDecoder),
+}
+
+impl Stream {
+    /// 取回工作区（持有它的解码器随之释放）。
+    #[cfg(any(feature = "wav", feature = "aiff"))]
+    fn take_pcm(&mut self) -> Option<&'static mut [i32]> {
+        match core::mem::replace(self, Stream::None) {
+            Stream::None => None,
+            Stream::Idle(p) => Some(p),
+            #[cfg(feature = "wav")]
+            Stream::Wav(d) => Some(d.into_pcm()),
+            #[cfg(feature = "aiff")]
+            Stream::Aiff(d) => Some(d.into_pcm()),
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        match self {
+            Stream::None => 0,
+            Stream::Idle(p) => p.len(),
+            #[cfg(feature = "wav")]
+            Stream::Wav(d) => d.capacity_samples(),
+            #[cfg(feature = "aiff")]
+            Stream::Aiff(d) => d.capacity_samples(),
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            #[cfg(feature = "wav")]
+            Stream::Wav(d) => d.reset(),
+            #[cfg(feature = "aiff")]
+            Stream::Aiff(d) => d.reset(),
+            _ => {}
+        }
+    }
 }
 
 pub struct AutoDecoder {
-    #[cfg(feature = "wav")]
-    wav: Option<WavDecoder>,
+    stream: Stream,
+    /// 启用了 WAV（需要 `wav` 特性与流式工作区）。
+    wav_on: bool,
+    /// 启用了 AIFF（需要 `aiff` 特性与流式工作区）。
+    aiff_on: bool,
     #[cfg(feature = "flac")]
     flac: Option<FlacDecoder>,
     codec: Codec,
+    /// `FORM` 文件头的形式类型（无法识别时报告用）。
+    form_type: Option<[u8; 4]>,
     /// 当前曲目文件头的前 4 字节（识别后记录，用于说明无法识别的原因）；跳过 ID3v2 标签时为
     /// 标签之后的 4 字节。
     magic: [u8; 4],
@@ -86,6 +154,8 @@ pub struct UnrecognizedHeader {
     pub magic: [u8; 4],
     /// 之前跳过的 ID3v2 标签字节数。
     pub skipped_tag: u64,
+    /// `FORM` 文件头的形式类型（不是 `AIFF`/`AIFC` 的其他 IFF 格式）。
+    pub form_type: Option<[u8; 4]>,
 }
 
 impl core::fmt::Display for UnrecognizedHeader {
@@ -94,14 +164,14 @@ impl core::fmt::Display for UnrecognizedHeader {
         let guess = match &m {
             [b'I', b'D', b'3', _] => "ID3v2 标签头不合规则（版本或 syncsafe 长度字节无效）",
             b"OggS" => "Ogg 容器（Ogg FLAC、Vorbis、Opus 等），不支持",
-            b"FORM" => "IFF/AIFF 容器，AIFF 在格式路线 F2 中，尚未实现",
+            b"FORM" => "IFF 容器，但形式类型不是 AIFF / AIFF-C",
             b"wvpk" => "WavPack，在格式路线 F5 中，尚未实现",
             b"MAC " => "Monkey's Audio（APE），在格式路线 F6 中，尚未实现",
             b"DSD " | b"FRM8" => "DSD（DSF/DFF），尚未实现",
             [_, _, _, _] if m[0] == 0xFF && m[1] & 0xE0 == 0xE0 => {
                 "MPEG 音频帧（MP3 等有损格式），不在本程序范围内"
             }
-            _ => "不是 RIFF/WAVE 或 FLAC",
+            _ => "不是 RIFF/WAVE、AIFF 或 FLAC",
         };
         if self.skipped_tag > 0 {
             write!(f, "跳过开头 {} 字节的 ID3v2 标签后，", self.skipped_tag)?;
@@ -110,7 +180,15 @@ impl core::fmt::Display for UnrecognizedHeader {
             f,
             "文件头前 4 字节为 {:02X} {:02X} {:02X} {:02X}：{guess}",
             m[0], m[1], m[2], m[3]
-        )
+        )?;
+        if let Some(t) = self.form_type {
+            write!(
+                f,
+                "（形式类型 {:02X} {:02X} {:02X} {:02X}）",
+                t[0], t[1], t[2], t[3]
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -121,21 +199,25 @@ impl Default for AutoDecoder {
 }
 
 impl AutoDecoder {
-    /// 不含任何解码器；用 [`AutoDecoder::with_wav`] / [`AutoDecoder::with_flac`] 加入。
+    /// 不含任何解码器；用 [`AutoDecoder::with_wav`] / [`AutoDecoder::with_aiff`] /
+    /// [`AutoDecoder::with_flac`] 加入。
     pub const fn empty() -> Self {
         Self {
-            #[cfg(feature = "wav")]
-            wav: None,
+            stream: Stream::None,
+            wav_on: false,
+            aiff_on: false,
             #[cfg(feature = "flac")]
             flac: None,
             codec: Codec::Unknown,
+            form_type: None,
             magic: [0; 4],
             tag_left: 0,
             tag_bytes: 0,
         }
     }
 
-    /// WAV 与 FLAC 都启用：`wav_pcm` 为 WAV 工作区；FLAC 工作区与 PCM 按 `flac_cap` 检查。
+    /// 启用全部已链接的解码器：`wav_pcm` 为 WAV 与 AIFF 共用的流式 PCM 工作区；FLAC 工作区与 PCM
+    /// 按 `flac_cap` 检查。
     #[cfg(all(feature = "wav", feature = "flac"))]
     pub fn new(
         wav_pcm: &'static mut [i32],
@@ -143,15 +225,36 @@ impl AutoDecoder {
         flac_workspace: &'static mut [i64],
         flac_pcm: &'static mut [i32],
     ) -> Result<Self, AutoInitError> {
-        Self::empty()
-            .with_wav(wav_pcm)?
-            .with_flac(flac_cap, flac_workspace, flac_pcm)
+        let d = Self::empty().with_wav(wav_pcm)?;
+        #[cfg(feature = "aiff")]
+        let d = d.with_aiff()?;
+        d.with_flac(flac_cap, flac_workspace, flac_pcm)
     }
 
-    /// 启用 WAV 解码器（工作区不少于 `PCM_WORK_SAMPLES`）。
+    /// 提供流式 PCM 工作区（不少于 [`PCM_WORK_SAMPLES`]），由 WAV 与 AIFF 共用。
+    pub fn with_stream_pcm(mut self, pcm: &'static mut [i32]) -> Result<Self, AutoInitError> {
+        if pcm.len() < PCM_WORK_SAMPLES {
+            return Err(AutoInitError::Stream(DecodeError::CapacityExceeded));
+        }
+        self.stream = Stream::Idle(pcm);
+        Ok(self)
+    }
+
+    /// 启用 WAV 解码器；`pcm` 为流式 PCM 工作区（不少于 `PCM_WORK_SAMPLES`，与 AIFF 共用）。
     #[cfg(feature = "wav")]
     pub fn with_wav(mut self, pcm: &'static mut [i32]) -> Result<Self, AutoInitError> {
-        self.wav = Some(WavDecoder::new(pcm).map_err(AutoInitError::Wav)?);
+        self.stream = Stream::Wav(WavDecoder::new(pcm).map_err(AutoInitError::Wav)?);
+        self.wav_on = true;
+        Ok(self)
+    }
+
+    /// 启用 AIFF 解码器，使用已提供的流式 PCM 工作区（与 WAV 共用，不另占 RAM）。
+    #[cfg(feature = "aiff")]
+    pub fn with_aiff(mut self) -> Result<Self, AutoInitError> {
+        if matches!(self.stream, Stream::None) {
+            return Err(AutoInitError::NoStreamBuffer);
+        }
+        self.aiff_on = true;
         Ok(self)
     }
 
@@ -192,10 +295,24 @@ impl AutoDecoder {
     /// WAV 拒绝明细（当前曲目为 WAV 且有明细时，如未定义的声道布局）。
     #[cfg(feature = "wav")]
     pub fn wav_detail(&self) -> Option<qy_codec_wav::WavDetail> {
-        match (self.codec, &self.wav) {
-            (Codec::Wav, Some(w)) => w.last_detail(),
+        match (self.codec, &self.stream) {
+            (Codec::Wav, Stream::Wav(w)) => w.last_detail(),
             _ => None,
         }
+    }
+
+    /// AIFF 拒绝明细（当前曲目为 AIFF 且有明细时）。
+    #[cfg(feature = "aiff")]
+    pub fn aiff_detail(&self) -> Option<AiffDetail> {
+        match (self.codec, &self.stream) {
+            (Codec::Aiff, Stream::Aiff(a)) => a.last_detail(),
+            _ => None,
+        }
+    }
+
+    /// 流式 PCM 工作区（WAV / AIFF 共用）的容量，样本数；未提供时为 0。
+    pub fn stream_capacity(&self) -> usize {
+        self.stream.capacity()
     }
 
     #[cfg(feature = "flac")]
@@ -203,9 +320,22 @@ impl AutoDecoder {
         self.flac.as_ref()
     }
 
+    /// 当前持有流式工作区的 WAV 解码器（最近一首流式曲目为 AIFF 时为 `None`）。
     #[cfg(feature = "wav")]
     pub fn wav(&self) -> Option<&WavDecoder> {
-        self.wav.as_ref()
+        match &self.stream {
+            Stream::Wav(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// 当前持有流式工作区的 AIFF 解码器。
+    #[cfg(feature = "aiff")]
+    pub fn aiff(&self) -> Option<&AiffDecoder> {
+        match &self.stream {
+            Stream::Aiff(d) => Some(d),
+            _ => None,
+        }
     }
 
     /// 当前曲目的文件头无法识别时，给出前 4 字节与推断的类型。
@@ -213,6 +343,7 @@ impl AutoDecoder {
         (self.codec == Codec::Unrecognized).then_some(UnrecognizedHeader {
             magic: self.magic,
             skipped_tag: self.tag_bytes,
+            form_type: self.form_type,
         })
     }
 
@@ -250,7 +381,14 @@ impl AutoDecoder {
             }
             let rest = &input[pos..];
             let tag = rest.starts_with(b"ID3") || (rest.len() < 3 && b"ID3".starts_with(rest));
-            let need = if tag { ID3_HEADER } else { 4 };
+            // IFF：形式类型在第 8–11 字节，读到 12 字节才能区分 AIFF / AIFF-C 与其他 IFF 格式。
+            let need = if tag {
+                ID3_HEADER
+            } else if rest.starts_with(b"FORM") {
+                12
+            } else {
+                4
+            };
             if rest.len() < need {
                 return Err(if eof {
                     // 不足 4 字节的文件（或残缺的标签头）：无法识别，也不是完整的 WAV/FLAC。
@@ -271,20 +409,27 @@ impl AutoDecoder {
                 }
             }
             self.magic = [rest[0], rest[1], rest[2], rest[3]];
-            self.codec = self.sniff(&rest[..4]);
+            self.codec = self.sniff(&rest[..need]);
             return Ok(pos);
         }
     }
 
-    fn sniff(&self, magic: &[u8]) -> Codec {
-        match magic {
+    fn sniff(&mut self, head: &[u8]) -> Codec {
+        match &head[..4] {
             b"RIFF" | b"RIFX" | b"RF64" | b"BW64" => {
-                #[cfg(feature = "wav")]
-                if self.wav.is_some() {
+                if cfg!(feature = "wav") && self.wav_on {
                     return Codec::Wav;
                 }
                 Codec::Disabled
             }
+            b"FORM" => match &head[8..12] {
+                b"AIFF" | b"AIFC" if cfg!(feature = "aiff") && self.aiff_on => Codec::Aiff,
+                b"AIFF" | b"AIFC" => Codec::Disabled,
+                t => {
+                    self.form_type = Some([t[0], t[1], t[2], t[3]]);
+                    Codec::Unrecognized
+                }
+            },
             b"fLaC" => {
                 #[cfg(feature = "flac")]
                 if self.flac.is_some() {
@@ -295,6 +440,25 @@ impl AutoDecoder {
             _ => Codec::Unrecognized,
         }
     }
+
+    /// 让当前曲目的流式解码器持有共用工作区：识别出的容器与上一首不同时移交工作区。
+    fn activate(&mut self) -> Result<(), DecodeError> {
+        match self.codec {
+            #[cfg(feature = "wav")]
+            Codec::Wav if !matches!(self.stream, Stream::Wav(_)) => {
+                let pcm = self.stream.take_pcm().ok_or(DecodeError::Unsupported)?;
+                // 工作区已在启用时核对过容量，这里不会失败。
+                self.stream = Stream::Wav(WavDecoder::new(pcm)?);
+            }
+            #[cfg(feature = "aiff")]
+            Codec::Aiff if !matches!(self.stream, Stream::Aiff(_)) => {
+                let pcm = self.stream.take_pcm().ok_or(DecodeError::Unsupported)?;
+                self.stream = Stream::Aiff(AiffDecoder::new(pcm)?);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 /// 按当前曲目的解码器静态分发；未选中或未启用时求值 `$none`。
@@ -302,9 +466,14 @@ macro_rules! dispatch {
     ($self:ident, $d:ident => $e:expr, $none:expr) => {
         match $self.codec {
             #[cfg(feature = "wav")]
-            Codec::Wav => match &mut $self.wav {
-                Some($d) => $e,
-                None => $none,
+            Codec::Wav => match &mut $self.stream {
+                Stream::Wav($d) => $e,
+                _ => $none,
+            },
+            #[cfg(feature = "aiff")]
+            Codec::Aiff => match &mut $self.stream {
+                Stream::Aiff($d) => $e,
+                _ => $none,
             },
             #[cfg(feature = "flac")]
             Codec::Flac => match &mut $self.flac {
@@ -320,9 +489,14 @@ macro_rules! dispatch_ref {
     ($self:ident, $d:ident => $e:expr, $none:expr) => {
         match $self.codec {
             #[cfg(feature = "wav")]
-            Codec::Wav => match &$self.wav {
-                Some($d) => $e,
-                None => $none,
+            Codec::Wav => match &$self.stream {
+                Stream::Wav($d) => $e,
+                _ => $none,
+            },
+            #[cfg(feature = "aiff")]
+            Codec::Aiff => match &$self.stream {
+                Stream::Aiff($d) => $e,
+                _ => $none,
             },
             #[cfg(feature = "flac")]
             Codec::Flac => match &$self.flac {
@@ -347,7 +521,10 @@ impl qy_core::engine::Resources for AutoDecoder {
         dispatch_ref!(self, d => d.repair_count(), 0)
     }
 
-    #[cfg_attr(not(any(feature = "wav", feature = "flac")), allow(unused_variables))]
+    #[cfg_attr(
+        not(any(feature = "wav", feature = "flac", feature = "aiff")),
+        allow(unused_variables)
+    )]
     fn repair(&self, index: usize) -> Option<qy_core::engine::Repair> {
         dispatch_ref!(self, d => d.repair(index), None)
     }
@@ -356,12 +533,10 @@ impl qy_core::engine::Resources for AutoDecoder {
 impl Decoder for AutoDecoder {
     fn reset(&mut self) {
         self.codec = Codec::Unknown;
+        self.form_type = None;
         self.tag_left = 0;
         self.tag_bytes = 0;
-        #[cfg(feature = "wav")]
-        if let Some(d) = &mut self.wav {
-            d.reset();
-        }
+        self.stream.reset();
         #[cfg(feature = "flac")]
         if let Some(d) = &mut self.flac {
             d.reset();
@@ -372,7 +547,10 @@ impl Decoder for AutoDecoder {
         dispatch_ref!(self, d => d.format(), None)
     }
 
-    #[cfg_attr(not(any(feature = "wav", feature = "flac")), allow(unused_variables))]
+    #[cfg_attr(
+        not(any(feature = "wav", feature = "flac", feature = "aiff")),
+        allow(unused_variables)
+    )]
     fn decode(&mut self, input: &[u8], eof: bool) -> Result<Progress, DecodeError> {
         let mut skip = 0;
         if self.codec == Codec::Unknown {
@@ -380,6 +558,7 @@ impl Decoder for AutoDecoder {
                 Ok(pos) => skip = pos,
                 Err(r) => return r,
             }
+            self.activate()?;
         }
         // 识别所在的调用里，标签字节计入消耗量；容器解码器只看到标签之后的输入。
         let input = &input[skip..];
@@ -397,7 +576,10 @@ impl Decoder for AutoDecoder {
         dispatch_ref!(self, d => d.pcm(), &[])
     }
 
-    #[cfg_attr(not(any(feature = "wav", feature = "flac")), allow(unused_variables))]
+    #[cfg_attr(
+        not(any(feature = "wav", feature = "flac", feature = "aiff")),
+        allow(unused_variables)
+    )]
     fn release(&mut self, frames: usize) {
         dispatch!(self, d => d.release(frames), ())
     }

@@ -23,7 +23,7 @@ stm32f411 = ["dep:stm32f4xx-hal", "dep:stm32f4", "dep:cortex-m", "dep:cortex-m-r
 
 [dependencies]
 qy-core = { path = "../qy-core" }
-qy-codec-auto = { path = "../qy-codec-auto", default-features = false, features = ["wav"] }
+qy-codec-auto = { path = "../qy-codec-auto", default-features = false, features = ["wav", "aiff"] }
 qy-pcm-format = { path = "../qy-pcm-format", features = ["static-queue"] }
 qy-host-embedded = { path = "../qy-host-embedded" }
 # 与 qy-host-embedded 同一版本：SD 卡块设备接口。

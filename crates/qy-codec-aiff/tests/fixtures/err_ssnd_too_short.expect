@@ -1,0 +1,4 @@
+result malformed
+format 44100 2 16
+detail violation:ssnd-too-short:28:48
+samples 0
