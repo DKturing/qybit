@@ -39,8 +39,15 @@ fn run(cmd: Command) -> ExitCode {
                 if list.is_empty() {
                     eprintln!("没有活动的输出设备");
                 }
+                let first = list.first().map(|e| e.id.clone());
                 for e in list {
                     println!("{}\t{}", e.id, e.name.unwrap_or_default());
+                }
+                // 端点 ID 含 {…}：PowerShell 中必须加引号，否则被当成脚本块。
+                if let Some(id) = first {
+                    eprintln!(
+                        "\n播放示例（PowerShell 中端点 ID 须加单引号）：\n  qybit --device '{id}' a.wav b.flac"
+                    );
                 }
                 ExitCode::SUCCESS
             }

@@ -86,9 +86,11 @@ QY_MCU_DEMO_LITE_ELF=crates/qy-mcu-demo/target/qy-mcu-demo-lite.elf \
 
 ```
 qybit list-devices                          # 列出端点 ID 与名称
-qybit --device <端点ID> a.wav b.flac        # WASAPI 独占顺序播放（按文件头识别 WAV/FLAC）
-qybit matrix --device <端点ID> --out report # 设备格式矩阵，写出 JSON/CSV
+qybit --device '<端点ID>' a.wav b.flac      # WASAPI 独占顺序播放（按文件头识别 WAV/FLAC）
+qybit matrix --device '<端点ID>' --out report # 设备格式矩阵，写出 JSON/CSV
 ```
+
+端点 ID 形如 `{0.0.0.00000000}.{…}`。在 PowerShell 中必须加单引号，否则 `{…}` 会被当成脚本块，设备 ID 传不进程序；cmd 中不需要引号。
 
 播放时显示源格式、每次独占请求的格式与 HRESULT、MMCSS 结果、有效帧、尾部填充与欠载。设备不支持源格式或独占打开失败时直接报错，不回退共享模式、不转换音频。输出不宣称设备端 bit-perfect。
 
@@ -116,8 +118,9 @@ QYBIT_ALSA_DEVICE=hw:CARD=DAC,DEV=0 cargo test -p qy-host-alsa --test device -- 
 
 ```
 qybit list-devices
-set QYBIT_DEVICE_ID=<端点ID>
-set QYBIT_REPORT_DIR=<报告目录>   (可选，默认 target/qybit-report)
+set QYBIT_DEVICE_ID=<端点ID>                (cmd)
+$env:QYBIT_DEVICE_ID='<端点ID>'             (PowerShell)
+set QYBIT_REPORT_DIR=<报告目录>   (可选，默认 target/qybit-report；PowerShell 为 $env:QYBIT_REPORT_DIR='<目录>')
 cargo test -p qy-host-wasapi --test device -- --ignored --test-threads=1 --nocapture
 ```
 

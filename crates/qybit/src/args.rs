@@ -12,6 +12,8 @@ pub const USAGE: &str = "\
 
 设备：Windows 为 WASAPI 端点 ID（独占模式）；Linux 为 ALSA hw:卡,设备 或 hw:CARD=名称,DEV=n
 （只接受 hw 设备，拒绝 plughw/default/dmix/pipewire/pulse 等会转换或混音的设备）。
+PowerShell 会把未加引号的 {…} 当成脚本块，端点 ID 要加单引号：
+  qybit --device '{0.0.0.00000000}.{…}' a.wav
 
 退出码：0 完整播放；2 播放完成但有欠载；1 失败（含设备不支持、打开失败、设备错误）。";
 
@@ -39,7 +41,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             let mut out = None;
             while let Some(a) = it.next() {
                 match a {
-                    "--device" => device = Some(value(&mut it, "--device")?),
+                    "--device" => device = Some(device_value(&mut it)?),
                     "--out" => out = Some(PathBuf::from(value(&mut it, "--out")?)),
                     x => return Err(format!("未知参数：{x}")),
                 }
@@ -50,7 +52,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             })
         }
         Some("--device") => {
-            let device = value(&mut it, "--device")?;
+            let device = device_value(&mut it)?;
             let mut files = Vec::new();
             for a in it {
                 if a.starts_with('-') {
@@ -68,6 +70,21 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         )),
         Some(x) => Err(format!("未知参数：{x}")),
     }
+}
+
+/// `--device` 的值。值看起来是音频文件时说明设备 ID 没有传进来：最常见的原因是 PowerShell 把
+/// 未加引号的 `{…}`（WASAPI 端点 ID 的写法）当成脚本块吞掉了，直接给出原因而不是“找不到设备”。
+fn device_value<'a>(it: &mut impl Iterator<Item = &'a str>) -> Result<String, String> {
+    let v = value(it, "--device")?;
+    let lower = v.to_ascii_lowercase();
+    if [".wav", ".flac", ".fla"].iter().any(|e| lower.ends_with(e)) {
+        return Err(format!(
+            "--device 的值 {v} 看起来是音频文件，设备 ID 没有传进来。\
+             在 PowerShell 中，未加引号的 {{…}} 会被当成脚本块，请给端点 ID 加单引号，例如：\
+             qybit --device '{{0.0.0.00000000}}.{{…}}' a.wav"
+        ));
+    }
+    Ok(v)
 }
 
 fn value<'a>(it: &mut impl Iterator<Item = &'a str>, flag: &str) -> Result<String, String> {
@@ -111,6 +128,22 @@ mod tests {
                 out: "r".into()
             })
         );
+    }
+
+    /// PowerShell 吞掉未加引号的 `{…}` 后，文件名落到 `--device` 的位置：给出原因。
+    #[test]
+    fn device_swallowed_by_powershell_is_explained() {
+        for a in [
+            &["--device", ".\\a.wav", ".\\b.flac"][..],
+            &["matrix", "--device", "C:\\music\\B.FLAC"][..],
+        ] {
+            let r = p(a);
+            assert!(
+                r.as_ref()
+                    .is_err_and(|e| e.contains("单引号") && e.contains("脚本块")),
+                "{r:?}"
+            );
+        }
     }
 
     #[test]
