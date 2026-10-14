@@ -8,7 +8,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use qy_codec_wav::{WavDecoder, WavDetail};
+use qy_codec_wav::{Bitstream, WavDecoder, WavDetail};
 use qy_core::engine::{Repair, Resources};
 use qy_core::{DecodeError, Decoder, PCM_WORK_SAMPLES, SourceFormat, Status};
 
@@ -181,6 +181,14 @@ fn run(
     let detail = match dec.last_detail() {
         Some(WavDetail::DataShort { declared, missing }) => {
             Some(format!("data-short:{declared}:{missing}"))
+        }
+        Some(WavDetail::Bitstream { kind, offset }) => {
+            let k = match kind {
+                Bitstream::Dts14 => "dts14",
+                Bitstream::Dts16 => "dts16",
+                Bitstream::Iec61937 => "iec61937",
+            };
+            Some(format!("bitstream:{k}:{offset}"))
         }
         _ => None,
     };

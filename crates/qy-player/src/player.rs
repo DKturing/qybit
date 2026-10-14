@@ -333,11 +333,25 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
             }
             HostAction::Failed { track, fault } => {
                 self.report.fault = Some((track, fault));
-                if let Some(e) = self.res.engine.decoder().flac_error() {
-                    self.report.messages.push(format!("FLAC 错误明细：{e:?}"));
+                let mut details = Vec::new();
+                let d = self.res.engine.decoder();
+                if let Some(e) = d.flac_error() {
+                    details.push(format!("FLAC 错误明细：{e:?}"));
                 }
-                if let Some(d) = self.res.engine.decoder().wav_detail() {
-                    self.report.messages.push(format!("WAV 错误明细：{d}"));
+                if let Some(w) = d.wav_detail() {
+                    details.push(format!("WAV 错误明细：{w}"));
+                }
+                if let Some(u) = d.unrecognized() {
+                    details.push(format!("无法识别的文件：{u}"));
+                }
+                self.line(&format!(
+                    "  曲目 {} 失败：{}",
+                    u64::from(track) + 1,
+                    crate::report::fault_text(&fault)
+                ));
+                for m in details {
+                    self.line(&format!("  {m}"));
+                    self.report.messages.push(m);
                 }
                 return false;
             }

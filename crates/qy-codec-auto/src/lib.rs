@@ -46,6 +46,37 @@ pub struct AutoDecoder {
     #[cfg(feature = "flac")]
     flac: Option<FlacDecoder>,
     codec: Codec,
+    /// 当前曲目文件头的前 4 字节（识别后记录，用于说明无法识别的原因）。
+    magic: [u8; 4],
+}
+
+/// 无法识别的文件头（报告用）：前 4 字节与按常见格式标记推断的类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnrecognizedHeader(pub [u8; 4]);
+
+impl core::fmt::Display for UnrecognizedHeader {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let m = self.0;
+        let guess = match &m {
+            [b'I', b'D', b'3', _] => {
+                "ID3v2 标签：文件以 ID3 标签开头（MP3 常见，部分 FLAC 也被写入），本程序只识别以 RIFF 或 fLaC 开头的文件"
+            }
+            b"OggS" => "Ogg 容器（Ogg FLAC、Vorbis、Opus 等），不支持",
+            b"FORM" => "IFF/AIFF 容器，AIFF 在格式路线 F2 中，尚未实现",
+            b"wvpk" => "WavPack，在格式路线 F5 中，尚未实现",
+            b"MAC " => "Monkey's Audio（APE），在格式路线 F6 中，尚未实现",
+            b"DSD " | b"FRM8" => "DSD（DSF/DFF），尚未实现",
+            [_, _, _, _] if m[0] == 0xFF && m[1] & 0xE0 == 0xE0 => {
+                "MPEG 音频帧（MP3 等有损格式），不在本程序范围内"
+            }
+            _ => "不是 RIFF/WAVE 或 FLAC",
+        };
+        write!(
+            f,
+            "文件头前 4 字节为 {:02X} {:02X} {:02X} {:02X}：{guess}",
+            m[0], m[1], m[2], m[3]
+        )
+    }
 }
 
 impl Default for AutoDecoder {
@@ -63,6 +94,7 @@ impl AutoDecoder {
             #[cfg(feature = "flac")]
             flac: None,
             codec: Codec::Unknown,
+            magic: [0; 4],
         }
     }
 
@@ -137,6 +169,11 @@ impl AutoDecoder {
     #[cfg(feature = "wav")]
     pub fn wav(&self) -> Option<&WavDecoder> {
         self.wav.as_ref()
+    }
+
+    /// 当前曲目的文件头无法识别时，给出前 4 字节与推断的类型。
+    pub fn unrecognized(&self) -> Option<UnrecognizedHeader> {
+        (self.codec == Codec::Unrecognized).then_some(UnrecognizedHeader(self.magic))
     }
 
     fn sniff(&self, magic: &[u8]) -> Codec {
@@ -245,6 +282,7 @@ impl Decoder for AutoDecoder {
                     })
                 };
             }
+            self.magic = [input[0], input[1], input[2], input[3]];
             self.codec = self.sniff(&input[..4]);
         }
         dispatch!(self, d => d.decode(input, eof), Err(DecodeError::Unsupported))
@@ -265,6 +303,7 @@ mod tests {
     extern crate std;
     use super::*;
     use std::boxed::Box;
+    use std::string::ToString;
     use std::vec;
 
     fn leak<T: Copy + Default>(n: usize) -> &'static mut [T] {
@@ -300,7 +339,13 @@ mod tests {
             Err(DecodeError::Unsupported)
         );
         assert_eq!(d.codec(), Codec::Unrecognized);
+        let hint = d.unrecognized().map(|u| u.to_string()).unwrap_or_default();
+        assert!(
+            hint.contains("49 44 33 04") && hint.contains("ID3v2"),
+            "{hint}"
+        );
         d.reset();
+        assert_eq!(d.unrecognized(), None);
         // fLaC 后跟非 STREAMINFO 块：交由 FLAC 解码器判定。
         assert_eq!(
             d.decode(b"fLaC\x81\x00\x00\x00", true),

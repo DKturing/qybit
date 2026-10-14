@@ -148,7 +148,43 @@ cargo +nightly fuzz run wav_decode corpus/wav_decode_w1b -- \
 
 开发机为 4 vCPU 的 KVM 虚拟机（见 [r1-reliability.md §6.1](r1-reliability.md)）。CI 的 fuzz 冒烟照旧以全部 WAV 夹具为初始语料运行 60 秒。
 
-## 6. 范围外
+## 6. 后续：Windows 真机测试与伪装成 PCM 的压缩码流（2026-10-14）
+
+**真机测试**：Windows，LG UltraFine 显示器音频（NVIDIA High Definition Audio，HDMI/DP），WASAPI 独占。
+
+- 48 kHz / 16 位方波测试（`exclusive_playback_48k_16bit`）：通过，480 帧缓冲，无欠载。
+- 用户的一个 WAV（文件头为 44.1 kHz / 16 位立体声 PCM）播放为持续杂音。用以下方法排查：
+  - 44.1 kHz 与 48 kHz 的 1 kHz 正弦测试音（`qybit tone`）经独占输出都干净。44.1 kHz 时驱动先回报 `AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED`，按对齐周期重试后为 448 帧，这条路径正常。
+  - 同一文件经 `qybit decode` 写出的 WAV 用 Windows 媒体播放器播放同样是杂音，原始文件则正常。
+  - 结论：输出路径正常，问题在文件内容。
+- data 开头为 `FF 1F 00 E8 F1 07`，即 14 位 DTS 同步字（0x1FFF E800 07Fx，小端）。这个文件是 **DTS-WAV**（“DTS CD”）：文件头写的是 PCM，内容是 DTS 压缩流。
+  - Windows 媒体播放器能识别格式码 1 的 DTS-WAV 并解码。`qybit decode` 输出的数据字节与原文件相同，但文件头改成了 EXTENSIBLE，媒体播放器不再识别，所以同样是杂音。
+
+**处理**：DTS 是有损编码，不在本项目范围内（AGENTS §1）。因此不解码，改为**识别并明确拒绝**，不把码流当 PCM 播放成噪声：
+
+- **识别范围**：只对 16 位双声道 PCM 做。在输出任何样本之前，扫描 data 开头 4096 字节（`BITSTREAM_SCAN`），按 2 字节对齐查找：
+  - 14 位 DTS：同步字两种字节序，含 44 个固定位；
+  - 16 位 DTS：同步字两种字节序，并核对帧头 FTYPE = 1、SHORT = 31、NBLKS ≥ 5、FSIZE ≥ 95、SFREQ 为定义值；下一帧落在窗口内时，要求那里也有同步字；
+  - IEC 61937 前导（Pa/Pb），并核对数据类型与长度。
+  - 依据：ETSI TS 102 114 帧头；IEC 61937-1 突发前导。
+- **误判防护**：最初只核对 16 位 DTS 同步字后 6 位时，现有夹具 `pcm16_stereo_44k` 被误判。它的测试样本含极值对 0x7FFE、0x8001，削波的真实音频也会出现。因此加了上面的帧头字段核对，并加入回归夹具 `pcm16_dts16_sync_clipped`、`pcm16_dts14_near_miss`，两者都按 PCM 播放，ffmpeg 参考一致。
+- **识别结果**：按 `Unsupported` 拒绝，明细为 `WavDetail::Bitstream { kind, offset }`。报告写明“data 中是 DTS 编码流……不是 PCM；本程序不解码，也不做数字直通”。
+- **夹具**：`unsup_dts14_le_cd`（与用户文件开头同构）、`unsup_dts14_be_after_silence`（前有 1000 字节静音）、`unsup_dts16_le`、`unsup_dts16_be`、`unsup_iec61937_ac3`。码流内容是合成的：同步字、帧头字段加随机字节。现有 87 个 WAV 夹具逐字节不变，现共 94 个。
+- **最大连续输入**：由一帧变为 4096 字节，仍小于核心最小输入窗口 8192 字节。
+- **模拟摘要的变化**：WAV 1000 种子与 FLAC 1200 种子中，有 3 行与 W1 时不同，都是 FLAC 场景中与读取分块、时序有关的种子：
+  - 种子 441、501：读取错误场景，出错前完整解码的帧数取决于随机读取长度；
+  - 种子 886：停止重启场景。
+  - 原因：16 位双声道 WAV 曲目要等 4096 字节才开始输出，模拟的随机读取长度序列随之改变。其余 2196 行不变。这些种子自身的断言全部通过：逐字节等于独立参考的前缀、拒绝旧代次回报。
+- **fuzz**：`wav_decode` 120 秒、约 231 万次执行，0 崩溃。分块与一次性输入的结果与明细一致。
+
+**同时改进的命令行**（起因相同）：
+- 播放时实时输出曲目、源格式与协商结果；
+- Ctrl+C 停止并输出报告；
+- `--container` 排查选项；
+- 诊断子命令 `decode` / `tone`；
+- 无法识别的文件头写明前 4 字节与推断的类型。例如以 ID3v2 标签开头的文件会报“文件以 ID3 标签开头”，原来只报 “Unsupported（无明细）”。是否跳过 FLAC 文件开头的 ID3v2 标签，需要先核对 RFC 9639 原文；本环境无法访问，暂未改变行为。
+
+## 7. 范围外
 
 - RF64 / BW64（超过 4 GB 的录音与广播文件）：另列；
 - 浮点 WAV：FORMATS 的 F3；

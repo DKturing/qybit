@@ -3,8 +3,8 @@
 //! `#![no_std]`、无 alloc；PCM 工作区由宿主以 `&'static mut [i32]` 提供。
 //! 解码器不缓存输入：每次调用只看宿主传入的切片，返回实际消耗字节数，
 //! 未消耗的字节由宿主（核心输入窗口）保留到下次调用（AGENTS §2）。
-//! 任一结构所需的最大连续输入为 40 字节（fmt 前缀）或一帧（≤ 8 字节），
-//! 因此任意输入分块都能推进。
+//! 任一结构所需的最大连续输入为 40 字节（fmt 前缀）、一帧，或 16 位双声道 data 开头用于识别
+//! 压缩码流的 [`BITSTREAM_SCAN`] 字节（小于核心最小输入窗口），因此任意输入分块都能推进。
 //!
 //! 支持范围：
 //! - RIFF/WAVE，小端；格式码 1（PCM）与 0xFFFE（EXTENSIBLE，子格式 PCM）。
@@ -25,6 +25,11 @@
 //! - R4：data 长度不是整帧：播放全部完整帧，丢弃不完整的尾帧；
 //! - R5：data 声明长度超过源的实际长度（录音中断）：播放完整帧后照旧报 `Truncated`，明细
 //!   [`WavDetail::DataShort`] 写明缺少的字节数。
+//!
+//! 伪装成 PCM 的压缩码流：16 位双声道 data 开头若是 DTS 同步字（14 位或 16 位，两种字节序，
+//! 常见于“DTS CD”的 DTS-WAV）或 IEC 61937（S/PDIF 封装的 AC-3/DTS 等）前导，按 `Unsupported`
+//! 拒绝并给出 [`WavDetail::Bitstream`]，不把码流当成 PCM 播放成噪声。这些是有损编码，不在本解码器
+//! 范围内；本解码器也不做数字直通。
 //!
 //! 意图不明的照旧拒绝：fmt 字段互相矛盾、data 在 fmt 之前、重复的 fmt/data、data 之前的块越出
 //! RIFF、RIFF 为占位值而 data 长度为 0（可能是未回填的占位，也可能真的为空）。
@@ -48,6 +53,9 @@ use qy_core::{
 /// 流式写入程序的长度占位值（ffmpeg 输出到不可定位的管道时，RIFF 与 data 都写 0xFFFFFFFF；
 /// 见 tasks/W1.md 与 docs/w1-wav-tolerance.md 的样例核对）。
 const LENGTH_PLACEHOLDER: u32 = 0xFFFF_FFFF;
+
+/// 16 位双声道 data 开头用于识别压缩码流的字节数。
+pub const BITSTREAM_SCAN: usize = 4096;
 
 /// 64 位计数的“无”（源长度不可能达到）。修正状态用哨兵值而不是 `Option`，保持解码器结构紧凑。
 const NONE: u64 = u64::MAX;
@@ -122,6 +130,105 @@ pub enum WavDetail {
     UndefinedLayout { channels: u16, mask: Option<u32> },
     /// data 声明长度超过源的实际长度（W1 R5）：完整帧已全部输出，源比声明短 `missing` 字节。
     DataShort { declared: u32, missing: u64 },
+    /// data 不是 PCM，而是伪装成 16 位双声道 PCM 的压缩码流（在 data 中 `offset` 字节处识别）。
+    Bitstream { kind: Bitstream, offset: u32 },
+}
+
+/// 识别出的压缩码流类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bitstream {
+    /// DTS，14 位字（“DTS CD”常用）。
+    Dts14,
+    /// DTS，16 位字。
+    Dts16,
+    /// IEC 61937（S/PDIF 封装的 AC-3、DTS、AAC 等）。
+    Iec61937,
+}
+
+/// 在 `b`（data 开头）中按 2 字节对齐查找压缩码流。普通 PCM（含削波的极值）偶然命中的概率
+/// 可以忽略：14 位 DTS 的同步模式有 44 个固定位；16 位 DTS 的同步字 0x7FFE 0x8001 在削波音频中
+/// 可能自然出现，因此另核对帧头字段，并在下一帧落在窗口内时要求那里也有同步字；IEC 61937 的前导
+/// 之后核对数据类型与长度。
+///
+/// 出处：ETSI TS 102 114（DTS Coherent Acoustics）帧头：同步字 0x7FFE8001（16 位）/
+/// 0x1FFFE800 + 0x07F（14 位），其后 FTYPE(1) SHORT(5) CPF(1) NBLKS(7) FSIZE(14) AMODE(6)
+/// SFREQ(4)，正常帧 FTYPE = 1、SHORT = 31，NBLKS ≥ 5，FSIZE ≥ 95；IEC 61937-1 突发前导
+/// Pa = 0xF872、Pb = 0x4E1F，Pc 低 5 位为数据类型，Pd 为长度。
+fn detect_bitstream(b: &[u8]) -> Option<(Bitstream, usize)> {
+    let mut i = 0;
+    while i + 6 <= b.len() {
+        let w = &b[i..i + 6];
+        let kind = match w {
+            // 14 位 DTS：字 1FFF E800 07Fx，小端与大端。
+            [0xFF, 0x1F, 0x00, 0xE8, x, 0x07] if x & 0xF0 == 0xF0 => Some(Bitstream::Dts14),
+            [0x1F, 0xFF, 0xE8, 0x00, 0x07, x] if x & 0xF0 == 0xF0 => Some(Bitstream::Dts14),
+            [0xFE, 0x7F, 0x01, 0x80, ..] if dts16_frame(b, i, false) => Some(Bitstream::Dts16),
+            [0x7F, 0xFE, 0x80, 0x01, ..] if dts16_frame(b, i, true) => Some(Bitstream::Dts16),
+            [0x72, 0xF8, 0x1F, 0x4E, ..] if iec61937_burst(b, i, false) => {
+                Some(Bitstream::Iec61937)
+            }
+            [0xF8, 0x72, 0x4E, 0x1F, ..] if iec61937_burst(b, i, true) => Some(Bitstream::Iec61937),
+            _ => None,
+        };
+        if let Some(k) = kind {
+            return Some((k, i));
+        }
+        i += 2;
+    }
+    None
+}
+
+/// 第 `k` 个 16 位字（从 `at` 起），`be` 为大端。
+fn word(b: &[u8], at: usize, k: usize, be: bool) -> Option<u16> {
+    let p = at.checked_add(2 * k)?;
+    let x = *b.get(p)?;
+    let y = *b.get(p + 1)?;
+    Some(if be {
+        u16::from_be_bytes([x, y])
+    } else {
+        u16::from_le_bytes([x, y])
+    })
+}
+
+/// `at` 处的 16 位 DTS 同步字之后是否是合理的正常帧头（见 [`detect_bitstream`]）。
+fn dts16_frame(b: &[u8], at: usize, be: bool) -> bool {
+    let (Some(w2), Some(w3), Some(w4)) =
+        (word(b, at, 2, be), word(b, at, 3, be), word(b, at, 4, be))
+    else {
+        return false;
+    };
+    // 同步字之后的 48 位：FTYPE SHORT CPF NBLKS FSIZE AMODE SFREQ …
+    let bits = (u64::from(w2) << 32) | (u64::from(w3) << 16) | u64::from(w4);
+    let field = |start: u32, len: u32| (bits >> (48 - start - len)) & ((1 << len) - 1);
+    let (ftype, short, nblks, fsize, sfreq) = (
+        field(0, 1),
+        field(1, 5),
+        field(7, 7),
+        field(14, 14),
+        field(34, 4),
+    );
+    if ftype != 1 || short != 31 || nblks < 5 || fsize < 95 {
+        return false;
+    }
+    if !matches!(sfreq, 1 | 2 | 3 | 6 | 7 | 8 | 11 | 12 | 13) {
+        return false;
+    }
+    // 下一帧在窗口内时必须也以同步字开始。
+    let next = at + fsize as usize + 1;
+    match (word(b, next, 0, be), word(b, next, 1, be)) {
+        (Some(a), Some(c)) => a == 0x7FFE && c == 0x8001,
+        _ => true,
+    }
+}
+
+/// `at` 处的 IEC 61937 前导之后是否是合理的突发头：数据类型为已定义的压缩格式，长度非零。
+fn iec61937_burst(b: &[u8], at: usize, be: bool) -> bool {
+    let (Some(pc), Some(pd)) = (word(b, at, 2, be), word(b, at, 3, be)) else {
+        return false;
+    };
+    // 数据类型：AC-3、MPEG、AAC、ATRAC、WMA Pro、DTS、E-AC-3、MAT 等（1–23 中已定义的值）。
+    let kind = pc & 0x1F;
+    matches!(kind, 1 | 4..=13 | 16 | 17 | 21 | 22) && pd != 0
 }
 
 impl core::fmt::Display for WavDetail {
@@ -147,6 +254,18 @@ impl core::fmt::Display for WavDetail {
                 f,
                 "文件比 data 声明的 {declared} 字节短 {missing} 字节（录音中断或文件被截断），已播放全部完整帧"
             ),
+            Self::Bitstream { kind, offset } => {
+                let what = match kind {
+                    Bitstream::Dts14 => "DTS 编码流（14 位字，常见于“DTS CD”的 DTS-WAV）",
+                    Bitstream::Dts16 => "DTS 编码流（16 位字）",
+                    Bitstream::Iec61937 => "IEC 61937 码流（S/PDIF 封装的 AC-3/DTS 等）",
+                };
+                write!(
+                    f,
+                    "文件头写的是 16 位双声道 PCM，但 data 中（偏移 {offset} 字节）是{what}，不是 PCM。\
+                     这是有损压缩格式，本程序不解码，也不做数字直通；当作 PCM 播放只会是噪声"
+                )
+            }
         }
     }
 }
@@ -167,6 +286,8 @@ pub struct WavDecoder {
     data_seen: bool,
     /// data 的完整帧已全部读完（之后源的结构问题不影响样本）。
     data_done: bool,
+    /// data 开头已检查过压缩码流。
+    scanned: bool,
     /// data 长度为占位值（R2）时读到的字节数；[`NONE`] 表示不是占位值。
     data_placeholder_read: u64,
     /// 源在 data 读完后结束、RIFF 长度需要修正（R1/R3）时，RIFF 体实际的字节数；否则 [`NONE`]。
@@ -205,6 +326,7 @@ impl WavDecoder {
             detail: None,
             data_seen: false,
             data_done: false,
+            scanned: false,
             data_placeholder_read: NONE,
             riff_actual: NONE,
             partial_dropped: 0,
@@ -635,6 +757,30 @@ impl WavDecoder {
                     let Some(layout) = self.layout else {
                         return Err(DecodeError::Malformed);
                     };
+                    // 16 位双声道：输出任何样本之前，先确认 data 开头不是伪装成 PCM 的压缩码流。
+                    // 等到 BITSTREAM_SCAN 字节（或 data 结束、源结束）到齐再判断，结果与输入分块无关。
+                    if !self.scanned {
+                        if layout.container_bytes == 2 && layout.channels == 2 && layout.shift == 0
+                        {
+                            let need = if to_eof {
+                                BITSTREAM_SCAN
+                            } else {
+                                BITSTREAM_SCAN.min(remaining as usize)
+                            };
+                            if avail.len() < need && !eof {
+                                return self.need_input(pos, eof);
+                            }
+                            let window = &avail[..avail.len().min(need)];
+                            if let Some((kind, at)) = detect_bitstream(window) {
+                                self.detail = Some(WavDetail::Bitstream {
+                                    kind,
+                                    offset: u32::try_from(at).unwrap_or(u32::MAX),
+                                });
+                                return Err(DecodeError::Unsupported);
+                            }
+                        }
+                        self.scanned = true;
+                    }
                     let ba = layout.block_align;
                     let limit = if to_eof {
                         usize::MAX
@@ -715,6 +861,7 @@ impl Decoder for WavDecoder {
         self.detail = None;
         self.data_seen = false;
         self.data_done = false;
+        self.scanned = false;
         self.data_placeholder_read = NONE;
         self.riff_actual = NONE;
         self.partial_dropped = 0;

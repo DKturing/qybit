@@ -209,6 +209,8 @@ struct Case {
     repairs: Vec<String>,
     /// W1 R5：期望的 `DataShort` 明细（声明长度，缺少的字节数）。
     short: Option<(u32, u64)>,
+    /// 期望的压缩码流明细（类型，在 data 中的偏移）。
+    bitstream: Option<(&'static str, u32)>,
 }
 
 fn err_case(name: &'static str, data: Vec<u8>, result: &'static str) -> Case {
@@ -225,6 +227,7 @@ fn err_case(name: &'static str, data: Vec<u8>, result: &'static str) -> Case {
         ffmpeg: false,
         repairs: Vec::new(),
         short: None,
+        bitstream: None,
     }
 }
 
@@ -256,6 +259,7 @@ fn ok_pcm(
         ffmpeg: true,
         repairs: Vec::new(),
         short: None,
+        bitstream: None,
     });
 }
 
@@ -283,6 +287,7 @@ fn ok_ext(
         ffmpeg: dirty.is_none(),
         repairs: Vec::new(),
         short: None,
+        bitstream: None,
     });
 }
 
@@ -310,6 +315,7 @@ fn manual(
         ffmpeg,
         repairs: Vec::new(),
         short: None,
+        bitstream: None,
     });
 }
 
@@ -813,7 +819,91 @@ fn build_cases() -> Vec<Case> {
         false,
     );
     w1_cases(cs);
+    bitstream_cases(cs);
     cases
+}
+
+/// 可复现的伪随机字节。
+fn noise_bytes(seed: u64, n: usize) -> Vec<u8> {
+    let mut r = Lcg(seed);
+    (0..n).map(|_| (r.next() >> 13) as u8).collect()
+}
+
+/// 16 位字序列按字节序写出。
+fn words_bytes(words: &[u16], be: bool) -> Vec<u8> {
+    words
+        .iter()
+        .flat_map(|w| if be { w.to_be_bytes() } else { w.to_le_bytes() })
+        .collect()
+}
+
+/// 16 位 DTS 帧（ETSI TS 102 114）：同步字 0x7FFE8001，FTYPE = 1、SHORT = 31、CPF = 0、
+/// NBLKS = 15、FSIZE = `fsize`、AMODE = 9、SFREQ = 8（44.1 kHz），其余为随机内容。帧长 FSIZE + 1。
+fn dts16_frame(seed: u64, fsize: u16, be: bool) -> Vec<u8> {
+    let fields: u64 =
+        (1 << 47) | (31 << 42) | (15 << 34) | (u64::from(fsize) << 20) | (9 << 14) | (8 << 10);
+    let mut words = vec![0x7FFE, 0x8001];
+    words.extend([(fields >> 32) as u16, (fields >> 16) as u16, fields as u16]);
+    let mut out = words_bytes(&words, be);
+    out.extend(noise_bytes(seed, usize::from(fsize) + 1 - out.len()));
+    out
+}
+
+/// 伪装成 16 位双声道 PCM 的压缩码流（DTS-WAV 等）：按 `Unsupported` 拒绝，不输出任何样本。
+/// 码流内容是合成的（同步字 + 帧头字段 + 随机字节），只用于识别测试。
+fn bitstream_cases(cs: &mut Vec<Case>) {
+    let wav = |data: &[u8]| riff(&[fmt_pcm(pcm(2, 44_100, 16)), chunk(b"data", data)]);
+    let mut push = |name: &'static str, data: Vec<u8>, kind: &'static str, offset: u32| {
+        cs.push(Case {
+            bitstream: Some((kind, offset)),
+            ..err_case(name, wav(&data), "Unsupported")
+        });
+    };
+    // 14 位 DTS（“DTS CD”）：与用户提供的真实文件开头同构（FF 1F 00 E8 F1 07 …）。
+    let mut d = Vec::new();
+    for k in 0..4 {
+        d.extend_from_slice(&[0xFF, 0x1F, 0x00, 0xE8, 0xF1, 0x07]);
+        d.extend(noise_bytes(200 + k, 2010));
+    }
+    push("unsup_dts14_le_cd", d, "dts14", 0);
+    // 14 位 DTS 大端，前面有 1000 字节静音。
+    let mut d = vec![0u8; 1000];
+    d.extend_from_slice(&[0x1F, 0xFF, 0xE8, 0x00, 0x07, 0xF3]);
+    d.extend(noise_bytes(210, 5000));
+    push("unsup_dts14_be_after_silence", d, "dts14", 1000);
+    // 16 位 DTS 小端与大端：连续两帧，帧长 1006 字节。
+    for (name, be) in [("unsup_dts16_le", false), ("unsup_dts16_be", true)] {
+        let mut d = dts16_frame(220, 1005, be);
+        d.extend(dts16_frame(221, 1005, be));
+        d.extend(dts16_frame(222, 1005, be));
+        push(name, d, "dts16", 0);
+    }
+    // IEC 61937（S/PDIF 封装的 AC-3）：Pa Pb Pc = 1（AC-3）Pd = 0x3800。
+    let mut d = words_bytes(&[0xF872, 0x4E1F, 0x0001, 0x3800], false);
+    d.extend(noise_bytes(230, 6144 - 8));
+    push("unsup_iec61937_ac3", d, "iec61937", 0);
+
+    // 刚好不成立：同步字形状相同但固定位不符，按 PCM 播放（样本即这些字节）。
+    for (name, head) in [
+        // 14 位：第 5 字节高半字节不是 F。
+        (
+            "pcm16_dts14_near_miss",
+            vec![0xFFu8, 0x1F, 0x00, 0xE8, 0x01, 0x07],
+        ),
+        // 16 位：0x7FFE 0x8001 之后 FTYPE = 0（削波音频中自然出现的极值对）。
+        (
+            "pcm16_dts16_sync_clipped",
+            vec![0xFE, 0x7F, 0x01, 0x80, 0x00, 0x7C],
+        ),
+    ] {
+        let mut d = head;
+        d.extend(noise_bytes(240, 4096 - 6));
+        let vals: Vec<i64> = d
+            .chunks_exact(2)
+            .map(|c| i64::from(i16::from_le_bytes([c[0], c[1]])))
+            .collect();
+        manual(cs, name, wav(&d), "ok", (44_100, 2, 16), vals, true);
+    }
 }
 
 /// 给最后加入的夹具设置期望的修正与明细。
@@ -897,6 +987,7 @@ fn w1_cases(cs: &mut Vec<Case>) {
         ffmpeg: true,
         repairs: r,
         short: None,
+        bitstream: None,
     });
 
     // RIFF 占位、data 长度正确（只有 R1）：data 之后的 LIST 照常跳过。
@@ -1159,6 +1250,7 @@ fn w1_cases(cs: &mut Vec<Case>) {
         ffmpeg: true,
         repairs: vec!["partial:17".to_string()],
         short: None,
+        bitstream: None,
     });
 
     // R3 + R4：RIFF 偏短，data 不是整帧。
@@ -1315,11 +1407,14 @@ fn expect_text(c: &Case) -> String {
     } else {
         let _ = writeln!(s, "repairs {}", c.repairs.join(";"));
     }
-    match c.short {
-        Some((declared, missing)) => {
+    match (c.short, c.bitstream) {
+        (Some((declared, missing)), _) => {
             let _ = writeln!(s, "detail data-short:{declared}:{missing}");
         }
-        None => s.push_str("detail none\n"),
+        (None, Some((kind, offset))) => {
+            let _ = writeln!(s, "detail bitstream:{kind}:{offset}");
+        }
+        (None, None) => s.push_str("detail none\n"),
     }
     let _ = writeln!(s, "samples {}", c.vals.len());
     for frame in c.vals.chunks(c.ch.max(1)) {

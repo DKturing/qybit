@@ -146,6 +146,9 @@ fn detail(d: &AutoDecoder) -> String {
     if let Some(w) = d.wav_detail() {
         return w.to_string();
     }
+    if let Some(u) = d.unrecognized() {
+        return u.to_string();
+    }
     if let Some(f) = d.flac_error() {
         return format!("{f:?}");
     }
