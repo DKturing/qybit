@@ -16,6 +16,10 @@ libfuzzer-sys = "=0.4.10"
 qy-core = { path = "../crates/qy-core" }
 qy-codec-wav = { path = "../crates/qy-codec-wav" }
 qy-codec-flac = { path = "../crates/qy-codec-flac" }
+# R1 §4：损坏文件系统 fuzz（FatStorage 经 embedded-sdmmc；基础镜像由 qy-fat-image 生成）。
+qy-host-embedded = { path = "../crates/qy-host-embedded" }
+embedded-sdmmc = { version = "=0.10.0", default-features = false }
+qy-fat-image = { path = "../tools/qy-fat-image" }
 
 [[bin]]
 name = "wav_decode"
@@ -27,6 +31,13 @@ bench = false
 [[bin]]
 name = "flac_decode"
 path = "fuzz_targets/flac_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fat_storage"
+path = "fuzz_targets/fat_storage.rs"
 test = false
 doc = false
 bench = false

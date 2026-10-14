@@ -162,7 +162,8 @@ jobs:
         if: steps.aloop.outputs.loaded != 'true'
         run: echo "回环 B 层（snd-aloop）：未运行（runner 不支持内核模块）。本地运行见 scripts/aloop-loopback.sh。" >> "$GITHUB_STEP_SUMMARY"
 
-  # 解码 fuzz 冒烟（各 60 秒，以夹具为初始语料）。正式 10 分钟记录见 docs/m0-t2-wav.md 与 docs/m1-t3-integration.md。
+  # fuzz 冒烟（各 60 秒）：解码以夹具为初始语料；损坏文件系统（R1 §4）以 FAT16/FAT32 基础镜像的
+  # 空补丁为初始语料。正式 10 分钟记录见 docs/m0-t2-wav.md、docs/m1-t3-integration.md 与 docs/r1-reliability.md。
   fuzz-smoke:
     name: fuzz 冒烟 (${{ matrix.target }})
     strategy:
@@ -175,6 +176,9 @@ jobs:
           - target: flac_decode
             fixtures: crates/qy-codec-flac/tests/fixtures/*.flac
             max_len: 1048576
+          - target: fat_storage
+            fixtures: ""
+            max_len: 4096
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,5 +192,9 @@ jobs:
             (printf '\x00'; cat "$f") > "fuzz/corpus/${{ matrix.target }}/$n.s0"
             (printf '\x87'; cat "$f") > "fuzz/corpus/${{ matrix.target }}/$n.s87"
           done
+          if [ "${{ matrix.target }}" = fat_storage ]; then
+            printf '\x00' > fuzz/corpus/fat_storage/fat16
+            printf '\x01' > fuzz/corpus/fat_storage/fat32
+          fi
       - working-directory: fuzz
         run: cargo +nightly-2026-10-12 fuzz run ${{ matrix.target }} -- -max_total_time=60 -max_len=${{ matrix.max_len }} -seed=1

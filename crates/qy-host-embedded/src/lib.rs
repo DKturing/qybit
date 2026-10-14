@@ -20,6 +20,7 @@
 
 pub mod budget;
 pub mod command;
+mod fatcheck;
 pub mod feeder;
 pub mod flat;
 pub mod output;
@@ -32,4 +33,4 @@ pub use feeder::{Feeder, FeederAccess, Fill, OutputStats};
 pub use flat::{FlatError, FlatStorage, FlatTrack, MemoryStorage};
 pub use output::{AudioOutput, OutputCaps, SelectError, SlotFormat};
 pub use player::{Notice, Player, Status, Step};
-pub use storage::{FatStorage, NoClock, Storage};
+pub use storage::{FatError, FatStorage, NoClock, Storage};

@@ -1,6 +1,6 @@
 [package]
 name = "qy-fat-image"
-description = "QyBit 测试工具：生成带 MBR 分区表的 FAT16 磁盘镜像（模拟 SD 卡），只用于测试与构建脚本"
+description = "QyBit 测试工具：生成带 MBR 分区表的 FAT16/FAT32 磁盘镜像（模拟存储卡），只用于测试与构建脚本"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

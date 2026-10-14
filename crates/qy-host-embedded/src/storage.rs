@@ -7,6 +7,10 @@
 //! 读取是同步分段的：主循环每步至多读一段（`read_chunk` 字节），期间 DMA 中断照常
 //! 取数，因此单次读取的最长耗时直接计入预填公式（见 [`crate::budget`]）。
 //!
+//! 损坏的卡是不可信输入：挂载前按 FAT 规范独立核对引导扇区与根目录，扫描后与打开前核对每个文件的
+//! 目录项与簇链（见 `fatcheck`），不合格的结构不交给 `embedded-sdmmc`（它对部分损坏结构会 panic
+//! 或无界读取，R1 fuzz 发现）。不合格的文件跳过并计入 [`FatStorage::corrupt_entries`]。
+//!
 //! [`FatStorage`] 读取 MBR 第 1 个分区（FAT16/FAT32）根目录中扩展名为 `WAV` 或 `FLA`
 //! （`.flac` 的 8.3 短名）的文件，按短文件名排序成播放列表，最多 `M` 首。文件格式由解码器按文件头
 //! 识别，扩展名只用于筛选。拔卡或读错时返回错误，由引擎按出错策略处理；重新插卡后用
@@ -19,6 +23,8 @@ use embedded_sdmmc::{
     BlockDevice, Mode, RawDirectory, RawFile, RawVolume, ShortFileName, TimeSource, Timestamp,
     VolumeIdx, VolumeManager,
 };
+
+use crate::fatcheck::{self, Geometry};
 
 /// 曲目存储。
 pub trait Storage {
@@ -69,6 +75,8 @@ pub enum FatError<E: core::error::Error + 'static> {
     NoSuchTrack(u32),
     /// 没有打开的曲目。
     NotOpen,
+    /// 文件系统结构损坏（引导扇区、根目录或该文件的目录项/簇链不合格），未交给 FAT 库处理。
+    Corrupt,
 }
 
 impl<E: core::error::Error + 'static> From<embedded_sdmmc::Error<E>> for FatError<E> {
@@ -92,6 +100,9 @@ pub struct FatStorage<D: BlockDevice, T: TimeSource, const M: usize> {
     pub truncated: bool,
     /// 句柄编号偏移：每次重建卷管理器递增，旧句柄不会与新句柄混淆。
     id_offset: u32,
+    geometry: Option<Geometry>,
+    /// 最近一次扫描中因目录项或簇链损坏而跳过的文件数。
+    pub corrupt_entries: u32,
 }
 
 impl<D: BlockDevice, T: TimeSource, const M: usize> FatStorage<D, T, M> {
@@ -106,6 +117,8 @@ impl<D: BlockDevice, T: TimeSource, const M: usize> FatStorage<D, T, M> {
             count: 0,
             truncated: false,
             id_offset: 0,
+            geometry: None,
+            corrupt_entries: 0,
         };
         let r = s.scan();
         (s, r)
@@ -133,11 +146,38 @@ impl<D: BlockDevice, T: TimeSource, const M: usize> FatStorage<D, T, M> {
         self.volume = None;
     }
 
+    /// 核对一个文件：从目录重新取得目录项位置，读原始目录项，沿簇链核对。
+    fn file_ok(&self, name: &ShortFileName) -> Result<bool, FatError<D::Error>> {
+        let (Some(vm), Some(root), Some(g)) = (self.vm.as_ref(), self.root, self.geometry) else {
+            return Err(FatError::NotMounted);
+        };
+        let e = vm.find_directory_entry(root, name)?;
+        vm.device(|d| -> Result<bool, D::Error> {
+            match fatcheck::dir_entry(&*d, g, e.entry_block, e.entry_offset)? {
+                Some((start, size)) => fatcheck::file_ok(&*d, g, start, size),
+                None => Ok(false),
+            }
+        })
+        .map_err(|e| FatError::Fs(embedded_sdmmc::Error::DeviceError(e)))
+    }
+
     fn scan(&mut self) -> Result<u32, FatError<D::Error>> {
         self.count = 0;
         self.truncated = false;
+        self.corrupt_entries = 0;
         self.names = [const { None }; M];
+        self.geometry = None;
         let vm = self.vm.as_ref().ok_or(FatError::NotMounted)?;
+        let dev_err = |e| FatError::Fs(embedded_sdmmc::Error::DeviceError(e));
+        // 挂载前独立核对引导扇区与根目录（不合格的不交给 FAT 库）。
+        let g = vm
+            .device(|d| fatcheck::geometry(&*d))
+            .map_err(dev_err)?
+            .ok_or(FatError::Corrupt)?;
+        if !vm.device(|d| fatcheck::root_ok(&*d, g)).map_err(dev_err)? {
+            return Err(FatError::Corrupt);
+        }
+        self.geometry = Some(g);
         let volume = vm.open_raw_volume(VolumeIdx(0))?;
         self.volume = Some(volume);
         let root = vm.open_root_dir(volume)?;
@@ -154,6 +194,23 @@ impl<D: BlockDevice, T: TimeSource, const M: usize> FatStorage<D, T, M> {
             insert_sorted(names, count, truncated, e.name);
             ControlFlow::Continue(())
         })?;
+        // 逐个核对目录项与簇链，不合格的移出播放列表。
+        let mut kept = 0;
+        for i in 0..self.count {
+            let Some(name) = self.names[i] else {
+                continue;
+            };
+            if self.file_ok(&name)? {
+                self.names[kept] = Some(name);
+                kept += 1;
+            } else {
+                self.corrupt_entries += 1;
+            }
+        }
+        for slot in &mut self.names[kept..] {
+            *slot = None;
+        }
+        self.count = kept;
         Ok(self.count as u32)
     }
 }
@@ -203,6 +260,10 @@ impl<D: BlockDevice, T: TimeSource, const M: usize> Storage for FatStorage<D, T,
             .get(track as usize)
             .and_then(|n| n.as_ref())
             .ok_or(FatError::NoSuchTrack(track))?;
+        // 打开前重新核对（换卡而未重新扫描时，目录项可能已变）。
+        if !self.file_ok(&name)? {
+            return Err(FatError::Corrupt);
+        }
         let (Some(vm), Some(root)) = (self.vm.as_ref(), self.root) else {
             return Err(FatError::NotMounted);
         };
