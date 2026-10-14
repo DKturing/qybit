@@ -428,10 +428,11 @@ fn model_random_commands_and_faults() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(64);
-    let mut total_ops = 0usize;
     let only: Option<u64> = std::env::var("QY_MODEL_ONLY")
         .ok()
         .and_then(|v| v.parse().ok());
+    let (mut runs, mut total_ops, mut min_ops, mut virtual_us) = (0u64, 0u64, u64::MAX, 0u64);
+    let (mut failures, mut stalls, mut underruns, mut skips) = (0u64, 0u64, 0u64, 0u64);
     for seed in 1..=seeds {
         if only.is_some_and(|o| o != seed) {
             continue;
@@ -440,12 +441,32 @@ fn model_random_commands_and_faults() {
         if std::env::var_os("QY_MODEL_VERBOSE").is_some() {
             eprintln!("{line}");
         }
-        total_ops += line
-            .split(" ops=")
-            .nth(1)
-            .and_then(|r| r.split(' ').next())
-            .and_then(|n| n.parse::<usize>().ok())
-            .unwrap_or(0);
+        let ops = field(&line, "ops");
+        runs += 1;
+        total_ops += ops;
+        min_ops = min_ops.min(ops);
+        virtual_us += field(&line, "virtual_us");
+        failures += field(&line, "failures");
+        underruns += field(&line, "underruns");
+        skips += field(&line, "skips");
+        stalls += u64::from(line.contains("big_stall=true"));
     }
-    eprintln!("模型随机测试：{seeds} 个种子，共 {total_ops} 个操作，全部通过");
+    if only.is_none() {
+        // R1 §3：每个种子至少 20 次操作。
+        assert!(min_ops >= 20, "最少的种子只有 {min_ops} 次操作");
+    }
+    eprintln!(
+        "模型随机测试：{runs} 个种子，共 {total_ops} 个操作（每种子至少 {min_ops}），虚拟时长共 {:.1} 秒；\
+         注入并命中的故障 {failures} 次，超预填停顿 {stalls} 个种子（欠载共 {underruns} 次），\
+         跳过 {skips} 首；全部通过",
+        virtual_us as f64 / 1e6
+    );
+}
+
+/// 从摘要行取 `key=数值` 字段。
+fn field(line: &str, key: &str) -> u64 {
+    line.split(' ')
+        .find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("摘要缺少 {key}：{line}"))
 }

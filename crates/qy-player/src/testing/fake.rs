@@ -76,6 +76,12 @@ pub enum WaitMode {
     Scripted(Box<dyn FnMut(u64) + Send>),
     /// 模拟从不缺数据的设备：等到队列中至少一包、EOF 或停止才返回。
     Patient(Arc<RenderControl>),
+    /// 按真实时间消费的设备（R1 §6）：从第一次等待起，每隔 `period` 发出一次事件；渲染线程
+    /// 迟到时不补发、不顺延（设备时钟不等软件），迟到期间的队列不足照常记为欠载。
+    Clock {
+        period: Duration,
+        next: Option<Instant>,
+    },
 }
 
 pub struct FakeApi {
@@ -132,6 +138,22 @@ impl PacketApi for FakeApi {
         match &mut self.mode {
             WaitMode::Scripted(hook) => {
                 hook(index);
+                Ok(WaitResult::Signaled)
+            }
+            WaitMode::Clock { period, next } => {
+                let now = Instant::now();
+                let due = next.map_or(now + *period, |t| t);
+                if due > now {
+                    std::thread::sleep(due - now);
+                }
+                // 下一个事件按设备时钟排定；落后超过一个周期时从现在重新排（设备不会为迟到的
+                // 软件积压事件）。
+                let after = due + *period;
+                *next = Some(if after < Instant::now() {
+                    Instant::now() + *period
+                } else {
+                    after
+                });
                 Ok(WaitResult::Signaled)
             }
             WaitMode::Patient(ctl) => {
@@ -579,6 +601,9 @@ impl Negotiator for SimpleNegotiator {
 pub enum FakeDevice {
     /// 整包：端点缓冲 = rate/100 帧，排空 2 包。
     Packet,
+    /// 整包、按真实时间消费（R1 §6 端到端基准）：端点缓冲 = rate/100 帧，每 10 ms 一包，
+    /// 排空 2 包。队列不足时补静音并记为欠载。
+    Clock,
     /// 短写：设备缓冲 = rate/50 帧，按种子随机短写与随机播放量。
     ShortWrite { seed: u64 },
 }
@@ -674,7 +699,7 @@ impl<A: AttemptRecord> PendingStream for FakePending<A> {
 
     fn submission(&self) -> Submission {
         match self.device {
-            FakeDevice::Packet => Submission::Packet {
+            FakeDevice::Packet | FakeDevice::Clock => Submission::Packet {
                 frames: self.format.sample_rate() / 100,
             },
             FakeDevice::ShortWrite { .. } => Submission::ShortWrite {
@@ -692,7 +717,7 @@ impl<A: AttemptRecord> PendingStream for FakePending<A> {
         let device = self.device;
         FakeRunning(std::thread::spawn(move || {
             let (report, rendered, calls, write_calls) = match device {
-                FakeDevice::Packet => {
+                FakeDevice::Packet | FakeDevice::Clock => {
                     let buffer_frames = format.sample_rate() / 100;
                     let cfg = PacketConfig {
                         buffer_frames,
@@ -700,11 +725,15 @@ impl<A: AttemptRecord> PendingStream for FakePending<A> {
                         drain_packets: 2,
                         event_timeout_ms: 2000,
                     };
-                    let mut api = FakeApi::new(
-                        buffer_frames,
-                        block_align,
-                        WaitMode::Patient(Arc::clone(&ctl)),
-                    );
+                    let mode = if device == FakeDevice::Clock {
+                        WaitMode::Clock {
+                            period: Duration::from_millis(10),
+                            next: None,
+                        }
+                    } else {
+                        WaitMode::Patient(Arc::clone(&ctl))
+                    };
+                    let mut api = FakeApi::new(buffer_frames, block_align, mode);
                     api.fail_get_at = fail_at;
                     let r = packet::render(&mut api, &mut priority, &mut consumer, &ctl, cfg);
                     (r, api.rendered, api.calls, Vec::new())

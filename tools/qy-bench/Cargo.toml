@@ -1,0 +1,21 @@
+[package]
+name = "qy-bench"
+description = "QyBit 桌面吞吐基准（R1 §6）：解码 + pack 实时倍数、高规格端到端余量与读取延迟影响（开发工具，不发布）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+qy-core.workspace = true
+qy-codec-auto.workspace = true
+qy-pcm-format = { workspace = true, features = ["ring"] }
+# 假后端（按真实时间消费的整包假设备）与渲染循环。
+qy-player = { workspace = true, features = ["test-support"] }
+# 按固定种子生成的基准文件（确定的样本、WAV 与 FLAC 编码）。
+qy-gen-fixtures = { path = "../qy-gen-fixtures" }
+
+[lints]
+workspace = true

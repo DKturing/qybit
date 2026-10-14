@@ -15,6 +15,7 @@ members = [
     "crates/qybit",
     "tools/qy-gen-fixtures",
     "tools/qy-fat-image",
+    "tools/qy-bench",
 ]
 
 [workspace.package]

@@ -15,7 +15,7 @@
 //! 桌面渲染循环尚未实现暂停；本驱动不发起暂停，收到暂停动作按协议错误记录。
 
 use std::fs::File;
-use std::io::{ErrorKind, Read};
+use std::io::{self, ErrorKind, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -46,14 +46,42 @@ struct Active<B: Backend> {
     pushed_base: u64,
 }
 
+/// 曲目来源：按编号打开曲目，得到同步读取器。桌面播放用文件路径（[`play`]）；测试与基准可
+/// 提供内存数据或注入读取延迟的来源（[`play_source`]）。
+pub trait TrackSource {
+    type Reader: Read;
+    /// 曲目数。
+    fn count(&self) -> u32;
+    /// 打开第 `track` 首。
+    fn open(&mut self, track: u32) -> io::Result<Self::Reader>;
+}
+
+/// 文件路径列表。
+struct Files<'a>(&'a [PathBuf]);
+
+impl TrackSource for Files<'_> {
+    type Reader = File;
+
+    fn count(&self) -> u32 {
+        u32::try_from(self.0.len()).unwrap_or(u32::MAX)
+    }
+
+    fn open(&mut self, track: u32) -> io::Result<File> {
+        match self.0.get(track as usize) {
+            Some(p) => File::open(p),
+            None => Err(io::Error::new(ErrorKind::NotFound, "曲目编号越界")),
+        }
+    }
+}
+
 /// 生产端等待队列空间时的休眠间隔。
 const FULL_QUEUE_SLEEP: Duration = Duration::from_millis(2);
 
-struct Player<'a, B: Backend> {
+struct Player<'a, B: Backend, S: TrackSource> {
     backend: &'a mut B,
     res: &'a mut HostResources,
-    files: &'a [PathBuf],
-    file: Option<File>,
+    source: &'a mut S,
+    file: Option<S::Reader>,
     active: Option<Active<B>>,
     report: PlaybackReport<B::Attempt>,
 }
@@ -64,7 +92,16 @@ pub fn play<B: Backend>(
     res: &mut HostResources,
     files: &[PathBuf],
 ) -> PlaybackReport<B::Attempt> {
-    let count = u32::try_from(files.len()).unwrap_or(u32::MAX);
+    play_source(backend, res, &mut Files(files))
+}
+
+/// 依次播放 `source` 中的曲目，直到完成、失败或设备出错。
+pub fn play_source<B: Backend, S: TrackSource>(
+    backend: &mut B,
+    res: &mut HostResources,
+    source: &mut S,
+) -> PlaybackReport<B::Attempt> {
+    let count = source.count();
     // 清理上一次播放可能残留的状态（旧代次），丢弃其控制动作。
     res.engine.stop();
     while res.engine.take_control().is_some() {}
@@ -72,7 +109,7 @@ pub fn play<B: Backend>(
     let mut p = Player {
         backend,
         res,
-        files,
+        source,
         file: None,
         active: None,
         report: PlaybackReport::default(),
@@ -81,7 +118,7 @@ pub fn play<B: Backend>(
     p.report
 }
 
-impl<B: Backend> Player<'_, B> {
+impl<B: Backend, S: TrackSource> Player<'_, B, S> {
     fn handle(&mut self, event: HostEvent) {
         if self.res.engine.handle(event).is_err() {
             self.report.protocol_errors += 1;
@@ -136,22 +173,18 @@ impl<B: Backend> Player<'_, B> {
     /// 执行引擎动作；返回 false 表示播放结束。
     fn execute(&mut self, action: HostAction) -> bool {
         match action {
-            HostAction::Open { generation, track } => {
-                match self.files.get(track as usize).map(File::open) {
-                    Some(Ok(f)) => {
-                        self.file = Some(f);
-                        self.handle(HostEvent::Opened { generation });
-                    }
-                    other => {
-                        if let Some(Err(e)) = other {
-                            self.report
-                                .messages
-                                .push(format!("打开曲目 {track} 失败: {e}"));
-                        }
-                        self.handle(HostEvent::OpenFailed { generation });
-                    }
+            HostAction::Open { generation, track } => match self.source.open(track) {
+                Ok(f) => {
+                    self.file = Some(f);
+                    self.handle(HostEvent::Opened { generation });
                 }
-            }
+                Err(e) => {
+                    self.report
+                        .messages
+                        .push(format!("打开曲目 {track} 失败: {e}"));
+                    self.handle(HostEvent::OpenFailed { generation });
+                }
+            },
             HostAction::Read {
                 generation,
                 request,

@@ -272,6 +272,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "qy-bench"
+version = "0.0.0"
+dependencies = [
+ "qy-codec-auto",
+ "qy-core",
+ "qy-gen-fixtures",
+ "qy-pcm-format",
+ "qy-player",
+]
+
+[[package]]
 name = "qy-codec-auto"
 version = "0.0.0"
 dependencies = [
