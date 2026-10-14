@@ -208,6 +208,13 @@ cargo +nightly fuzz run wav_decode corpus/wav_decode_w1b -- \
 - 换用普通 PCM WAV（44.1 kHz / 16 位立体声）：独占打开 44.1 kHz / 16 位，448 帧缓冲；播放约 126 秒后用户按 Ctrl+C 中断。期间欠载 0 次，队列最低 557 ms，用户听感干净。
 - b.flac（开头为 ID3v2.3 标签）：拉取 `43fffd7` 并重新编译后可以播放，用户听感干净。
 - 这些是人耳试听，没有回录证据，不证明设备端 bit-perfect。
+- **设备格式矩阵**（`format_matrix_and_sequential`，70 项）：
+  - 独占初始化成功的 8 项都完整播放：排空、帧数一致、欠载 0；其余 62 项由驱动以 `AUDCLNT_E_UNSUPPORTED_FORMAT`（0x88890008）拒绝，是设备能力结果。
+  - 成功的 8 项是 44.1 kHz 与 48 kHz 各 4 项：单声道 WAVEFORMATEX 16/16、双声道 EXTENSIBLE 16/16、双声道 EXTENSIBLE 32/24、双声道 WAVEFORMATEX 16/16。
+  - 单声道 EXTENSIBLE（掩码 FC）全部被拒，同样的单声道用 WAVEFORMATEX 描述则可以。
+  - 被拒的还有：24/24 紧凑、32/32、88.2 kHz 及以上、全部多声道。
+  - 测试本身的问题：断言项数写的是 60，F1 加入 10 项多声道时没有改，所以在项数断言处失败。顺序换曲已经执行，结果在 JSON 报告里，但没有经过断言核对。已改为取矩阵定义的项数，需要重跑。
+  - 发现：播放器协商只用 EXTENSIBLE。在这台设备上，16 位单声道文件会被拒绝，虽然 WAVEFORMATEX 单声道可用。是否把 WAVEFORMATEX 加为单/双声道 16 位的候选，另行决定。
 - 系统音量滑块不起作用，符合预期：独占模式绕过 Windows 混音器，软件增益恒为 1。音量需由设备端控制（README “使用（Windows）”）。
 
 ## 7. 范围外

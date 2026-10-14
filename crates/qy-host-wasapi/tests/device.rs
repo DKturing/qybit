@@ -128,7 +128,11 @@ fn format_matrix_and_sequential() {
         Ok((json, csv)) => println!("报告：{}\n      {}", json.display(), csv.display()),
         Err(e) => panic!("写报告失败: {e}"),
     }
-    assert_eq!(report.entries.len(), 60);
+    // 项数取自矩阵定义（单元测试核对为 70 项），不另写常数：F1 加入多声道后此处曾停在 60。
+    assert_eq!(
+        report.entries.len(),
+        qy_host_wasapi::matrix::matrix_items().len()
+    );
     let bad: Vec<_> = report
         .entries
         .iter()
