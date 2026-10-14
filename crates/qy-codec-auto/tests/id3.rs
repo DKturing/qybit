@@ -102,17 +102,20 @@ fn tagged_flac_and_wav_decode_like_untagged() {
             .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
     let wav = read("../qy-codec-wav/tests/fixtures/pcm24_mono_48k_odd_list.wav");
-    let wav_ref: Vec<i32> = read("../qy-codec-wav/tests/fixtures/pcm24_mono_48k_odd_list.expect")
-        .split(|&b| b == b'\n')
-        .skip(6)
-        .flat_map(|l| {
-            String::from_utf8_lossy(l)
-                .split(' ')
-                .filter(|x| !x.is_empty())
-                .map(|x| x.parse::<i32>().unwrap_or(i32::MIN))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    // 按行解析（`lines` 同时去掉 CRLF：Windows 检出时 .expect 可能为 CRLF 行尾）。
+    let wav_ref: Vec<i32> = String::from_utf8(read(
+        "../qy-codec-wav/tests/fixtures/pcm24_mono_48k_odd_list.expect",
+    ))
+    .unwrap_or_default()
+    .lines()
+    .skip(6)
+    .flat_map(|l| {
+        l.split(' ')
+            .filter(|x| !x.is_empty())
+            .map(|x| x.parse::<i32>().unwrap_or(i32::MIN))
+            .collect::<Vec<_>>()
+    })
+    .collect();
     assert!(!flac_ref.is_empty() && !wav_ref.is_empty());
     let tags: [(&str, Vec<u8>); 5] = [
         ("无标签", Vec::new()),
