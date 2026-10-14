@@ -173,6 +173,13 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
 
     /// 中断：立即停止核心与设备（不排空），之后旧代次的回报一律拒绝。
     fn interrupt(&mut self) {
+        // 中断前已排队的动作（如最后一首排空后的“播放结束”）先执行：中断若落在播放已经结束
+        // 之后，报告应是“完成”而不是“中断”。
+        while let Some(a) = self.res.engine.take_control() {
+            if !self.execute(a) {
+                return;
+            }
+        }
         self.report.interrupted = true;
         self.line("已中断：停止播放（不排空队列）。");
         self.res.engine.stop();
