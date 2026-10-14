@@ -5,6 +5,13 @@
 //! `RIFF`/`RIFX`/`RF64`/`BW64` 交给 WAV 解码器（后者再区分支持与否），`fLaC` 交给 FLAC
 //! 解码器，其他返回 `Unsupported`。不依据文件扩展名。
 //!
+//! 文件开头的 ID3v2 标签（常见于被标签软件写过的 FLAC）先按标签头声明的长度跳过，再识别其后的
+//! 容器。依据：ID3v2.4.0 结构规范 §3.1（10 字节标签头：`ID3`、主/次版本各 1 字节且不为 `FF`、
+//! 标志 1 字节、4 字节 syncsafe 长度，每字节最高位为 0；长度不含标签头，v2.4 标志位 4 置位时
+//! 另有 10 字节标签尾）；参考解码器 libFLAC（`stream_decoder.c` 的 `skip_id3v2_tag_`）与
+//! ffmpeg 的格式探测同样在识别前跳过 ID3v2。可连续多个标签；标签头不合规则时按无法识别拒绝。
+//! 跳过的是元数据，不是音频，样本不受影响；跳过的字节数见 [`AutoDecoder::skipped_tag_bytes`]。
+//!
 //! 特性 `wav`、`flac`（默认都开）决定链接哪些解码器；只开 `wav` 时不链接 FLAC 代码。
 //! 已链接但宿主未提供工作区的格式，与未链接的格式一样按 `Unsupported` 拒绝（[`Codec::Disabled`]）。
 //! 各配置档的资源预算见 [`profile`]。
@@ -46,21 +53,46 @@ pub struct AutoDecoder {
     #[cfg(feature = "flac")]
     flac: Option<FlacDecoder>,
     codec: Codec,
-    /// 当前曲目文件头的前 4 字节（识别后记录，用于说明无法识别的原因）。
+    /// 当前曲目文件头的前 4 字节（识别后记录，用于说明无法识别的原因）；跳过 ID3v2 标签时为
+    /// 标签之后的 4 字节。
     magic: [u8; 4],
+    /// 当前 ID3v2 标签尚未跳过的字节数。
+    tag_left: u32,
+    /// 当前曲目开头已跳过的 ID3v2 标签总字节数（含标签头与标签尾）。
+    tag_bytes: u64,
+}
+
+/// ID3v2 标签头长度（ID3v2.4.0 结构规范 §3.1）。
+const ID3_HEADER: usize = 10;
+
+/// 解析 ID3v2 标签头，返回整个标签的字节数（标签头 + 声明长度 + 可选标签尾）；不合规则时为 `None`。
+fn id3v2_len(h: &[u8; ID3_HEADER]) -> Option<u32> {
+    if &h[..3] != b"ID3" || h[3] == 0xFF || h[4] == 0xFF || h[6..].iter().any(|&b| b & 0x80 != 0) {
+        return None;
+    }
+    let size = h[6..]
+        .iter()
+        .fold(0u32, |acc, &b| (acc << 7) | u32::from(b));
+    // 标签尾只在 v2.4 定义（标志位 4）。
+    let footer = if h[3] == 4 && h[5] & 0x10 != 0 { 10 } else { 0 };
+    // size < 2^28，加 20 不会溢出。
+    Some(size + ID3_HEADER as u32 + footer)
 }
 
 /// 无法识别的文件头（报告用）：前 4 字节与按常见格式标记推断的类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnrecognizedHeader(pub [u8; 4]);
+pub struct UnrecognizedHeader {
+    /// 文件头前 4 字节；跳过了 ID3v2 标签时为标签之后的 4 字节。
+    pub magic: [u8; 4],
+    /// 之前跳过的 ID3v2 标签字节数。
+    pub skipped_tag: u64,
+}
 
 impl core::fmt::Display for UnrecognizedHeader {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let m = self.0;
+        let m = self.magic;
         let guess = match &m {
-            [b'I', b'D', b'3', _] => {
-                "ID3v2 标签：文件以 ID3 标签开头（MP3 常见，部分 FLAC 也被写入），本程序只识别以 RIFF 或 fLaC 开头的文件"
-            }
+            [b'I', b'D', b'3', _] => "ID3v2 标签头不合规则（版本或 syncsafe 长度字节无效）",
             b"OggS" => "Ogg 容器（Ogg FLAC、Vorbis、Opus 等），不支持",
             b"FORM" => "IFF/AIFF 容器，AIFF 在格式路线 F2 中，尚未实现",
             b"wvpk" => "WavPack，在格式路线 F5 中，尚未实现",
@@ -71,6 +103,9 @@ impl core::fmt::Display for UnrecognizedHeader {
             }
             _ => "不是 RIFF/WAVE 或 FLAC",
         };
+        if self.skipped_tag > 0 {
+            write!(f, "跳过开头 {} 字节的 ID3v2 标签后，", self.skipped_tag)?;
+        }
         write!(
             f,
             "文件头前 4 字节为 {:02X} {:02X} {:02X} {:02X}：{guess}",
@@ -95,6 +130,8 @@ impl AutoDecoder {
             flac: None,
             codec: Codec::Unknown,
             magic: [0; 4],
+            tag_left: 0,
+            tag_bytes: 0,
         }
     }
 
@@ -173,7 +210,70 @@ impl AutoDecoder {
 
     /// 当前曲目的文件头无法识别时，给出前 4 字节与推断的类型。
     pub fn unrecognized(&self) -> Option<UnrecognizedHeader> {
-        (self.codec == Codec::Unrecognized).then_some(UnrecognizedHeader(self.magic))
+        (self.codec == Codec::Unrecognized).then_some(UnrecognizedHeader {
+            magic: self.magic,
+            skipped_tag: self.tag_bytes,
+        })
+    }
+
+    /// 当前曲目开头跳过的 ID3v2 标签字节数（没有标签时为 0）。
+    pub fn skipped_tag_bytes(&self) -> u64 {
+        self.tag_bytes
+    }
+
+    /// 识别前的处理：跳过 ID3v2 标签并读取容器标记。`Ok(pos)` 表示已识别，容器从 `input[pos..]`
+    /// 开始；`Err` 为本次调用的结果（缺输入或错误）。
+    fn identify(
+        &mut self,
+        input: &[u8],
+        eof: bool,
+    ) -> Result<usize, Result<Progress, DecodeError>> {
+        let mut pos = 0usize;
+        loop {
+            if self.tag_left > 0 {
+                let n = (self.tag_left as usize).min(input.len() - pos);
+                pos += n;
+                // n ≤ tag_left（u32），转换不丢失。
+                self.tag_left -= n as u32;
+                self.tag_bytes += n as u64;
+                if self.tag_left > 0 {
+                    return Err(if eof {
+                        // 标签声明的长度超出文件：不是完整的文件。
+                        Err(DecodeError::Truncated)
+                    } else {
+                        Ok(Progress {
+                            consumed: pos,
+                            status: Status::NeedInput,
+                        })
+                    });
+                }
+            }
+            let rest = &input[pos..];
+            let tag = rest.starts_with(b"ID3") || (rest.len() < 3 && b"ID3".starts_with(rest));
+            let need = if tag { ID3_HEADER } else { 4 };
+            if rest.len() < need {
+                return Err(if eof {
+                    // 不足 4 字节的文件（或残缺的标签头）：无法识别，也不是完整的 WAV/FLAC。
+                    Err(DecodeError::Truncated)
+                } else {
+                    Ok(Progress {
+                        consumed: pos,
+                        status: Status::NeedInput,
+                    })
+                });
+            }
+            if tag {
+                let mut h = [0u8; ID3_HEADER];
+                h.copy_from_slice(&rest[..ID3_HEADER]);
+                if let Some(len) = id3v2_len(&h) {
+                    self.tag_left = len;
+                    continue;
+                }
+            }
+            self.magic = [rest[0], rest[1], rest[2], rest[3]];
+            self.codec = self.sniff(&rest[..4]);
+            return Ok(pos);
+        }
     }
 
     fn sniff(&self, magic: &[u8]) -> Codec {
@@ -247,6 +347,7 @@ impl qy_core::engine::Resources for AutoDecoder {
         dispatch_ref!(self, d => d.repair_count(), 0)
     }
 
+    #[cfg_attr(not(any(feature = "wav", feature = "flac")), allow(unused_variables))]
     fn repair(&self, index: usize) -> Option<qy_core::engine::Repair> {
         dispatch_ref!(self, d => d.repair(index), None)
     }
@@ -255,6 +356,8 @@ impl qy_core::engine::Resources for AutoDecoder {
 impl Decoder for AutoDecoder {
     fn reset(&mut self) {
         self.codec = Codec::Unknown;
+        self.tag_left = 0;
+        self.tag_bytes = 0;
         #[cfg(feature = "wav")]
         if let Some(d) = &mut self.wav {
             d.reset();
@@ -269,23 +372,25 @@ impl Decoder for AutoDecoder {
         dispatch_ref!(self, d => d.format(), None)
     }
 
+    #[cfg_attr(not(any(feature = "wav", feature = "flac")), allow(unused_variables))]
     fn decode(&mut self, input: &[u8], eof: bool) -> Result<Progress, DecodeError> {
+        let mut skip = 0;
         if self.codec == Codec::Unknown {
-            if input.len() < 4 {
-                return if eof {
-                    // 不足 4 字节的文件：无法识别，也不是完整的 WAV/FLAC。
-                    Err(DecodeError::Truncated)
-                } else {
-                    Ok(Progress {
-                        consumed: 0,
-                        status: Status::NeedInput,
-                    })
-                };
+            match self.identify(input, eof) {
+                Ok(pos) => skip = pos,
+                Err(r) => return r,
             }
-            self.magic = [input[0], input[1], input[2], input[3]];
-            self.codec = self.sniff(&input[..4]);
         }
-        dispatch!(self, d => d.decode(input, eof), Err(DecodeError::Unsupported))
+        // 识别所在的调用里，标签字节计入消耗量；容器解码器只看到标签之后的输入。
+        let input = &input[skip..];
+        dispatch!(
+            self,
+            d => d.decode(input, eof).map(|p| Progress {
+                consumed: p.consumed + skip,
+                ..p
+            }),
+            Err(DecodeError::Unsupported)
+        )
     }
 
     fn pcm(&self) -> &[i32] {
@@ -334,14 +439,23 @@ mod tests {
         assert_eq!(d.codec(), Codec::Unknown);
         assert_eq!(d.decode(b"fL", true), Err(DecodeError::Truncated));
         d.reset();
+        // ID3v2 标签头：先等足 10 字节，再按声明长度跳过（完整用例见 tests/id3.rs）。
         assert_eq!(
-            d.decode(b"ID3\x04....", false),
+            d.decode(b"ID3\x04....", false).map(|p| p.status),
+            Ok(Status::NeedInput)
+        );
+        assert_eq!(d.codec(), Codec::Unknown);
+        assert_eq!(
+            d.decode(b"ID3\x04\0\0\0\0\0\x02..OggS", false),
             Err(DecodeError::Unsupported)
         );
         assert_eq!(d.codec(), Codec::Unrecognized);
+        assert_eq!(d.skipped_tag_bytes(), 12);
         let hint = d.unrecognized().map(|u| u.to_string()).unwrap_or_default();
         assert!(
-            hint.contains("49 44 33 04") && hint.contains("ID3v2"),
+            hint.contains("12 字节的 ID3v2")
+                && hint.contains("4F 67 67 53")
+                && hint.contains("Ogg"),
             "{hint}"
         );
         d.reset();

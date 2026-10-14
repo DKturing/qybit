@@ -90,7 +90,7 @@ qybit --device '<端点ID>' a.wav b.flac      # WASAPI 独占顺序播放（按�
 qybit matrix --device '<端点ID>' --out report # 设备格式矩阵，写出 JSON/CSV
 ```
 
-诊断（任何平台）：`qybit decode <输入> <输出.wav>` 用自有解码器与 pack 写成标准 WAV，可用任何播放器试听，用来区分“解码出错”与“设备输出出错”；`qybit tone <输出.wav> --rate 44100 --bits 16` 写一个 1 kHz 正弦测试音。
+诊断（任何平台）：`qybit decode <输入> <输出.wav>` 用自有解码器与 pack 写成标准 WAV，可用任何播放器试听，用来区分“解码出错”与“设备输出出错”；`qybit tone <输出.wav> --rate 44100 --bits 16` 写一个 1 kHz 正弦测试音。文件开头的 ID3v2 标签（常见于被标签软件写过的 FLAC）先按标签长度跳过再识别容器，播放与 `decode` 都会写明跳过的字节数（[docs/w1-wav-tolerance.md](docs/w1-wav-tolerance.md) §6）。
 
 端点 ID 形如 `{0.0.0.00000000}.{…}`。在 PowerShell 中必须加单引号，否则 `{…}` 会被当成脚本块，设备 ID 传不进程序；cmd 中不需要引号。
 

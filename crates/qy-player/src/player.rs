@@ -263,7 +263,15 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 request,
                 ..
             } => self.read(generation, request),
-            HostAction::Close { .. } => self.file = None,
+            HostAction::Close { .. } => {
+                self.file = None;
+                let tag = self.res.engine.decoder().skipped_tag_bytes();
+                if tag > 0 {
+                    self.line(&format!(
+                        "  已跳过文件开头的 ID3v2 标签（{tag} 字节，元数据，不含音频）"
+                    ));
+                }
+            }
             HostAction::SelectDevice { .. } => {
                 // 复用策略为 Accepts，引擎不会请求选择设备格式。
                 self.report.protocol_errors += 1;
@@ -789,6 +797,43 @@ mod tests {
         let mut b = backend(&ALL, FakeDevice::Packet);
         let r = play(&mut b, &mut res, &files[..1]);
         assert!(r.finished && r.software_path_intact());
+    }
+
+    /// 文件开头的 ID3v2 标签：跳过后设备字节与无标签文件相同，实时输出写明跳过的字节数。
+    #[test]
+    fn leading_id3_tag_is_skipped_and_reported() {
+        let wav = fixture("pcm16_stereo_44k.wav");
+        // ID3v2.3 标签头 + 声明长度 300（syncsafe 02 2C）的帧区。
+        let mut file = vec![b'I', b'D', b'3', 3, 0, 0, 0, 0, 0x02, 0x2C];
+        file.resize(310, 0);
+        file.extend_from_slice(&wav);
+        let path = std::env::temp_dir().join(format!("qybit-id3-{}.wav", std::process::id()));
+        assert!(std::fs::write(&path, &file).is_ok());
+        let files = [path.clone()];
+        let mut b = backend(&ALL, FakeDevice::Packet);
+        let Ok(mut res) = HostResources::new() else {
+            panic!("res");
+        };
+        let mut lines = Vec::new();
+        let r = play_with(
+            &mut b,
+            &mut res,
+            &mut Files(&files),
+            PlayControl {
+                on_line: &mut |l: &str| lines.push(l.to_string()),
+                stop: None,
+            },
+        );
+        let _ = std::fs::remove_file(&path);
+        let all = lines.join("\n");
+        assert!(r.finished && r.software_path_intact(), "{all}");
+        assert!(
+            all.contains("已跳过文件开头的 ID3v2 标签（310 字节"),
+            "{all}"
+        );
+        let outs = b.outputs();
+        assert_eq!(outs.len(), 1);
+        check_output(&outs[0], &data_chunk(&wav));
     }
 
     /// W1：修正按曲目写入报告（不改样本：设备字节等于独立参考）；R5 截断写明缺少的字节数；

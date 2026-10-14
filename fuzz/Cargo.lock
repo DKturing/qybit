@@ -228,6 +228,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "qy-codec-auto"
+version = "0.0.0"
+dependencies = [
+ "qy-codec-flac",
+ "qy-codec-wav",
+ "qy-core",
+]
+
+[[package]]
 name = "qy-codec-flac"
 version = "0.0.0"
 dependencies = [
@@ -261,6 +270,7 @@ version = "0.0.0"
 dependencies = [
  "embedded-sdmmc",
  "libfuzzer-sys",
+ "qy-codec-auto",
  "qy-codec-flac",
  "qy-codec-wav",
  "qy-core",

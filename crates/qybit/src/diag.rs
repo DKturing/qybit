@@ -128,6 +128,12 @@ pub fn decode(input: &Path, out: &Path) -> Result<String, String> {
         dev.container_bits(),
         out.display()
     ));
+    if d.skipped_tag_bytes() > 0 {
+        msg.push_str(&format!(
+            "\n跳过文件开头的 ID3v2 标签 {} 字节（元数据，不含音频）",
+            d.skipped_tag_bytes()
+        ));
+    }
     for i in 0..d.repair_count() {
         if let Some(r) = d.repair(i) {
             msg.push_str(&format!("\n按规则修正文件结构：{r}（样本未改动）"));

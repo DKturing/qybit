@@ -72,6 +72,7 @@ jobs:
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-host-embedded -- -D warnings
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-pcm-format --features static-queue -- -D warnings
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-codec-auto --no-default-features --features wav -- -D warnings
+      - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-codec-auto --no-default-features -- -D warnings
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-core -p qy-codec-wav -p qy-pcm-format -p qy-codec-flac -p qy-codec-auto -- -D warnings
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-codec-flac --features static-cell -- -D warnings
       - run: cargo clippy --locked --target thumbv7em-none-eabihf -p qy-codec-flac --features test-metrics -- -D warnings
@@ -179,6 +180,9 @@ jobs:
           - target: flac_decode
             fixtures: crates/qy-codec-flac/tests/fixtures/*.flac
             max_len: 1048576
+          - target: auto_decode
+            fixtures: crates/qy-codec-wav/tests/fixtures/*.wav crates/qy-codec-flac/tests/fixtures/*.flac
+            max_len: 1048576
           - target: fat_storage
             fixtures: ""
             max_len: 4096
@@ -192,8 +196,15 @@ jobs:
           mkdir -p fuzz/corpus/${{ matrix.target }}
           for f in ${{ matrix.fixtures }}; do
             n=$(basename "$f")
-            (printf '\x00'; cat "$f") > "fuzz/corpus/${{ matrix.target }}/$n.s0"
-            (printf '\x87'; cat "$f") > "fuzz/corpus/${{ matrix.target }}/$n.s87"
+            if [ "${{ matrix.target }}" = auto_decode ]; then
+              # 第二字节为标签参数：不加标签 / v2.3 标签 / v2.4 带标签尾。
+              (printf '\x00\x00'; cat "$f") > "fuzz/corpus/auto_decode/$n.s0"
+              (printf '\x87\x0b'; cat "$f") > "fuzz/corpus/auto_decode/$n.s87"
+              (printf '\x02\x37'; cat "$f") > "fuzz/corpus/auto_decode/$n.s2t"
+            else
+              (printf '\x00'; cat "$f") > "fuzz/corpus/${{ matrix.target }}/$n.s0"
+              (printf '\x87'; cat "$f") > "fuzz/corpus/${{ matrix.target }}/$n.s87"
+            fi
           done
           if [ "${{ matrix.target }}" = fat_storage ]; then
             printf '\x00' > fuzz/corpus/fat_storage/fat16
