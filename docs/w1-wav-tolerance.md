@@ -132,7 +132,21 @@ R3 的两种情况：
 - **修复**：data 读完后，RIFF 余下的字节尚未到齐就等待更多输入或源结束，再做判断。结果与分块无关。
 - **回归**：新增夹具 `fix_riff_long_by_2` 与 `fix_riff_long_partial_tail`。夹具测试的逐字节与 200 个随机分块种子都覆盖这一点；把修复改回去，夹具测试即失败（`fix_riff_long_partial_tail: 逐字节`）。
 
-正式运行（修复后的代码，10 分钟）：进行中，结果在下一次提交中补上。
+**正式运行**（修复后的最终代码）：
+
+| 时长 | 执行次数 | 初始语料（去重后） | 覆盖 / 特征 / 语料 | 结果 |
+| ---: | ---: | ---: | --- | --- |
+| 616 秒 | 13 925 876 | 174（119） | 599 / 1951 / 300 | **0 崩溃、0 超时、0 内存超限** |
+
+命令：
+
+```text
+cd fuzz
+cargo +nightly fuzz run wav_decode corpus/wav_decode_w1b -- \
+  -max_total_time=600 -max_len=65536 -fork=4 -ignore_crashes=1 -seed=20261014
+```
+
+开发机为 4 vCPU 的 KVM 虚拟机（见 [r1-reliability.md §6.1](r1-reliability.md)）。CI 的 fuzz 冒烟照旧以全部 WAV 夹具为初始语料运行 60 秒。
 
 ## 6. 范围外
 
