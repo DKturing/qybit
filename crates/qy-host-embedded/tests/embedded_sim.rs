@@ -816,3 +816,34 @@ fn watermark_low_critical_and_underrun_order() {
     );
     eprintln!("超出预填：第一次欠载时 {first:?}；{line}");
 }
+
+/// R1 模型随机测试发现的回归（种子 11）：播放结束后“上一首”会重新开始播放，此时状态必须是
+/// playing，`scan` 必须被拒绝（之前宿主自己维护的标志仍为“已停止”，`scan` 在播放中重建存储，
+/// 导致读取失败）。
+#[test]
+fn prev_after_finish_resumes_and_blocks_scan() {
+    let tracks = long_playlist();
+    let Ok((mut p, w, _)) = setup(disk(image(&tracks)), caps(), TIMING, ErrorPolicy::Skip) else {
+        panic!("时序");
+    };
+    assert!(p.play(2));
+    let mut notices = Vec::new();
+    run(&mut p, &w, 60_000_000, &mut notices, |_, _, _| {});
+    assert_eq!(notices.last(), Some(&Notice::Finished));
+    assert!(!p.status().active);
+    let mut out = String::new();
+    let _ = p.command(qy_host_embedded::Command::Prev, &mut out);
+    assert!(p.status().active, "上一首应重新开始播放");
+    out.clear();
+    let _ = p.command(qy_host_embedded::Command::Scan, &mut out);
+    assert_eq!(out, "ERR scan busy\n");
+    let mut notices = Vec::new();
+    run(&mut p, &w, 120_000_000, &mut notices, |_, _, _| {});
+    let s = p.status();
+    assert_eq!(
+        (s.counters.read_errors, s.counters.open_errors),
+        (0, 0),
+        "{s:?}"
+    );
+    assert_eq!(notices.last(), Some(&Notice::Finished));
+}

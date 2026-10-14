@@ -112,7 +112,6 @@ where
     device: Option<DeviceFormat>,
     running: bool,
     draining: bool,
-    active: bool,
     ring_generation: u64,
     open_track: Option<u32>,
     counters: Counters,
@@ -149,7 +148,6 @@ where
             device: None,
             running: false,
             draining: false,
-            active: false,
             ring_generation: 0,
             open_track: None,
             counters: Counters::default(),
@@ -209,7 +207,8 @@ where
             .with(|f| (f.stats(), f.queued_frames()))
             .unwrap_or_default();
         Status {
-            active: self.active,
+            // 以引擎状态为准（播放结束后的上一首/下一首会重新开始播放）。
+            active: self.engine.is_active(),
             paused: self.engine.is_paused(),
             track: self.engine.playing_track(),
             tracks: self.engine.track_count(),
@@ -232,14 +231,12 @@ where
         self.engine.stop();
         self.flush_control();
         self.engine.play(first, count);
-        self.active = true;
         true
     }
 
     pub fn stop(&mut self) {
         self.engine.stop();
         self.flush_control();
-        self.active = false;
     }
 
     pub fn pause(&mut self) {
@@ -288,11 +285,8 @@ where
             }
             Poll::Yield => Step::Busy,
             Poll::Wait(Wait::QueueFull | Wait::Device | Wait::Io) => Step::Idle,
-            Poll::Idle => {
-                // 未播放，或播放列表已结束/失败/停止（含最后一首时的“下一首”）。
-                self.active = false;
-                Step::Idle
-            }
+            // 未播放，或播放列表已结束/失败/停止。
+            Poll::Idle => Step::Idle,
         }
     }
 
@@ -314,7 +308,6 @@ where
         self.counters.output_errors = self.counters.output_errors.saturating_add(1);
         self.engine.device_lost();
         self.flush_control();
-        self.active = false;
         self.notice(Notice::OutputError);
     }
 
@@ -392,11 +385,9 @@ where
                 self.notice(Notice::Skipped { track, fault });
             }
             HostAction::Finished => {
-                self.active = false;
                 self.notice(Notice::Finished);
             }
             HostAction::Failed { track, fault } => {
-                self.active = false;
                 self.count_fault(fault);
                 self.notice(Notice::Failed { track, fault });
             }
@@ -551,7 +542,7 @@ where
             }
             Command::Status => write_status(w, &self.status()),
             Command::Scan => {
-                if self.active {
+                if self.engine.is_active() {
                     return writeln!(w, "ERR scan busy");
                 }
                 match self.storage.rescan() {

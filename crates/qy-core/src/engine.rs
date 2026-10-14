@@ -565,6 +565,11 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
         })
     }
 
+    /// 播放列表是否在进行中（含排空尾部）；停止、正常结束或失败后为假。
+    pub fn is_active(&self) -> bool {
+        !matches!(self.mode, Mode::Idle | Mode::Done)
+    }
+
     pub fn is_paused(&self) -> bool {
         self.paused
     }
