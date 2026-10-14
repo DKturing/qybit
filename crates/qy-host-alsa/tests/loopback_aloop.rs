@@ -58,6 +58,7 @@ fn loop_once(
         sync_offset: None,
         compared_bytes: want.len(),
         verdict: Verdict::Failed(String::new()),
+        watermark: None,
     };
     let period = case.rate / 100;
     let capture = match start_capture(&dev.capture, case.format, case.rate, case.channels, period) {
@@ -89,6 +90,11 @@ fn loop_once(
         }
     };
     entry.captured_bytes = captured.len();
+    entry.watermark = r
+        .streams
+        .first()
+        .and_then(|s| s.render.as_ref())
+        .map(|x| x.watermark);
     if !r.software_path_intact() {
         entry.verdict = Verdict::Failed(r.summary());
         return entry;
@@ -135,6 +141,7 @@ fn aloop_loopback_matrix() {
                 sync_offset: None,
                 compared_bytes: 0,
                 verdict,
+                watermark: None,
             });
             continue;
         }

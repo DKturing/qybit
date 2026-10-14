@@ -89,6 +89,7 @@ fn alsa_render_loop_does_not_allocate() {
     let mut prio = FakePriority::default();
     let cfg = WriteConfig {
         block_align: 4,
+        period_frames: 441,
         event_timeout_ms: 2000,
         idle_sleep: Duration::from_micros(50),
     };

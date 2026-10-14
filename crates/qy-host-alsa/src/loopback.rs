@@ -90,6 +90,8 @@ pub struct LoopEntry {
     pub sync_offset: Option<usize>,
     pub compared_bytes: usize,
     pub verdict: Verdict,
+    /// 回环流的软件队列水位（R1）；未播放时为 `None`。
+    pub watermark: Option<qy_pcm_format::queue::Watermark>,
 }
 
 /// 在回录中查找同步序列的期望字节，返回起始偏移。
@@ -216,6 +218,19 @@ impl LoopReport {
                     );
                 }
                 None => o.push_str("\"applied\": null, "),
+            }
+            match &e.watermark {
+                Some(w) => {
+                    let _ = write!(
+                        o,
+                        "\"watermark\": {{\"min_frames\": {}, \"low\": {}, \"critical\": {}, \"observations\": {}}}, ",
+                        w.min_frames.map_or("null".to_string(), |x| x.to_string()),
+                        w.low,
+                        w.critical,
+                        w.observations
+                    );
+                }
+                None => o.push_str("\"watermark\": null, "),
             }
             let _ = write!(
                 o,

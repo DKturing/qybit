@@ -300,6 +300,7 @@ fn file_plugin_loopback_matrix() {
             sync_offset: None,
             compared_bytes: 0,
             verdict: Verdict::Failed(String::new()),
+            watermark: None,
         };
         if case.source_bits > case.format.valid_bits() {
             entry.verdict = if r.streams.is_empty() && !r.open_failures.is_empty() {
@@ -313,6 +314,11 @@ fn file_plugin_loopback_matrix() {
             let captured = started_files(&b, &r).pop().unwrap_or_default();
             let (off, v) = align_and_compare(&captured, &tracks.sync_bytes, &tracks.test_bytes);
             entry.captured_bytes = captured.len();
+            entry.watermark = r
+                .streams
+                .first()
+                .and_then(|s| s.render.as_ref())
+                .map(|x| x.watermark);
             entry.sync_offset = off;
             entry.compared_bytes = tracks.test_bytes.len();
             entry.verdict = v;

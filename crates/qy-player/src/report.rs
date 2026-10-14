@@ -264,6 +264,22 @@ impl<A: AttemptRecord> PlaybackReport<A> {
                 Evidence::NotCaptured => o.push_str("  回录证据：无（未回录）\n"),
             }
             let _ = writeln!(o, "  已入队帧：{}", s.pushed_frames);
+            if let Some(r) = &s.render {
+                let w = &r.watermark;
+                match (w.min_frames, w.min_ms(s.format.sample_rate())) {
+                    (Some(f), Some(ms)) => {
+                        let _ = writeln!(
+                            o,
+                            "  队列水位：最低 {f} 帧（{ms} ms），低水位 {} 次，临界 {} 次（不含设备缓冲）",
+                            w.low, w.critical
+                        );
+                    }
+                    _ => o.push_str(
+                        "  队列水位：未观测（流未进入稳定播放）
+",
+                    ),
+                }
+            }
             match &s.render {
                 None => o.push_str("  渲染：无报告（渲染线程异常结束）\n"),
                 Some(r) => {

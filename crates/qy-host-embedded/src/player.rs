@@ -22,6 +22,7 @@ use qy_core::engine::{
 };
 use qy_core::{Decoder, DeviceFormat, Fault};
 use qy_pcm_format::frames_for_millis;
+use qy_pcm_format::queue::Watermark;
 use qy_pcm_format::static_queue::{StaticProducer, reconfigure};
 
 use crate::budget::{self, BudgetError, Load, Margins};
@@ -457,9 +458,16 @@ where
         self.ring_generation += 1;
         let generation = self.ring_generation;
         let sink = self.engine.sink_mut();
+        let prefill_frames = frames_for_millis(format.sample_rate(), prefill);
+        let period = u64::from(self.output.caps().buffer_frames);
         let ok = self
             .feeder
-            .with(|f| reconfigure(sink, f.reset_for_open(), &format, required, generation).is_ok())
+            .with(|f| {
+                let ok =
+                    reconfigure(sink, f.reset_for_open(), &format, required, generation).is_ok();
+                f.set_watermark(Watermark::for_stream(prefill_frames, period));
+                ok
+            })
             .unwrap_or(false);
         if !ok {
             self.counters.output_errors = self.counters.output_errors.saturating_add(1);
@@ -580,7 +588,7 @@ pub fn write_status(w: &mut impl fmt::Write, s: &Status) -> fmt::Result {
     }
     let c = s.counters;
     let o = s.output;
-    writeln!(
+    write!(
         w,
         "queued={} underruns={} underrun_frames={} paused_fills={} data_frames={} \
          open_errors={} read_errors={} decode_errors={} unsupported={} skipped={} \
@@ -600,7 +608,17 @@ pub fn write_status(w: &mut impl fmt::Write, s: &Status) -> fmt::Result {
         c.protocol_errors + s.engine.protocol_errors,
         s.engine.stale,
         c.notices_dropped
-    )
+    )?;
+    // R1 水位：当前设备流的最低队列帧数（及毫秒）、低水位与临界次数。
+    let m = &o.watermark;
+    match (
+        m.min_frames,
+        s.device.and_then(|d| m.min_ms(d.sample_rate())),
+    ) {
+        (Some(f), Some(ms)) => write!(w, " wm_min_frames={f} wm_min_ms={ms}")?,
+        _ => w.write_str(" wm_min_frames=none")?,
+    }
+    writeln!(w, " wm_low={} wm_critical={}", m.low, m.critical)
 }
 
 /// 通知行：`EVENT ...`。

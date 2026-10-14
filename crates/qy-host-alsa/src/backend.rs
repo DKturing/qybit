@@ -63,6 +63,7 @@ pub struct AlsaPending<X: Pcm, P> {
     pcm: X,
     format: DeviceFormat,
     buffer_frames: u32,
+    period_frames: u32,
     negotiation: Negotiation,
     priority: P,
 }
@@ -245,6 +246,7 @@ impl<O: Opener, P: ThreadPriority + Clone + Send + 'static> Backend for AlsaBack
                                 pcm,
                                 format,
                                 buffer_frames: c.request.buffer_frames,
+                                period_frames: c.request.period_frames,
                                 negotiation: Negotiation {
                                     source: *source,
                                     attempts,
@@ -309,6 +311,7 @@ impl<X: Pcm, P: ThreadPriority + Clone + Send + 'static> PendingStream for AlsaP
     fn start(self, mut consumer: FrameConsumer, ctl: Arc<RenderControl>) -> AlsaRunning {
         let cfg = WriteConfig {
             block_align: usize::from(self.format.block_align()),
+            period_frames: self.period_frames,
             event_timeout_ms: WAIT_TIMEOUT_MS,
             idle_sleep: Duration::from_millis(1),
         };

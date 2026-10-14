@@ -398,6 +398,8 @@ fn check(tag: &str, elf: &Path, e: &Expect, report: &mut String) {
         "output_errors=0",
         "feeder_errors=0",
         "protocol_errors=0",
+        // R1 水位：QEMU 中 DMA 只在主循环空闲时取数，不会出现临界。
+        "wm_critical=0",
     ] {
         assert!(status.contains(want), "{tag}: {status}");
     }

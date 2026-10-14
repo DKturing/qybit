@@ -264,7 +264,18 @@ impl<B: Backend> Player<'_, B> {
                     stream: Stream::Pending(pending),
                     format,
                     plan: None,
-                    ctl: Arc::new(RenderControl::default()),
+                    ctl: {
+                        let ctl = RenderControl::default();
+                        let prefill = self
+                            .res
+                            .engine
+                            .config()
+                            .caps
+                            .prefill_frames(format.sample_rate());
+                        ctl.prefill_frames
+                            .store(prefill, std::sync::atomic::Ordering::Release);
+                        Arc::new(ctl)
+                    },
                     pushed_base: self.res.engine.stats().frames_pushed,
                 });
                 Some(format)
@@ -539,6 +550,24 @@ mod tests {
             // 截断前 50 个完整帧全部播放。
             let wav = fixture("trunc_mid_frame.wav");
             check_output(&outs[0], &wav[44..44 + 50 * 4]);
+        }
+    }
+
+    /// R1：每个输出流报告播放计划与队列水位（两种渲染循环）。
+    #[test]
+    fn summary_reports_plan_and_watermark() {
+        for device in [FakeDevice::Packet, FakeDevice::ShortWrite { seed: 5 }] {
+            let mut b = backend(&ALL, device);
+            let (r, _) = run(&mut b, &["pcm24_stereo_large.wav"]);
+            let s = r.summary();
+            assert!(s.contains("播放计划：源 "), "{s}");
+            assert!(s.contains("队列水位："), "{s}");
+            let Some(render) = r.streams.first().and_then(|st| st.render.as_ref()) else {
+                panic!("缺少渲染报告：{s}");
+            };
+            let w = render.watermark;
+            assert!(w.low_frames() > 0 && w.critical_frames() > 0, "{w:?}");
+            assert_eq!(r.exit_code(), 0, "{s}");
         }
     }
 

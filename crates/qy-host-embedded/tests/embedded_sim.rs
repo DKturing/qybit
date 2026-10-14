@@ -745,3 +745,74 @@ fn plan_reports_flac_demand() {
     );
     check_segments(&w, &expected(&tracks, &[true], &[None]), "FLAC 计划");
 }
+
+/// R1 水位：时序在声明以内时最低水位高于临界线（临界 0 次）；停顿超过预填时，先出现临界再出现欠载。
+/// 数值是确定的（虚拟时间、固定磁盘时序），打印出来写入记录。
+#[test]
+fn watermark_low_critical_and_underrun_order() {
+    let tracks = long_playlist();
+    // 声明以内（与 slow_reads 相同的慢卡）。
+    let d = Disk {
+        block_us: 150,
+        stall_every: 40,
+        stall_us: 8_000,
+        ..disk(image(&tracks))
+    };
+    let timing = Timing {
+        wav_read_us: 14_000,
+        flac_read_us: 26_000,
+        ..TIMING
+    };
+    let Ok((mut p, w, _)) = setup(d, caps(), timing, ErrorPolicy::Skip) else {
+        panic!("时序");
+    };
+    assert!(p.play(0));
+    let mut notices = Vec::new();
+    let mut lowest = u64::MAX;
+    run(&mut p, &w, 60_000_000, &mut notices, |p, _, _| {
+        let s = p.status();
+        if let Some(m) = s.output.watermark.min_frames {
+            lowest = lowest.min(m);
+        }
+    });
+    let s = p.status();
+    let wm = s.output.watermark;
+    assert_eq!(s.output.underruns, 0);
+    assert_eq!(wm.critical, 0, "{wm:?}");
+    assert!(
+        wm.min_frames.is_some_and(|m| m >= wm.critical_frames()),
+        "{wm:?}"
+    );
+    eprintln!("声明以内：最后一段水位 {wm:?}，全程最低 {lowest} 帧");
+
+    // 超出预填：每 300 次块读取停顿 400 ms。第一次欠载时临界计数必须已大于 0。
+    let d = Disk {
+        block_us: 100,
+        stall_every: 300,
+        stall_us: 400_000,
+        ..disk(image(&tracks))
+    };
+    let Ok((mut p, w, _)) = setup(d, caps(), TIMING, ErrorPolicy::Skip) else {
+        panic!("时序");
+    };
+    assert!(p.play(0));
+    let mut notices = Vec::new();
+    let mut at_first_underrun = None;
+    run(&mut p, &w, 120_000_000, &mut notices, |p, _, _| {
+        let s = p.status();
+        if at_first_underrun.is_none() && s.output.underruns > 0 {
+            at_first_underrun = Some(s.output.watermark);
+        }
+    });
+    let Some(first) = at_first_underrun else {
+        panic!("应发生欠载");
+    };
+    assert!(first.critical > 0, "第一次欠载前应已出现临界：{first:?}");
+    let mut line = String::new();
+    let _ = qy_host_embedded::player::write_status(&mut line, &p.status());
+    assert!(
+        line.contains(" wm_low=") && line.contains(" wm_critical="),
+        "{line}"
+    );
+    eprintln!("超出预填：第一次欠载时 {first:?}；{line}");
+}

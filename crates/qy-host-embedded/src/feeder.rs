@@ -11,7 +11,7 @@
 //! - **暂停静音**：暂停期间整缓冲输出静音，单独计数，不算欠载；
 //! - **排空尾部静音**：排空时队列已空补的静音，不算欠载。
 
-use qy_pcm_format::queue::FrameSource;
+use qy_pcm_format::queue::{FrameSource, Watermark};
 use qy_pcm_format::static_queue::StaticConsumer;
 
 /// 输出统计（自启动起累计）。
@@ -31,6 +31,8 @@ pub struct OutputStats {
     pub paused_fills: u64,
     /// 缓冲长度不是完整帧、队列未配置或读授权冲突的次数（应为 0）。
     pub errors: u32,
+    /// 当前设备流的队列水位（R1；运行中、未暂停、未排空时每次取数前观测）。
+    pub watermark: Watermark,
 }
 
 /// 一次 `fill` 的结果：缓冲前 `data_frames` 帧为有效数据，其后为静音。
@@ -96,6 +98,11 @@ impl<const N: usize> Feeder<N> {
                 silence_frames: frames,
             };
         }
+        if !self.draining {
+            self.stats
+                .watermark
+                .observe(self.consumer.available_frames() as u64);
+        }
         let n = match self.consumer.pop_frames(out) {
             Ok(n) => n,
             Err(_) => {
@@ -160,6 +167,11 @@ impl<const N: usize> Feeder<N> {
     /// 队列中待播帧数。
     pub fn queued_frames(&self) -> usize {
         self.consumer.available_frames()
+    }
+
+    /// 设置新设备流的水位阈值（重新开始统计）。
+    pub fn set_watermark(&mut self, w: Watermark) {
+        self.stats.watermark = w;
     }
 
     /// 设备重配置前（DMA 已停止）：取得消费端并清除运行状态。

@@ -712,6 +712,7 @@ impl<A: AttemptRecord> PendingStream for FakePending<A> {
                 FakeDevice::ShortWrite { seed } => {
                     let cfg = WriteConfig {
                         block_align,
+                        period_frames: format.sample_rate() / 50,
                         event_timeout_ms: 2000,
                         idle_sleep: Duration::from_micros(100),
                     };

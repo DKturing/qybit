@@ -62,6 +62,8 @@ pub trait WriteApi {
 #[derive(Debug, Clone, Copy)]
 pub struct WriteConfig {
     pub block_align: usize,
+    /// 设备周期帧数（水位统计的临界线为 2 个周期，R1）。
+    pub period_frames: u32,
     pub event_timeout_ms: u32,
     /// 队列暂时为空、无事可做时的休眠间隔。
     pub idle_sleep: Duration,
@@ -109,6 +111,10 @@ pub fn render<A: WriteApi, P: ThreadPriority>(
 
 impl<A: WriteApi> Loop<'_, A> {
     fn run(&mut self, report: &mut RenderReport) -> Result<RenderEnd, ApiError> {
+        report.watermark = qy_pcm_format::queue::Watermark::for_stream(
+            self.ctl.prefill_frames.load(Ordering::Acquire),
+            u64::from(self.cfg.period_frames),
+        );
         let mut started = false;
         // 自上次准备（初始或 recover）以来写入的帧数。
         let mut since_prepare = 0u64;
@@ -144,6 +150,11 @@ impl<A: WriteApi> Loop<'_, A> {
                     continue;
                 }
             };
+            if started && !eof {
+                report
+                    .watermark
+                    .observe(self.consumer.available_frames() as u64);
+            }
             let fill = self.fill(report, room)?;
             if let Some(missing) = fill.xrun {
                 self.xrun(report, missing)?;
@@ -264,6 +275,7 @@ mod tests {
 
     fn cfg(f: &DeviceFormat) -> WriteConfig {
         WriteConfig {
+            period_frames: f.sample_rate() / 100,
             block_align: usize::from(f.block_align()),
             event_timeout_ms: 2000,
             idle_sleep: Duration::from_micros(50),

@@ -31,6 +31,8 @@ pub struct RenderControl {
     /// 欠载事件数与缺失帧数（实时可读）。
     pub underrun_events: AtomicU64,
     pub underrun_frames: AtomicU64,
+    /// 本流的预填帧数（生产端在启动渲染前写入），用于水位统计的低水位线（R1）。
+    pub prefill_frames: AtomicU64,
 }
 
 /// 平台 API 操作。
@@ -145,6 +147,8 @@ pub struct RenderReport {
     pub underrun_frames: u64,
     pub underrun_events: u64,
     pub underruns: [Option<UnderrunRecord>; MAX_UNDERRUN_RECORDS],
+    /// 软件队列水位（R1）：启动后、未到 EOF 时每次取数前观测；不含设备缓冲中的帧。
+    pub watermark: qy_pcm_format::queue::Watermark,
 }
 
 impl RenderReport {
@@ -159,6 +163,7 @@ impl RenderReport {
             underrun_frames: 0,
             underrun_events: 0,
             underruns: [None; MAX_UNDERRUN_RECORDS],
+            watermark: qy_pcm_format::queue::Watermark::new(0, 0),
         }
     }
 

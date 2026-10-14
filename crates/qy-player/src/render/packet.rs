@@ -88,6 +88,10 @@ impl<A: PacketApi> Loop<'_, A> {
         if self.ctl.stop.load(Ordering::Acquire) {
             return Ok(RenderEnd::Stopped);
         }
+        report.watermark = qy_pcm_format::queue::Watermark::for_stream(
+            self.ctl.prefill_frames.load(Ordering::Acquire),
+            u64::from(self.cfg.buffer_frames),
+        );
         self.packet(report)?;
         self.api.start()?;
         loop {
@@ -124,6 +128,11 @@ impl<A: PacketApi> Loop<'_, A> {
         let buf = self.api.get_buffer(frames)?;
         let len_ok = buf.len() == frames as usize * ba;
         let got = if len_ok && self.drain_left.is_none() {
+            if !eof {
+                report
+                    .watermark
+                    .observe(self.consumer.available_frames() as u64);
+            }
             self.consumer.pop_frames(buf).unwrap_or(0)
         } else {
             0

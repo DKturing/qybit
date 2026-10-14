@@ -135,6 +135,8 @@ pub struct Segment {
     pub valid: Vec<u8>,
     /// 已确认无后续数据时整包补齐的尾部静音帧数。
     pub tail_padding_frames: u64,
+    /// 队列水位（R1；运行中、未暂停、未排空时每个设备周期取数前观测；不计入摘要）。
+    pub watermark: qy_pcm_format::queue::Watermark,
 }
 
 /// 欠载事件。
@@ -672,11 +674,21 @@ impl Sim<'_> {
             self.packet.resize(packet, 0);
         }
         self.phase = Phase::Prefill;
+        let prefill = self
+            .host
+            .engine
+            .config()
+            .caps
+            .prefill_frames(format.sample_rate());
         self.report.segments.push(Segment {
             epoch: self.epoch,
             format,
             valid: Vec::new(),
             tail_padding_frames: 0,
+            watermark: qy_pcm_format::queue::Watermark::for_stream(
+                prefill,
+                u64::from(format.sample_rate() / 100),
+            ),
         });
         true
     }
@@ -720,6 +732,9 @@ impl Sim<'_> {
             return;
         }
         let available = self.host.consumer.available_frames();
+        if !draining && let Some(seg) = self.report.segments.last_mut() {
+            seg.watermark.observe(available as u64);
+        }
         if draining && available == 0 {
             // 上一包有效音频已在上个周期播放完成。
             if let Some(d) = self.device.as_mut() {
