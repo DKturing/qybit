@@ -23,7 +23,7 @@ use crate::chmap::chmap_text;
 use qy_pcm_format::ring::FrameConsumer;
 use qy_player::render::write::{WriteConfig, render};
 use qy_player::render::{RenderControl, RenderReport, ThreadPriority};
-use qy_player::{Backend, PendingStream, RunningStream, Submission};
+use qy_player::{Backend, PendingStream, PhysicalSpeakers, RunningStream, Submission};
 
 use crate::api::AlsaWriteApi;
 use crate::attempt::{Attempt, Negotiation, OpenFailure};
@@ -112,6 +112,7 @@ fn failure(source: &SourceFormat, attempts: Vec<Attempt>, message: String) -> Op
             source: *source,
             attempts,
             chosen: None,
+            speakers: PhysicalSpeakers::NotQueryable,
         },
         message,
     }
@@ -251,6 +252,8 @@ impl<O: Opener, P: ThreadPriority + Clone + Send + 'static> Backend for AlsaBack
                                     source: *source,
                                     attempts,
                                     chosen: Some(chosen),
+                                    // ALSA 没有对应的物理扬声器属性（O1 §2），不推测。
+                                    speakers: PhysicalSpeakers::NotQueryable,
                                 },
                                 priority: self.priority.clone(),
                             });

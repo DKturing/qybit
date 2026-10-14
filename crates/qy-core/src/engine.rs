@@ -18,6 +18,7 @@ use crate::{
     Action, Core, CoreError, Decoder, DeviceFormat, Event, Fault, Generation, SourceFormat,
 };
 use qy_pcm_format::frames_for_millis;
+use qy_pcm_format::pack::ChannelMode;
 
 /// 设备帧队列的生产端（宿主提供：桌面为 `rtrb`，MCU 为静态 `bbqueue`）。
 pub use qy_pcm_format::queue::{
@@ -324,6 +325,17 @@ pub enum ReusePolicy {
     Identical,
 }
 
+/// 声道策略（AGENTS §3：严格路径之外只允许任务卡定义、明确开启并在报告中标注的选项）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChannelPolicy {
+    /// 严格路径：设备格式与源的扬声器位置相同（默认）。
+    #[default]
+    Strict,
+    /// 明确开启（tasks/O1.md）：单声道 `[FC]` 的源按立体声 `[FL FR]` 打开设备，每个样本原样复制到
+    /// 左右两路；样本值不变、不混音。每首这样处理的曲目都发出 [`HostAction::ChannelsDuplicated`]。
+    DuplicateMono,
+}
+
 /// 曲目出错时的策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorPolicy {
@@ -390,6 +402,9 @@ pub enum HostAction {
     /// 第 `track` 首在不改样本的前提下做过的一条结构修正（W1）。在该曲目关闭时、按解码器记录的
     /// 顺序逐条给出；宿主据此在报告中写明。
     Repaired { track: u32, repair: Repair },
+    /// 第 `track` 首按 [`ChannelPolicy::DuplicateMono`] 把单声道复制到左右两路（声道布局已改变，
+    /// 样本值未改变）。在该曲目配置设备时给出；宿主据此在报告中标为“已改变”。
+    ChannelsDuplicated { track: u32 },
     /// 播放列表正常结束，设备中的音频已播完。
     Finished,
     /// 播放失败并停止；失败前已入队的音频已播完。
@@ -464,6 +479,8 @@ pub struct EngineStats {
     pub frames_pushed: u64,
     /// 累计报告的结构修正条数（W1）。
     pub repairs: u32,
+    /// 按 [`ChannelPolicy::DuplicateMono`] 改变了声道布局的曲目数（O1）。
+    pub duplicated_tracks: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -524,6 +541,10 @@ pub struct Engine<D: Decoder + Resources, S: FrameSink> {
     marks: [(u32, u64); MARKS],
     marks_len: usize,
     stats: EngineStats,
+    channels: ChannelPolicy,
+    /// 当前曲目配置时是否按 [`ChannelPolicy::DuplicateMono`] 复制声道。按曲目锁定：播放中改变
+    /// 策略只影响之后配置的曲目，已打开的设备流不会改用另一种 pack。
+    duplicating: bool,
 }
 
 impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
@@ -545,7 +566,34 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
             marks: [(0, 0); MARKS],
             marks_len: 0,
             stats: EngineStats::default(),
+            channels: ChannelPolicy::Strict,
+            duplicating: false,
         }
+    }
+
+    /// 设置声道策略（默认 [`ChannelPolicy::Strict`]）。对之后配置的曲目生效；正在播放的曲目不变。
+    pub fn set_channel_policy(&mut self, policy: ChannelPolicy) {
+        self.channels = policy;
+    }
+
+    pub fn channel_policy(&self) -> ChannelPolicy {
+        self.channels
+    }
+
+    /// 按声道策略交给能力检查与设备协商的源格式：开启单声道复制且源为 `[FC]` 时为同采样率、
+    /// 同位数的 `[FL FR]`，否则为源格式本身。
+    fn presented(&self, source: SourceFormat) -> SourceFormat {
+        if self.channels == ChannelPolicy::DuplicateMono
+            && source.layout() == crate::ChannelLayout::MONO
+            && let Ok(f) = SourceFormat::with_layout(
+                source.sample_rate(),
+                crate::ChannelLayout::STEREO,
+                source.bits(),
+            )
+        {
+            return f;
+        }
+        source
     }
 
     pub fn core(&self) -> &Core<D> {
@@ -970,6 +1018,15 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
     }
 
     fn on_configure(&mut self, generation: Generation, source: SourceFormat) {
+        let actual = source;
+        let source = self.presented(actual);
+        self.duplicating = source != actual;
+        if self.duplicating {
+            self.stats.duplicated_tracks += 1;
+            self.push(HostAction::ChannelsDuplicated {
+                track: self.core.track(),
+            });
+        }
         if let Err(e) = self.cfg.caps.check(&source) {
             self.reject = Some(EngineFault::Capability(e));
             self.core_handle(Event::ConfigureFailed { generation });
@@ -1026,7 +1083,16 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
             return None;
         };
         let start = self.stats.frames_pushed;
-        let pushed = match self.sink.push(&pcm, &dev.format, self.scratch) {
+        // 单声道复制（O1）只用于配置时已按策略复制的曲目（源 [FC]、设备 [FL FR]）；其余一律严格 pack。
+        let mode = if self.duplicating
+            && pcm.format().layout() == crate::ChannelLayout::MONO
+            && dev.format.layout() == crate::ChannelLayout::STEREO
+        {
+            ChannelMode::DuplicateMono
+        } else {
+            ChannelMode::Exact
+        };
+        let pushed = match self.sink.push(&pcm, &dev.format, mode, self.scratch) {
             Ok(n) => n,
             Err(_) => {
                 self.fail_now(EngineFault::Output);

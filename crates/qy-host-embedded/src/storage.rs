@@ -11,9 +11,9 @@
 //! 目录项与簇链（见 `fatcheck`），不合格的结构不交给 `embedded-sdmmc`（它对部分损坏结构会 panic
 //! 或无界读取，R1 fuzz 发现）。不合格的文件跳过并计入 [`FatStorage::corrupt_entries`]。
 //!
-//! [`FatStorage`] 读取 MBR 第 1 个分区（FAT16/FAT32）根目录中扩展名为 `WAV` 或 `FLA`
-//! （`.flac` 的 8.3 短名）的文件，按短文件名排序成播放列表，最多 `M` 首。文件格式由解码器按文件头
-//! 识别，扩展名只用于筛选。拔卡或读错时返回错误，由引擎按出错策略处理；重新插卡后用
+//! [`FatStorage`] 读取 MBR 第 1 个分区（FAT16/FAT32）根目录中扩展名为 `WAV`、`FLA`
+//! （`.flac` 的 8.3 短名）或 `AIF`（`.aiff` / `.aifc` 的短名）的文件，按短文件名排序成播放列表，
+//! 最多 `M` 首。文件格式由解码器按文件头识别，扩展名只用于筛选。拔卡或读错时返回错误，由引擎按出错策略处理；重新插卡后用
 //! [`Storage::rescan`] 重建（会丢弃 `embedded-sdmmc` 的块缓存，避免读到旧卡内容）。
 
 use core::fmt;
@@ -61,8 +61,8 @@ impl TimeSource for NoClock {
     }
 }
 
-/// 播放列表收录的扩展名（短文件名，大写）。
-const EXTENSIONS: [&[u8]; 2] = [b"WAV", b"FLA"];
+/// 播放列表收录的扩展名（短文件名，大写）。`.aiff` / `.aifc` 的短文件名扩展名都是 `AIF`。
+const EXTENSIONS: [&[u8]; 3] = [b"WAV", b"FLA", b"AIF"];
 
 /// FAT 存储错误。
 #[derive(Debug)]

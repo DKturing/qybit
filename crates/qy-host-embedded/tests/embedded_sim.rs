@@ -9,12 +9,13 @@
 //! 5. 读错误、拔卡与重新插卡后 `scan`；
 //! 6. 串口命令：ls、play、pause/resume、next、prev、status、stop、错误命令；
 //! 7. 板级能力不足（缺采样率、只支持双声道）；
-//! 8. 无文件系统的存储（曲目表 + `embedded_storage::ReadStorage` 闪存）：同一夹具播放列表与读错误。
+//! 8. 无文件系统的存储（曲目表 + `embedded_storage::ReadStorage` 闪存）：同一夹具播放列表与读错误；
+//! 9. O1：串口命令 `mono-to-stereo` 开启单声道复制（只支持双声道的板），播放中关闭只影响之后的曲目。
 
 mod common;
 
 use common::*;
-use qy_core::engine::{CapabilityError, EngineFault, ErrorPolicy};
+use qy_core::engine::{CapabilityError, ChannelPolicy, EngineFault, ErrorPolicy};
 use qy_core::{DecodeError, Fault};
 use qy_host_embedded::command::LineBuffer;
 use qy_host_embedded::output::{OutputCaps, SelectError};
@@ -904,4 +905,125 @@ fn w1_repairs_counted_and_bit_exact() {
         &expected(&tracks, &[true; 4], &limit),
         "W1 修正播放列表",
     );
+}
+
+/// 独立公式：每个样本左对齐放入 C 位容器后写两份（单声道复制到左右两路）。
+fn place_twice(s: &[i32], n: u32, c: u32) -> Vec<u8> {
+    s.iter()
+        .flat_map(|&x| place(&[x], n, c).repeat(2))
+        .collect()
+}
+
+/// O1：板只支持双声道。默认（严格）时单声道按“声道不支持”拒绝；串口 `mono-to-stereo on` 后单声道
+/// WAV 与 AIFF 都按 [FL FR] 播放，每个样本原样写两份，与独立参考逐字节一致；立体声曲目不受影响并
+/// 续用同一设备。通知、计数与状态行写明“已改变”。播放中 `mono-to-stereo off` 不影响正在播放的曲目，
+/// 之后的单声道曲目照严格规则拒绝。
+#[test]
+fn mono_to_stereo_command_on_stereo_only_board() {
+    static STEREO: [u16; 1] = [2];
+    let stereo_only = OutputCaps {
+        channels: &STEREO,
+        ..caps()
+    };
+    let tracks = vec![
+        synth_wav("A.WAV", 48_000, 1, 16, 4_800, 11),
+        synth_wav("B.WAV", 48_000, 2, 16, 2_400, 12),
+        fixture("C.AIF", "aiff_20_mono_96k.aiff", 96_000, 1, 20),
+    ];
+    let a = place_twice(&tracks[0].samples, 16, 16);
+    let b = place(&tracks[1].samples, 16, 16);
+    let c = place_twice(&tracks[2].samples, 20, 32);
+
+    // 默认严格：两首单声道被拒绝，只有立体声曲目播放。
+    let Ok((mut p, w, n)) = setup(disk(image(&tracks)), stereo_only, TIMING, ErrorPolicy::Skip)
+    else {
+        panic!("时序");
+    };
+    assert_eq!(n, 3);
+    let mut names = String::new();
+    let _ = p.storage().track_name(2, &mut names);
+    assert_eq!(names, "C.AIF");
+    assert_eq!(p.engine().channel_policy(), ChannelPolicy::Strict);
+    assert!(p.play(0));
+    let mut notices = Vec::new();
+    run(&mut p, &w, 30_000_000, &mut notices, |_, _, _| {});
+    assert_eq!(p.status().counters.unsupported, 2);
+    assert_eq!(p.status().counters.duplicated, 0);
+    assert!(
+        !notices
+            .iter()
+            .any(|n| matches!(n, Notice::ChannelsDuplicated { .. }))
+    );
+    check_segments(&w, &[(48_000, 2, 16, 16, b.clone())], "严格");
+
+    // 串口开启：三首都播放。
+    let Ok((mut p, w, _)) = setup(disk(image(&tracks)), stereo_only, TIMING, ErrorPolicy::Skip)
+    else {
+        panic!("时序");
+    };
+    let mut lb = LineBuffer::<32>::new();
+    let out = send(&mut p, &mut lb, b"mono-to-stereo on\r\n");
+    assert!(
+        out.starts_with("OK mono-to-stereo=on altered mono[FC]->stereo[FL FR]"),
+        "{out}"
+    );
+    assert!(p.play(0));
+    let mut notices = Vec::new();
+    run(&mut p, &w, 30_000_000, &mut notices, |_, _, _| {});
+    let s = p.status();
+    assert_eq!(notices.last(), Some(&Notice::Finished));
+    assert_eq!(s.output.underruns, 0);
+    assert_eq!((s.counters.unsupported, s.counters.skipped), (0, 0));
+    assert_eq!(s.counters.duplicated, 2);
+    let dup: Vec<u32> = notices
+        .iter()
+        .filter_map(|n| match n {
+            Notice::ChannelsDuplicated { track } => Some(*track),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dup, vec![0, 2]);
+    let mut line = String::new();
+    let _ = qy_host_embedded::player::write_status(&mut line, &s);
+    assert!(line.contains(" duplicated=2 mono_to_stereo=on"), "{line}");
+    let mut ev = String::new();
+    let _ = write_notice(&mut ev, &Notice::ChannelsDuplicated { track: 0 });
+    assert_eq!(
+        ev,
+        "EVENT channels-altered track=0 mono[FC]->stereo[FL FR] samples-unchanged\n"
+    );
+    check_segments(
+        &w,
+        &[
+            (48_000, 2, 16, 16, [a.clone(), b.clone()].concat()),
+            (96_000, 2, 32, 24, c),
+        ],
+        "单声道复制",
+    );
+
+    // 播放中关闭：正在播放的 A 仍按复制播放完；之后的 C 按严格规则拒绝。
+    let Ok((mut p, w, _)) = setup(disk(image(&tracks)), stereo_only, TIMING, ErrorPolicy::Skip)
+    else {
+        panic!("时序");
+    };
+    p.set_channel_policy(ChannelPolicy::DuplicateMono);
+    assert!(p.play(0));
+    let mut notices = Vec::new();
+    let mut sent = false;
+    run(&mut p, &w, 30_000_000, &mut notices, |p, _, n| {
+        // A 已按复制配置设备（通知已发出）、尚未播完时关闭。
+        if !sent && n.contains(&Notice::ChannelsDuplicated { track: 0 }) {
+            sent = true;
+            let mut lb = LineBuffer::<32>::new();
+            let out = send(p, &mut lb, b"mono-to-stereo off\n");
+            assert_eq!(out, "OK mono-to-stereo=off strict applies-to=next-tracks\n");
+        }
+    });
+    assert!(sent);
+    let s = p.status();
+
+    assert!(!s.mono_to_stereo);
+    assert_eq!((s.counters.duplicated, s.counters.unsupported), (1, 1));
+    assert_eq!(s.output.errors, 0);
+    check_segments(&w, &[(48_000, 2, 16, 16, [a, b].concat())], "播放中关闭");
 }

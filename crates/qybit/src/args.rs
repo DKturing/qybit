@@ -5,8 +5,8 @@ use std::path::PathBuf;
 pub const USAGE: &str = "\
 用法:
   qybit list-devices                         列出可用输出设备（Windows：端点 ID 与名称；Linux：hw 设备名）
-  qybit --device <设备> [--container 16|24|32] <文件>...
-                                             按顺序播放 WAV/FLAC（按文件头识别）；Ctrl+C 停止并输出报告
+  qybit --device <设备> [--container 16|24|32] [--mono-to-stereo] <文件>...
+                                             按顺序播放 WAV/FLAC/AIFF（按文件头识别）；Ctrl+C 停止并输出报告
   qybit matrix --device <设备> [--out <目录>]
                                              运行设备格式矩阵，写出 JSON/CSV 报告
   qybit decode <输入> <输出.wav>              诊断：自有解码 + pack 写成标准 WAV，可用任何播放器试听
@@ -22,6 +22,10 @@ PowerShell 会把未加引号的 {…} 当成脚本块，端点 ID 要加单引�
 --container：只请求该容器位宽的设备格式（目前只用于 Windows）。驱动对某种格式回报支持、实际播放
 却是杂音时用来排查，例如 24 位源用 --container 32 避开 3 字节紧凑格式；样本值不变。
 
+--mono-to-stereo：非严格选项，默认关闭。单声道 [FC] 文件按立体声 [FL FR] 请求设备格式，每个样本
+原样复制到左右两路（不混音、不改增益、样本值不变）。用于只接受立体声的设备；报告标为“声道已改变”，
+不再记为严格路径。
+
 退出码：0 完整播放；2 播放完成但有欠载；1 失败（含设备不支持、打开失败、设备错误、中断）。";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +35,8 @@ pub enum Command {
         device: String,
         files: Vec<PathBuf>,
         container: Option<u8>,
+        /// 明确开启的单声道复制到左右两路（tasks/O1.md）。
+        mono_to_stereo: bool,
     },
     Matrix {
         device: String,
@@ -133,8 +139,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             let device = device_value(&mut it)?;
             let mut files = Vec::new();
             let mut container = None;
+            let mut mono_to_stereo = false;
             while let Some(a) = it.next() {
-                if a == "--container" {
+                if a == "--mono-to-stereo" {
+                    mono_to_stereo = true;
+                } else if a == "--container" {
                     container = Some(match value(&mut it, "--container")?.as_str() {
                         "16" => 16,
                         "24" => 24,
@@ -154,6 +163,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 device,
                 files,
                 container,
+                mono_to_stereo,
             })
         }
         Some(x) if !x.starts_with('-') => Err(format!(
@@ -168,7 +178,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
 fn device_value<'a>(it: &mut impl Iterator<Item = &'a str>) -> Result<String, String> {
     let v = value(it, "--device")?;
     let lower = v.to_ascii_lowercase();
-    if [".wav", ".flac", ".fla"].iter().any(|e| lower.ends_with(e)) {
+    if [".wav", ".flac", ".fla", ".aif", ".aiff", ".aifc"]
+        .iter()
+        .any(|e| lower.ends_with(e))
+    {
         return Err(format!(
             "--device 的值 {v} 看起来是音频文件，设备 ID 没有传进来。\
              在 PowerShell 中，未加引号的 {{…}} 会被当成脚本块，请给端点 ID 加单引号，例如：\
@@ -204,6 +217,7 @@ mod tests {
                 device: "{0.0.0.00000000}.{x}".into(),
                 files: vec!["a.wav".into(), "b.wav".into()],
                 container: None,
+                mono_to_stereo: false,
             })
         );
         assert_eq!(
@@ -212,6 +226,16 @@ mod tests {
                 device: "id".into(),
                 files: vec!["a.wav".into(), "b.flac".into()],
                 container: Some(32),
+                mono_to_stereo: false,
+            })
+        );
+        assert_eq!(
+            p(&["--device", "id", "--mono-to-stereo", "m.wav"]),
+            Ok(Command::Play {
+                device: "id".into(),
+                files: vec!["m.wav".into()],
+                container: None,
+                mono_to_stereo: true,
             })
         );
         assert!(p(&["--device", "id", "--container", "20", "a.wav"]).is_err());

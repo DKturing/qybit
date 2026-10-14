@@ -335,6 +335,13 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 ));
                 self.report.repairs.push((track, repair));
             }
+            HostAction::ChannelsDuplicated { track } => {
+                self.line(&format!(
+                    "  曲目 {} 声道已改变：单声道 [FC] 复制为 [FL FR]（明确开启；样本值未改变，不混音）",
+                    u64::from(track) + 1
+                ));
+                self.report.channels_altered.push(track);
+            }
             HostAction::Finished => {
                 self.report.finished = !self.report.device_error;
                 return false;
@@ -850,6 +857,63 @@ mod tests {
         let outs = b.outputs();
         assert_eq!(outs.len(), 1);
         check_output(&outs[0], &want);
+    }
+
+    /// O1：开启单声道复制后，[FC] 曲目按 [FL FR] 打开设备，每个样本原样写入左右两路（设备字节等于
+    /// 独立参考：data 块每 2 字节重复一次）；实时输出与报告写明“声道已改变”，结论不再是严格路径；
+    /// 默认关闭时同一文件按 [FC] 严格播放。
+    #[test]
+    fn mono_to_stereo_duplicates_and_reports_altered() {
+        let raw = data_chunk(&fixture("pcm16_mono_8k_fmt18.wav"));
+        let dup: Vec<u8> = raw.chunks_exact(2).flat_map(|s| [s, s].concat()).collect();
+        let files = [fixture_path("pcm16_mono_8k_fmt18.wav")];
+        for device in DEVICES {
+            let mut b = backend(&ALL, device);
+            let Ok(mut res) = HostResources::new() else {
+                panic!("res");
+            };
+            res.engine
+                .set_channel_policy(qy_core::engine::ChannelPolicy::DuplicateMono);
+            let mut lines = Vec::new();
+            let r = play_with(
+                &mut b,
+                &mut res,
+                &mut Files(&files),
+                PlayControl {
+                    on_line: &mut |l: &str| lines.push(l.to_string()),
+                    stop: None,
+                },
+            );
+            let all = lines.join("\n");
+            assert!(r.software_path_intact() && !r.strict_path_intact(), "{all}");
+            assert_eq!(r.channels_altered, vec![0]);
+            assert_eq!(r.exit_code(), 0);
+            assert!(
+                all.contains("曲目 1 声道已改变：单声道 [FC] 复制为 [FL FR]（明确开启；样本值未改变，不混音）"),
+                "{all}"
+            );
+            let text = r.summary();
+            assert!(
+                text.contains("声道已改变") && text.contains("不是严格路径"),
+                "{text}"
+            );
+            assert!(!text.contains("软件路径无损"), "{text}");
+            let outs = b.outputs();
+            assert_eq!(outs.len(), 1);
+            assert_eq!(outs[0].format.channels(), 2);
+            check_output(&outs[0], &dup);
+
+            // 默认（严格）：同一文件按 [FC] 播放，字节与 data 块相同。
+            let mut b = backend(&ALL, device);
+            let (r, outs) = run(&mut b, &["pcm16_mono_8k_fmt18.wav"]);
+            assert!(
+                r.strict_path_intact() && r.channels_altered.is_empty(),
+                "{r:?}"
+            );
+            assert_eq!(outs[0].format.channels(), 1);
+            check_output(&outs[0], &raw);
+            assert!(!r.summary().contains("声道已改变"));
+        }
     }
 
     /// 文件开头的 ID3v2 标签：跳过后设备字节与无标签文件相同，实时输出写明跳过的字节数。

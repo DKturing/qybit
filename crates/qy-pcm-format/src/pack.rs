@@ -112,6 +112,45 @@ fn channel_map(
     Ok(map)
 }
 
+/// 声道处理方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChannelMode {
+    /// 严格路径：扬声器位置集合与设备相同，按位置纯置换（默认）。
+    #[default]
+    Exact,
+    /// 明确开启的非严格选项（tasks/O1.md，AGENTS §3）：单声道 `[FC]` 的每个样本原样复制到立体声
+    /// `[FL FR]` 设备格式的两个声道。样本值不变、不混音、不改增益，但声道布局改变，调用方必须在
+    /// 报告中标为“已改变”。
+    DuplicateMono,
+}
+
+/// 按声道处理方式检查源与设备格式是否可 pack：[`ChannelMode::Exact`] 同 [`check`]；
+/// [`ChannelMode::DuplicateMono`] 要求源为 `[FC]`、设备为 `[FL FR]`，采样率相同且 N ≤ V。
+pub fn check_mode(
+    src: &SourceFormat,
+    dev: &DeviceFormat,
+    mode: ChannelMode,
+) -> Result<(), PackError> {
+    match mode {
+        ChannelMode::Exact => check(src, dev),
+        ChannelMode::DuplicateMono => {
+            if src.sample_rate() != dev.sample_rate()
+                || src.layout() != crate::ChannelLayout::MONO
+                || dev.layout() != crate::ChannelLayout::STEREO
+            {
+                return Err(PackError::FormatMismatch);
+            }
+            if src.bits() > dev.valid_bits() {
+                return Err(PackError::Precision {
+                    source_bits: src.bits(),
+                    valid_bits: dev.valid_bits(),
+                });
+            }
+            Ok(())
+        }
+    }
+}
+
 /// 把 `src` 尽可能多的完整帧 pack 到 `out`，返回帧数（受 `out` 容量限制）。
 ///
 /// 设备声道顺序与源不同（位置集合相同）时按位置纯置换：每个样本值原样放入对应扬声器的
@@ -119,8 +158,24 @@ fn channel_map(
 ///
 /// 出错时 `out` 内容未定义，调用方不得入队。
 pub fn pack(src: &Pcm<'_, Exact>, dev: &DeviceFormat, out: &mut [u8]) -> Result<usize, PackError> {
-    check(&src.format, dev)?;
-    let map = channel_map(&src.format, dev)?;
+    pack_with(src, dev, ChannelMode::Exact, out)
+}
+
+/// 同 [`pack`]，声道处理方式由 `mode` 给出。[`ChannelMode::DuplicateMono`] 时设备第 0、1 声道都取
+/// 源的唯一声道。
+pub fn pack_with(
+    src: &Pcm<'_, Exact>,
+    dev: &DeviceFormat,
+    mode: ChannelMode,
+    out: &mut [u8],
+) -> Result<usize, PackError> {
+    check_mode(&src.format, dev, mode)?;
+    let map = match mode {
+        ChannelMode::Exact => channel_map(&src.format, dev)?,
+        // 设备 [FL FR] 两个声道都取源声道 0（[FC]）。
+        ChannelMode::DuplicateMono => [0u8; MAX_LAYOUT_CHANNELS],
+    };
+    let src_channels = usize::from(src.format.channels());
     let n = u32::from(src.format.bits());
     let v = u32::from(dev.valid_bits());
     let c = u32::from(dev.container_bits());
@@ -136,7 +191,7 @@ pub fn pack(src: &Pcm<'_, Exact>, dev: &DeviceFormat, out: &mut [u8]) -> Result<
     let hi = (1i64 << (n - 1)) - 1;
     for (f, (frame, dst_frame)) in src
         .samples
-        .chunks_exact(channels)
+        .chunks_exact(src_channels)
         .zip(out[..frames * align].chunks_exact_mut(align))
         .enumerate()
     {
@@ -148,7 +203,7 @@ pub fn pack(src: &Pcm<'_, Exact>, dev: &DeviceFormat, out: &mut [u8]) -> Result<
             let s = i64::from(frame[from]);
             if s < lo || s > hi {
                 return Err(PackError::SampleOutOfRange {
-                    index: f * channels + from,
+                    index: f * src_channels + from,
                 });
             }
             // shift ≤ 31 且 s 在 N 位内，结果落在 C 位有符号范围内，不会溢出。
@@ -562,5 +617,81 @@ mod tests {
             pack(&pcm, &dev, &mut out),
             Err(PackError::SampleOutOfRange { index: 8 })
         );
+    }
+
+    /// O1：单声道复制到左右两路。样本值不变：每帧两份相同的容器字，与独立参考逐字节一致；
+    /// 只接受 [FC] → [FL FR]，其余布局与精度不足时拒绝；严格模式下同样的组合仍按格式不符拒绝。
+    #[test]
+    fn duplicate_mono_copies_each_sample_to_both_channels() {
+        let mono = src(48_000, 1, 16);
+        let samples = [32_767, -32_768, 0, -1, 1, 12_345];
+        let Ok(pcm) = Pcm::exact(&samples, mono) else {
+            panic!()
+        };
+        let Ok(d) = DeviceFormat::wasapi(48_000, 2, 32, 24) else {
+            panic!()
+        };
+        let mut out = [0u8; 48];
+        assert_eq!(
+            pack_with(&pcm, &d, ChannelMode::DuplicateMono, &mut out),
+            Ok(6)
+        );
+        // 独立参考：16 位样本左对齐放入 32 位容器（左移 16），左右各一份。
+        let mut want = [0u8; 48];
+        for (k, &x) in samples.iter().enumerate() {
+            let w = ((x as u32) << 16).to_le_bytes();
+            want[k * 8..k * 8 + 4].copy_from_slice(&w);
+            want[k * 8 + 4..k * 8 + 8].copy_from_slice(&w);
+        }
+        assert_eq!(&out[..], &want[..]);
+        // 严格模式不接受声道数不同。
+        assert_eq!(pack(&pcm, &d, &mut out), Err(PackError::FormatMismatch));
+        // 源不是 [FC]（如只占左声道位置的单声道）、源为立体声、设备不是 [FL FR]：拒绝。
+        let Some(left) = crate::ChannelLayout::from_mask(0x1) else {
+            panic!()
+        };
+        let Ok(left_mono) = SourceFormat::with_layout(48_000, left, 16) else {
+            panic!()
+        };
+        assert_eq!(
+            check_mode(&left_mono, &d, ChannelMode::DuplicateMono),
+            Err(PackError::FormatMismatch)
+        );
+        assert_eq!(
+            check_mode(&src(48_000, 2, 16), &d, ChannelMode::DuplicateMono),
+            Err(PackError::FormatMismatch)
+        );
+        let Ok(mono_dev) = DeviceFormat::wasapi(48_000, 1, 16, 16) else {
+            panic!()
+        };
+        assert_eq!(
+            check_mode(&mono, &mono_dev, ChannelMode::DuplicateMono),
+            Err(PackError::FormatMismatch)
+        );
+        // 采样率不同、精度不足：拒绝（不重采样、不降精度）。
+        let Ok(d44) = DeviceFormat::wasapi(44_100, 2, 32, 24) else {
+            panic!()
+        };
+        assert_eq!(
+            check_mode(&mono, &d44, ChannelMode::DuplicateMono),
+            Err(PackError::FormatMismatch)
+        );
+        let Ok(d16) = DeviceFormat::wasapi(48_000, 2, 16, 16) else {
+            panic!()
+        };
+        assert_eq!(
+            check_mode(&src(48_000, 1, 24), &d16, ChannelMode::DuplicateMono),
+            Err(PackError::Precision {
+                source_bits: 24,
+                valid_bits: 16
+            })
+        );
+        // 输出容量只够 2 帧时只 pack 2 帧。
+        let mut small = [0u8; 16];
+        assert_eq!(
+            pack_with(&pcm, &d, ChannelMode::DuplicateMono, &mut small),
+            Ok(2)
+        );
+        assert_eq!(&small[..], &want[..16]);
     }
 }

@@ -554,7 +554,8 @@ pub struct Track {
     pub samples: Vec<i32>,
 }
 
-/// 夹具曲目：FLAC 取 libFLAC 参考，WAV 取 ffmpeg 参考（左对齐 s32 右移 32 − N）。
+/// 夹具曲目：FLAC 取 libFLAC 参考，WAV 取 ffmpeg 参考（左对齐 s32 右移 32 − N），AIFF 取生成器的
+/// 独立期望。
 pub fn fixture(fat_name: &str, file: &str, rate: u32, channels: u16, bits: u32) -> Track {
     let (dir, samples) = if let Some(stem) = file.strip_suffix(".flac") {
         let d = fixtures("qy-codec-flac");
@@ -564,6 +565,21 @@ pub fn fixture(fat_name: &str, file: &str, rate: u32, channels: u16, bits: u32) 
         let s = read_i32(&d.join(format!("{stem}.ffmpeg.s32le")))
             .into_iter()
             .map(|s| s >> (32 - bits))
+            .collect();
+        (d, s)
+    } else if let Some(stem) = file.strip_suffix(".aiff") {
+        // AIFF 取生成器独立给出的期望（`.expect` 第 4 行之后为右对齐样本）。
+        let d = fixtures("qy-codec-aiff");
+        let text = std::fs::read_to_string(d.join(format!("{stem}.expect"))).unwrap_or_default();
+        let s = text
+            .lines()
+            .skip(4)
+            .flat_map(|l| {
+                l.split(' ')
+                    .filter(|x| !x.is_empty())
+                    .map(|x| x.parse::<i32>().unwrap_or(i32::MIN))
+                    .collect::<Vec<_>>()
+            })
             .collect();
         (d, s)
     } else {

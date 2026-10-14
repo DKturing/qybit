@@ -10,7 +10,7 @@
 
 use core::fmt;
 
-use crate::pack::{Exact, PackError, Pcm};
+use crate::pack::{ChannelMode, Exact, PackError, Pcm};
 use crate::{DeviceFormat, MAX_CHANNELS};
 
 /// 最大设备帧字节数：有布局可描述的最大声道数（18）× C32。
@@ -133,12 +133,13 @@ pub enum RingError {
 pub trait FrameSink {
     type Error: Copy + fmt::Debug;
 
-    /// 把 `pcm` 中能放入队列的完整帧 pack 为设备格式后入队，返回入队帧数；队列满时返回 0。
-    /// `scratch` 为宿主启动时分配的 pack 暂存区；能直接 pack 进队列存储的实现可以不用它。
+    /// 把 `pcm` 中能放入队列的完整帧按 `mode` pack 为设备格式后入队，返回入队帧数；队列满时
+    /// 返回 0。`scratch` 为宿主启动时分配的 pack 暂存区；能直接 pack 进队列存储的实现可以不用它。
     fn push(
         &mut self,
         pcm: &Pcm<'_, Exact>,
         device: &DeviceFormat,
+        mode: ChannelMode,
         scratch: &mut [u8],
     ) -> Result<usize, Self::Error>;
 

@@ -10,7 +10,8 @@ use windows::Win32::Devices::FunctionDiscovery::{
 };
 use windows::Win32::Foundation::{ERROR_SUCCESS, PROPERTYKEY};
 use windows::Win32::Media::Audio::{
-    DEVICE_STATE_ACTIVE, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, eRender,
+    DEVICE_STATE_ACTIVE, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
+    PKEY_AudioEndpoint_PhysicalSpeakers, eRender,
 };
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToBSTR};
 use windows::Win32::System::Com::{
@@ -20,7 +21,10 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Registry::{
     HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
 };
+use windows::Win32::System::Variant::VT_UI4;
 use windows::core::{GUID, HSTRING, PCWSTR, w};
+
+use qy_player::PhysicalSpeakers;
 
 /// 当前线程的 COM 初始化守卫；Drop 时配对 CoUninitialize。
 struct ComGuard;
@@ -65,6 +69,30 @@ fn property(device: &IMMDevice, key: &PROPERTYKEY) -> Option<String> {
         let text = PropVariantToBSTR(&value).ok().map(|b| b.to_string());
         let _ = PropVariantClear(&mut value);
         text.filter(|s| !s.is_empty())
+    }
+}
+
+/// 端点属性 `PKEY_AudioEndpoint_PhysicalSpeakers`（Microsoft Learn：声道配置掩码，`VT_UI4`，
+/// 位定义见 `KSAUDIO_CHANNEL_CONFIG`）。属性缺失、类型不是 `VT_UI4` 或读取失败时为
+/// [`PhysicalSpeakers::NotReported`]；不用 `PropVariantToUInt32` 做类型转换，不猜测。
+pub(crate) fn physical_speakers(device: &IMMDevice) -> PhysicalSpeakers {
+    // SAFETY: COM 已初始化；属性存储只读打开。只在 vt 为 VT_UI4 时读取联合体的 ulVal，
+    // PROPVARIANT 读取后清理。
+    unsafe {
+        let Ok(store) = device.OpenPropertyStore(STGM_READ) else {
+            return PhysicalSpeakers::NotReported;
+        };
+        let Ok(mut value) = store.GetValue(&PKEY_AudioEndpoint_PhysicalSpeakers) else {
+            return PhysicalSpeakers::NotReported;
+        };
+        let inner = &value.Anonymous.Anonymous;
+        let r = if inner.vt == VT_UI4 {
+            PhysicalSpeakers::Mask(inner.Anonymous.ulVal)
+        } else {
+            PhysicalSpeakers::NotReported
+        };
+        let _ = PropVariantClear(&mut value);
+        r
     }
 }
 

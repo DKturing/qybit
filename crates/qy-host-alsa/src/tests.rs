@@ -330,6 +330,12 @@ fn playback_bytes_exact_with_short_writes() {
     });
     let (r, outs) = run(&mut b, &["pcm24_stereo_large.wav"]);
     assert!(r.software_path_intact(), "{}", r.summary());
+    // O1 §2：ALSA 没有物理扬声器属性，报告写“不可查询”，不推测、不警告。
+    assert_eq!(
+        r.streams[0].negotiation.speakers,
+        qy_player::PhysicalSpeakers::NotQueryable
+    );
+    assert!(r.summary().contains("物理扬声器配置：不可查询"));
     let samples = wav24_samples("pcm24_stereo_large.wav");
     assert!(
         samples.iter().any(|&s| s < 0),

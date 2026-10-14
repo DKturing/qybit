@@ -17,8 +17,8 @@
 use core::fmt;
 
 use qy_core::engine::{
-    Engine, EngineFault, EngineStats, ErrorPolicy, HostAction, HostEvent, PlaybackPlan, Poll,
-    Repair, Resources, Wait,
+    ChannelPolicy, Engine, EngineFault, EngineStats, ErrorPolicy, HostAction, HostEvent,
+    PlaybackPlan, Poll, Repair, Resources, Wait,
 };
 use qy_core::{Decoder, DeviceFormat, Fault};
 use qy_pcm_format::frames_for_millis;
@@ -55,6 +55,8 @@ pub enum Notice {
     Skipped { track: u32, fault: EngineFault },
     /// 曲目在不改样本的前提下做过的一条结构修正（W1）。
     Repaired { track: u32, repair: Repair },
+    /// 曲目按明确开启的选项把单声道复制到左右两路（O1：声道布局已改变，样本值未改变）。
+    ChannelsDuplicated { track: u32 },
     /// 播放列表结束。
     Finished,
     /// 播放失败并停止。
@@ -80,6 +82,8 @@ pub struct Counters {
     pub notices_dropped: u32,
     /// 结构修正条数（W1：只修正结构，不改样本）。
     pub repairs: u32,
+    /// 单声道复制到左右两路的曲目数（O1：明确开启，声道布局已改变）。
+    pub duplicated: u32,
 }
 
 /// 状态快照。
@@ -94,6 +98,8 @@ pub struct Status {
     pub counters: Counters,
     pub output: OutputStats,
     pub engine: EngineStats,
+    /// 单声道复制到左右两路是否开启（O1，非严格选项）。
+    pub mono_to_stereo: bool,
 }
 
 const NOTICES: usize = 8;
@@ -184,6 +190,14 @@ where
         self.engine.set_error_policy(policy);
     }
 
+    /// 声道策略（默认严格）。[`ChannelPolicy::DuplicateMono`] 是明确开启的非严格选项（O1）：
+    /// 单声道 `[FC]` 按立体声 `[FL FR]` 打开设备，样本原样复制到左右两路，每首都发出
+    /// [`Notice::ChannelsDuplicated`]。板级可在启动时按配置设置，也可用串口命令 `mono-to-stereo`。
+    /// 对之后开始的曲目生效。
+    pub fn set_channel_policy(&mut self, policy: ChannelPolicy) {
+        self.engine.set_channel_policy(policy);
+    }
+
     fn notice(&mut self, n: Notice) {
         if let Some(slot) = self.notices.get_mut(self.notice_len) {
             *slot = Some(n);
@@ -221,6 +235,7 @@ where
             counters: self.counters,
             output,
             engine: self.engine.stats(),
+            mono_to_stereo: self.engine.channel_policy() == ChannelPolicy::DuplicateMono,
         }
     }
 
@@ -392,6 +407,10 @@ where
                 self.counters.repairs = self.counters.repairs.saturating_add(1);
                 self.notice(Notice::Repaired { track, repair });
             }
+            HostAction::ChannelsDuplicated { track } => {
+                self.counters.duplicated = self.counters.duplicated.saturating_add(1);
+                self.notice(Notice::ChannelsDuplicated { track });
+            }
             HostAction::Finished => {
                 self.notice(Notice::Finished);
             }
@@ -549,6 +568,22 @@ where
                 writeln!(w, "OK prev")
             }
             Command::Status => write_status(w, &self.status()),
+            Command::MonoToStereo(on) => {
+                self.set_channel_policy(if on {
+                    ChannelPolicy::DuplicateMono
+                } else {
+                    ChannelPolicy::Strict
+                });
+                if on {
+                    writeln!(
+                        w,
+                        "OK mono-to-stereo=on altered mono[FC]->stereo[FL FR] samples-unchanged \
+                         applies-to=next-tracks"
+                    )
+                } else {
+                    writeln!(w, "OK mono-to-stereo=off strict applies-to=next-tracks")
+                }
+            }
             Command::Scan => {
                 if self.engine.is_active() {
                     return writeln!(w, "ERR scan busy");
@@ -592,7 +627,7 @@ pub fn write_status(w: &mut impl fmt::Write, s: &Status) -> fmt::Result {
         "queued={} underruns={} underrun_frames={} paused_fills={} data_frames={} \
          open_errors={} read_errors={} decode_errors={} unsupported={} skipped={} \
          output_errors={} feeder_errors={} protocol_errors={} stale={} notices_dropped={} \
-         repairs={}",
+         repairs={} duplicated={} mono_to_stereo={}",
         s.queued_frames,
         o.underruns,
         o.underrun_frames,
@@ -608,7 +643,9 @@ pub fn write_status(w: &mut impl fmt::Write, s: &Status) -> fmt::Result {
         c.protocol_errors + s.engine.protocol_errors,
         s.engine.stale,
         c.notices_dropped,
-        c.repairs
+        c.repairs,
+        c.duplicated,
+        if s.mono_to_stereo { "on" } else { "off" }
     )?;
     // R1 水位：当前设备流的最低队列帧数（及毫秒）、低水位与临界次数。
     let m = &o.watermark;
@@ -638,6 +675,10 @@ pub fn write_notice(w: &mut impl fmt::Write, n: &Notice) -> fmt::Result {
         Notice::Unsupported { error } => writeln!(w, "EVENT unsupported reason={error:?}"),
         Notice::Skipped { track, fault } => writeln!(w, "EVENT skip track={track} fault={fault:?}"),
         Notice::Repaired { track, repair } => writeln!(w, "EVENT repaired track={track} {repair}"),
+        Notice::ChannelsDuplicated { track } => writeln!(
+            w,
+            "EVENT channels-altered track={track} mono[FC]->stereo[FL FR] samples-unchanged"
+        ),
         Notice::Finished => writeln!(w, "EVENT finished"),
         Notice::Failed { track, fault } => {
             writeln!(w, "EVENT failed track={track} fault={fault:?}")

@@ -3,6 +3,7 @@
 //! 真实整包循环与假平台 API。
 
 use qy_core::{DeviceFormat, SourceFormat};
+use qy_player::PhysicalSpeakers;
 use qy_player::testing::{FakeBackend, Negotiator};
 
 use crate::attempt::{Attempt, Descriptor, Negotiation, OpenFailure, attempts};
@@ -16,6 +17,8 @@ pub struct WasapiNegotiator {
     pub forced: Option<((u8, u8), Descriptor)>,
     /// 模拟只接受 WAVEFORMATEX 描述 16/16 的驱动：16/16 的 EXTENSIBLE 请求被拒。
     pub extensible_16_rejected: bool,
+    /// 端点物理扬声器属性的读取结果（O1 §2）。
+    pub speakers: PhysicalSpeakers,
 }
 
 impl Negotiator for WasapiNegotiator {
@@ -27,6 +30,7 @@ impl Negotiator for WasapiNegotiator {
         supported: &[(u8, u8)],
     ) -> Result<(DeviceFormat, Negotiation), OpenFailure> {
         let mut negotiation = Negotiation::new(*source);
+        negotiation.speakers = self.speakers;
         let list: Vec<((u8, u8), Descriptor)> = match self.forced {
             Some((cv, d)) if cv.1 >= source.bits() => vec![(cv, d)],
             Some(_) => Vec::new(),

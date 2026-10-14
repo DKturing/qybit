@@ -5,6 +5,7 @@ use std::vec;
 use std::vec::Vec;
 
 use super::*;
+use crate::pack::pack;
 use crate::{Endian, Placement, SourceFormat};
 
 struct Rng(u64);

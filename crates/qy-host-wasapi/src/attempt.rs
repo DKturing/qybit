@@ -250,6 +250,60 @@ mod tests {
         }
     }
 
+    /// O1 §2：端点物理扬声器只作提示。掩码包含设备流的位置：只记录掩码；缺少位置：提示可能听不到；
+    /// 属性缺失：写明“端点未报告”；掩码 0（DIRECTOUT）：写明含义。四种情况都照常协商与播放，设备
+    /// 字节与 data 块相同。
+    #[test]
+    fn physical_speakers_only_warn() {
+        use qy_player::PhysicalSpeakers::{Mask, NotReported};
+        let cases = [
+            (
+                "pcm16_stereo_44k.wav",
+                Mask(0x3F),
+                "0x3F [FL FR FC LFE BL BR]",
+                false,
+            ),
+            ("pcm16_mono_8k_fmt18.wav", Mask(0x3), "0x3 [FL FR]", true),
+            ("pcm16_mono_8k_fmt18.wav", Mask(0x4), "0x4 [FC]", false),
+            ("pcm16_stereo_44k.wav", Mask(0x4), "0x4 [FC]", true),
+            ("pcm16_mono_8k_fmt18.wav", NotReported, "端点未报告", false),
+            (
+                "pcm16_stereo_44k.wav",
+                Mask(0),
+                "KSAUDIO_SPEAKER_DIRECTOUT",
+                false,
+            ),
+        ];
+        let Ok(mut res) = HostResources::new() else {
+            panic!("res");
+        };
+        for (name, speakers, shown, warn) in cases {
+            let mut b = fake_backend_with(
+                &ALL,
+                WasapiNegotiator {
+                    speakers,
+                    ..WasapiNegotiator::default()
+                },
+            );
+            let r = play(&mut b, &mut res, &[fixture_path(name)]);
+            let what = format!("{name} {speakers:?}");
+            assert!(r.finished && r.software_path_intact(), "{what}: {r:?}");
+            assert_eq!(r.streams[0].negotiation.speakers, speakers, "{what}");
+            let s = r.summary();
+            assert!(s.contains(shown), "{what}: {s}");
+            assert_eq!(s.contains("可能听不到"), warn, "{what}: {s}");
+            if warn && name.contains("mono") {
+                assert!(
+                    s.contains("端点报告的物理扬声器为 [FL FR]，设备流的 [FC] 不在其中"),
+                    "{s}"
+                );
+            }
+            let raw = data_chunk(&fixture(name));
+            let outs = b.outputs();
+            assert_eq!(&outs[0].rendered[..raw.len()], &raw[..], "{what}");
+        }
+    }
+
     #[test]
     fn unsupported_format_records_exclusive_hresult_without_fallback() {
         // 设备只支持 16/16 与 32/24：32 位源无可无损承载的格式 → 配置失败，不降精度。

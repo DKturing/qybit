@@ -159,6 +159,8 @@ pub struct Report {
     pub skipped: Vec<(u32, EngineFault)>,
     /// 曲目的结构修正（W1，不计入摘要）。
     pub repairs: Vec<(u32, qy_core::engine::Repair)>,
+    /// 按明确开启的选项把单声道复制到左右两路的曲目（O1：声道布局已改变）。
+    pub duplicated: Vec<u32>,
     /// 暂停期间设备输出的静音帧（不计欠载）。
     pub pause_silence_frames: u64,
     /// 已执行的播放控制（tick、控制）。
@@ -229,9 +231,11 @@ impl Report {
         )
     }
 
-    /// 本次播放记录能否描述为完整保真：无欠载、无失败、无跳过、无断开、未超时。
+    /// 本次播放记录能否描述为完整保真：无欠载、无失败、无跳过、无断开、未超时，且没有按明确开启的
+    /// 选项改变声道布局（O1）。
     pub fn fidelity_intact(&self) -> bool {
-        self.underruns.is_empty()
+        self.duplicated.is_empty()
+            && self.underruns.is_empty()
             && self.fault.is_none()
             && self.skipped.is_empty()
             && !self.device_lost
@@ -595,6 +599,7 @@ impl Sim<'_> {
             }
             HostAction::TrackSkipped { track, fault } => self.report.skipped.push((track, fault)),
             HostAction::Repaired { track, repair } => self.report.repairs.push((track, repair)),
+            HostAction::ChannelsDuplicated { track } => self.report.duplicated.push(track),
             HostAction::Finished => {
                 self.report.finished = true;
                 self.phase = Phase::Done;

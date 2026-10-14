@@ -7,7 +7,7 @@
 //! 生产端只按完整帧入队，消费端只按完整帧出队；环形回绕时最多两段拷贝。
 //! 消费端不做位移、字节序或样本格式转换。
 
-use crate::pack::{Exact, Pcm, pack};
+use crate::pack::{ChannelMode, Exact, Pcm, pack_with};
 pub use crate::queue::RingError;
 use crate::queue::{FrameSink, FrameSource};
 use crate::{DeviceFormat, frames_for_millis};
@@ -130,6 +130,17 @@ impl FrameProducer {
         device: &DeviceFormat,
         scratch: &mut [u8],
     ) -> Result<usize, RingError> {
+        self.pack_push_with(pcm, device, ChannelMode::Exact, scratch)
+    }
+
+    /// 同 [`FrameProducer::pack_push`]，声道处理方式由 `mode` 给出（[`ChannelMode`]）。
+    pub fn pack_push_with(
+        &mut self,
+        pcm: &Pcm<'_, Exact>,
+        device: &DeviceFormat,
+        mode: ChannelMode,
+        scratch: &mut [u8],
+    ) -> Result<usize, RingError> {
         let fb = self.frame_bytes;
         if fb == 0 {
             return Err(RingError::NotConfigured);
@@ -139,7 +150,8 @@ impl FrameProducer {
         }
         let room = self.free_frames().min(scratch.len() / fb);
         let frames = pcm.frames().min(room);
-        let packed = pack(pcm, device, &mut scratch[..frames * fb]).map_err(RingError::Pack)?;
+        let packed =
+            pack_with(pcm, device, mode, &mut scratch[..frames * fb]).map_err(RingError::Pack)?;
         let pushed = self.push_frames(&scratch[..packed * fb])?;
         debug_assert_eq!(pushed, packed);
         Ok(pushed)
@@ -297,9 +309,10 @@ impl FrameSink for FrameProducer {
         &mut self,
         pcm: &Pcm<'_, Exact>,
         device: &DeviceFormat,
+        mode: ChannelMode,
         scratch: &mut [u8],
     ) -> Result<usize, RingError> {
-        self.pack_push(pcm, device, scratch)
+        self.pack_push_with(pcm, device, mode, scratch)
     }
 
     fn queued_frames(&self) -> usize {

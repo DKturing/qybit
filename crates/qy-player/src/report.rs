@@ -74,6 +74,8 @@ pub struct Negotiation<A> {
     pub attempts: Vec<A>,
     /// 成功的尝试序号。
     pub chosen: Option<usize>,
+    /// 端点报告的物理扬声器配置（O1 §2：只作提示）。
+    pub speakers: PhysicalSpeakers,
 }
 
 impl<A> Negotiation<A> {
@@ -82,11 +84,95 @@ impl<A> Negotiation<A> {
             source,
             attempts: Vec::new(),
             chosen: None,
+            speakers: PhysicalSpeakers::NotQueryable,
         }
     }
 
     pub fn chosen_attempt(&self) -> Option<&A> {
         self.chosen.and_then(|i| self.attempts.get(i))
+    }
+}
+
+/// 端点报告的物理扬声器配置（tasks/O1.md §2）。
+///
+/// 这是驱动填写的信息，可能缺失或不准，因此**只作提示**：协商与播放照常进行，严格规则不变。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PhysicalSpeakers {
+    /// 后端没有对应的属性（ALSA），不推测。
+    #[default]
+    NotQueryable,
+    /// 端点没有该属性、类型不符或读取失败（WASAPI）。
+    NotReported,
+    /// 声道配置掩码（WASAPI `PKEY_AudioEndpoint_PhysicalSpeakers`，`VT_UI4`）。位定义见
+    /// `KSAUDIO_CHANNEL_CONFIG`，与 `WAVEFORMATEXTENSIBLE` 声道掩码的 `SPEAKER_*` 相同；
+    /// 0 为 `KSAUDIO_SPEAKER_DIRECTOUT`（声道不对应扬声器位置）。
+    Mask(u32),
+}
+
+impl PhysicalSpeakers {
+    /// 设备流中不在端点物理扬声器里的位置（WAVE 掩码）。只在端点报告了非零掩码、且有缺少的位置
+    /// 时返回；其余情形无从判断或无需提示，返回 `None`。
+    pub fn missing(&self, layout: &qy_core::ChannelLayout) -> Option<u32> {
+        match *self {
+            Self::Mask(m) if m != 0 => Some(layout.mask() & !m).filter(|&x| x != 0),
+            _ => None,
+        }
+    }
+}
+
+/// 掩码按 `SPEAKER_*` 位从低到高写成 `[FL FR …]`；本程序未定义的位写成十六进制。
+fn speaker_mask_text(mask: u32) -> String {
+    let mut parts = Vec::new();
+    let mut unknown = 0u32;
+    for bit in 0..32 {
+        if mask & (1 << bit) == 0 {
+            continue;
+        }
+        match qy_core::Speaker::from_bit(bit) {
+            Some(s) => parts.push(s.abbrev().to_string()),
+            None => unknown |= 1 << bit,
+        }
+    }
+    if unknown != 0 {
+        parts.push(format!("0x{unknown:X}"));
+    }
+    format!("[{}]", parts.join(" "))
+}
+
+/// 物理扬声器的说明行（打开设备后给出；设备流布局取协商结果）。
+pub(crate) fn speakers_text(
+    out: &mut String,
+    speakers: PhysicalSpeakers,
+    stream: &qy_core::ChannelLayout,
+) {
+    match speakers {
+        PhysicalSpeakers::NotQueryable => {
+            out.push_str("  物理扬声器配置：不可查询（本后端没有对应属性）\n");
+        }
+        PhysicalSpeakers::NotReported => {
+            out.push_str("  物理扬声器配置：端点未报告\n");
+        }
+        PhysicalSpeakers::Mask(0) => {
+            out.push_str(
+                "  物理扬声器配置：端点报告掩码 0x0（KSAUDIO_SPEAKER_DIRECTOUT，声道不对应扬声器位置）\n",
+            );
+        }
+        PhysicalSpeakers::Mask(m) => {
+            let _ = writeln!(
+                out,
+                "  物理扬声器配置（驱动报告）：0x{m:X} {}",
+                speaker_mask_text(m)
+            );
+            if let Some(missing) = speakers.missing(stream) {
+                let _ = writeln!(
+                    out,
+                    "  提示：端点报告的物理扬声器为 {}，设备流的 {} 不在其中，可能听不到。\
+                     该信息由驱动填写，可能不准；协商与播放照常进行。",
+                    speaker_mask_text(m),
+                    speaker_mask_text(missing)
+                );
+            }
+        }
     }
 }
 
@@ -121,6 +207,8 @@ pub struct PlaybackReport<A> {
     pub skipped: Vec<(u32, EngineFault)>,
     /// 曲目的结构修正（W1：只修正结构，不改样本）。
     pub repairs: Vec<(u32, qy_core::engine::Repair)>,
+    /// 按明确开启的选项把单声道复制到左右两路的曲目（O1：声道布局已改变，样本值未改变）。
+    pub channels_altered: Vec<u32>,
     /// I/O 错误等附加说明。
     pub messages: Vec<String>,
     pub finished: bool,
@@ -139,6 +227,7 @@ impl<A> Default for PlaybackReport<A> {
             fault: None,
             skipped: Vec::new(),
             repairs: Vec::new(),
+            channels_altered: Vec::new(),
             messages: Vec::new(),
             finished: false,
             device_error: false,
@@ -170,6 +259,12 @@ impl<A> PlaybackReport<A> {
                     .as_ref()
                     .is_some_and(|r| r.end == RenderEnd::Drained)
             })
+    }
+
+    /// 严格路径完整：[`software_path_intact`](Self::software_path_intact)，且没有曲目按明确开启的
+    /// 选项改变声道布局（O1）。
+    pub fn strict_path_intact(&self) -> bool {
+        self.software_path_intact() && self.channels_altered.is_empty()
     }
 
     /// 进程退出码：0 完整，2 完成但有欠载，1 失败或设备错误。
@@ -245,6 +340,7 @@ pub(crate) fn negotiation_text<A: AttemptRecord>(out: &mut String, n: &Negotiati
     }
     if let Some(a) = n.chosen_attempt() {
         applied_text(out, a.applied());
+        speakers_text(out, n.speakers, &a.requested().layout());
     }
 }
 
@@ -341,6 +437,13 @@ impl<A: AttemptRecord> PlaybackReport<A> {
                 track + 1
             );
         }
+        for track in &self.channels_altered {
+            let _ = writeln!(
+                o,
+                "曲目 {} 声道已改变：单声道 [FC] 复制为 [FL FR]（明确开启；样本值未改变，不混音）",
+                track + 1
+            );
+        }
         if let Some((track, fault)) = self.fault {
             let _ = writeln!(o, "曲目 {} 失败：{}", track + 1, fault_text(&fault));
         }
@@ -350,15 +453,14 @@ impl<A: AttemptRecord> PlaybackReport<A> {
         if self.interrupted {
             o.push_str("已按用户要求中断（未排空，正在播放的曲目没有放完）。\n");
         }
-        if self.software_path_intact() {
+        if self.software_path_intact() && !self.channels_altered.is_empty() {
+            o.push_str(
+                "结论：全部曲目已播放，无欠载、无错误；样本值未改变，但部分曲目的声道布局已按明确开启的选项改变（单声道复制到左右两路），不是严格路径。\n",
+            );
+        } else if self.software_path_intact() {
             o.push_str(
                 "结论：全部曲目已播放，无欠载、无错误。这只说明软件路径与协商正常，不证明设备端 bit-perfect。\n",
             );
-            if !self.repairs.is_empty() {
-                o.push_str(
-                    "部分曲目的文件结构不规范，已按规则修正后播放：软件路径无损，但这不说明文件本身完好。\n",
-                );
-            }
         } else if self.finished && self.underrun_events() > 0 {
             let _ = writeln!(
                 o,
@@ -367,6 +469,14 @@ impl<A: AttemptRecord> PlaybackReport<A> {
             );
         } else {
             o.push_str("结论：播放未完整完成。\n");
+        }
+        if self.software_path_intact() && !self.repairs.is_empty() {
+            // 声道已改变时不能再说“软件路径无损”，只说结构修正没有改动样本。
+            o.push_str(if self.channels_altered.is_empty() {
+                "部分曲目的文件结构不规范，已按规则修正后播放：软件路径无损，但这不说明文件本身完好。\n"
+            } else {
+                "部分曲目的文件结构不规范，已按规则修正后播放：修正没有改动样本，但这不说明文件本身完好。\n"
+            });
         }
         o
     }

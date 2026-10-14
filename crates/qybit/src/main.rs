@@ -82,6 +82,7 @@ fn run(cmd: Command) -> ExitCode {
             device,
             files,
             container,
+            mono_to_stereo,
         } => {
             let info = match endpoint_info(&device) {
                 Ok(i) => i,
@@ -102,6 +103,7 @@ fn run(cmd: Command) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            apply_channel_policy(&mut res, mono_to_stereo);
             let mut backend = qy_host_wasapi::wasapi::WasapiBackend::new(device);
             backend.container = container;
             if let Some(c) = container {
@@ -179,6 +181,7 @@ fn run(cmd: Command) -> ExitCode {
             device,
             files,
             container,
+            mono_to_stereo,
         } => {
             if container.is_some() {
                 eprintln!("错误：--container 目前只用于 Windows WASAPI");
@@ -196,6 +199,7 @@ fn run(cmd: Command) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            apply_channel_policy(&mut res, mono_to_stereo);
             let mut backend = AlsaBackend::new(device, RealOpener, RtPriority::default());
             let stop = interrupt_flag(qy_host_alsa::linux::interrupt::install());
             let report = play_live(&mut backend, &mut res, &files, stop);
@@ -259,6 +263,19 @@ fn interrupt_flag(
             eprintln!("警告：{e}；Ctrl+C 将直接结束进程，不输出报告");
             None
         }
+    }
+}
+
+/// `--mono-to-stereo`：引擎的声道策略改为单声道复制到左右两路（非严格，报告标为“已改变”）。
+#[cfg(any(windows, target_os = "linux"))]
+fn apply_channel_policy(res: &mut qy_player::HostResources, mono_to_stereo: bool) {
+    if mono_to_stereo {
+        res.engine
+            .set_channel_policy(qy_core::engine::ChannelPolicy::DuplicateMono);
+        println!(
+            "已开启 --mono-to-stereo：单声道 [FC] 文件按 [FL FR] 播放，样本原样复制到左右两路\
+             （非严格选项，样本值不变，报告标为“声道已改变”）"
+        );
     }
 }
 

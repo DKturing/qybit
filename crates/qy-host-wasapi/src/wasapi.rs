@@ -267,11 +267,7 @@ fn negotiate(
     source: &SourceFormat,
     list: &[((u8, u8), Descriptor)],
 ) -> Result<(Stream, Negotiation), OpenFailure> {
-    let mut negotiation = Negotiation {
-        source: *source,
-        attempts: Vec::new(),
-        chosen: None,
-    };
+    let mut negotiation = Negotiation::new(*source);
     let fail = |negotiation: Negotiation, message: String| OpenFailure {
         negotiation,
         message,
@@ -284,6 +280,8 @@ fn negotiate(
         Ok(d) => d,
         Err(e) => return Err(fail(negotiation, format!("找不到设备 {id}: {e}"))),
     };
+    // O1 §2：端点物理扬声器只作提示，读不到记为“未报告”，不影响协商。
+    negotiation.speakers = crate::endpoints::physical_speakers(&device);
     for &((c, v), descriptor) in list {
         let Ok(format) = DeviceFormat::wasapi_layout(source.sample_rate(), source.layout(), c, v)
         else {

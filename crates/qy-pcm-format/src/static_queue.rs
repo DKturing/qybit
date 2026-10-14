@@ -27,7 +27,7 @@ use bbqueue::traits::notifier::polling::Polling;
 use bbqueue::traits::storage::Inline;
 
 use crate::DeviceFormat;
-use crate::pack::{Exact, Pcm, pack};
+use crate::pack::{ChannelMode, Exact, Pcm, pack_with};
 use crate::queue::{FrameSink, FrameSource, RingError};
 
 type Bbq<const N: usize> = BBQueue<Inline<N>, AtomicCoord, Polling>;
@@ -163,6 +163,16 @@ impl<const N: usize> StaticProducer<N> {
         pcm: &Pcm<'_, Exact>,
         device: &DeviceFormat,
     ) -> Result<usize, RingError> {
+        self.pack_push_with(pcm, device, ChannelMode::Exact)
+    }
+
+    /// 同 [`StaticProducer::pack_push`]，声道处理方式由 `mode` 给出（[`ChannelMode`]）。
+    pub fn pack_push_with(
+        &mut self,
+        pcm: &Pcm<'_, Exact>,
+        device: &DeviceFormat,
+        mode: ChannelMode,
+    ) -> Result<usize, RingError> {
         let fb = self.frame_bytes;
         if fb == 0 {
             return Err(RingError::NotConfigured);
@@ -194,7 +204,7 @@ impl<const N: usize> StaticProducer<N> {
             Err(_) => return Err(RingError::Busy),
         };
         let room = grant.len() / fb * fb;
-        let packed = match pack(pcm, device, &mut grant[..room]) {
+        let packed = match pack_with(pcm, device, mode, &mut grant[..room]) {
             Ok(n) => n,
             Err(e) => {
                 grant.commit(0);
@@ -221,9 +231,10 @@ impl<const N: usize> FrameSink for StaticProducer<N> {
         &mut self,
         pcm: &Pcm<'_, Exact>,
         device: &DeviceFormat,
+        mode: ChannelMode,
         _scratch: &mut [u8],
     ) -> Result<usize, RingError> {
-        self.pack_push(pcm, device)
+        self.pack_push_with(pcm, device, mode)
     }
 
     fn queued_frames(&self) -> usize {
