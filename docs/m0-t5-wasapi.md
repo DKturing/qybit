@@ -27,7 +27,15 @@
    - `GetBufferSize` 取得端点缓冲帧数；
    - `GetService<IAudioRenderClient>`。
 
-格式描述默认用 `WAVEFORMATEXTENSIBLE`。`WasapiBackend::descriptor_16` 可以让 16/16 改用 `WAVEFORMATEX`，供 T6 矩阵测试；运行时不会自动在两种描述之间回退。
+格式描述默认用 `WAVEFORMATEXTENSIBLE`。
+
+**16/16 的 WAVEFORMATEX 候选**（2026-10-14 起，`attempt::attempts`）：
+- 行为：源为标准单声道 `[FC]` 或立体声 `[FL FR]` 时，16/16 的 EXTENSIBLE 被拒后，紧接着用同参数的 `WAVEFORMATEX` 再试一次，然后才是 24/24 等更大的候选。
+- 不改变什么：两种描述只是格式结构不同，承载的字节完全相同（同一 pack 结果），不改变采样率、位数、声道或样本。
+- 原因：真机矩阵中出现过只接受其中一种描述的驱动，例如单声道只接受 `WAVEFORMATEX`。
+- 依据：Microsoft Learn `WAVEFORMATEX`：`nChannels` 为 1 是单声道、2 是立体声，没有声道掩码；`WAVE_FORMAT_PCM` 的位数为 8 或 16。`WAVEFORMATEXTENSIBLE` 能描述 `WAVEFORMATEX` 能描述的任何格式。
+- 限制：其他布局（如只占左声道位置的单声道、侧环绕双声道、多声道）不用 `WAVEFORMATEX`，以免丢失声道位置；`WaveFormatEx::from_device` 对这些布局返回 `UndefinedLayout`。
+- 记录：每次尝试的描述类型与 HRESULT 都写入协商记录与报告。矩阵逐项测试仍可用 `forced` 只测指定的描述类型。
 
 明确不做的事：不用 `AUTOCONVERTPCM`、`SRC_DEFAULT_QUALITY` 等转换标志，不回退到共享模式，不调用 `GetMixFormat`。
 

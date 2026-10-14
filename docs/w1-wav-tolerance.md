@@ -150,10 +150,10 @@ cargo +nightly fuzz run wav_decode corpus/wav_decode_w1b -- \
 
 ## 6. 后续：Windows 真机测试与伪装成 PCM 的压缩码流（2026-10-14）
 
-**真机测试**：Windows，LG UltraFine 显示器音频（NVIDIA High Definition Audio，HDMI/DP），WASAPI 独占。
+**真机测试**：Windows，一个音频端点，WASAPI 独占。文档不记录具体设备型号：本程序是通用程序，结论按能力描述，不针对某个设备。
 
 - 48 kHz / 16 位方波测试（`exclusive_playback_48k_16bit`）：通过，480 帧缓冲，无欠载。
-- 用户的一个 WAV（文件头为 44.1 kHz / 16 位立体声 PCM）播放为持续杂音。用以下方法排查：
+- 一个实际的 WAV 文件（文件头为 44.1 kHz / 16 位立体声 PCM）播放为持续杂音。用以下方法排查：
   - 44.1 kHz 与 48 kHz 的 1 kHz 正弦测试音（`qybit tone`）经独占输出都干净。44.1 kHz 时驱动先回报 `AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED`，按对齐周期重试后为 448 帧，这条路径正常。
   - 同一文件经 `qybit decode` 写出的 WAV 用 Windows 媒体播放器播放同样是杂音，原始文件则正常。
   - 结论：输出路径正常，问题在文件内容。
@@ -169,7 +169,7 @@ cargo +nightly fuzz run wav_decode corpus/wav_decode_w1b -- \
   - 依据：ETSI TS 102 114 帧头；IEC 61937-1 突发前导。
 - **误判防护**：最初只核对 16 位 DTS 同步字后 6 位时，现有夹具 `pcm16_stereo_44k` 被误判。它的测试样本含极值对 0x7FFE、0x8001，削波的真实音频也会出现。因此加了上面的帧头字段核对，并加入回归夹具 `pcm16_dts16_sync_clipped`、`pcm16_dts14_near_miss`，两者都按 PCM 播放，ffmpeg 参考一致。
 - **识别结果**：按 `Unsupported` 拒绝，明细为 `WavDetail::Bitstream { kind, offset }`。报告写明“data 中是 DTS 编码流……不是 PCM；本程序不解码，也不做数字直通”。
-- **夹具**：`unsup_dts14_le_cd`（与用户文件开头同构）、`unsup_dts14_be_after_silence`（前有 1000 字节静音）、`unsup_dts16_le`、`unsup_dts16_be`、`unsup_iec61937_ac3`。码流内容是合成的：同步字、帧头字段加随机字节。现有 87 个 WAV 夹具逐字节不变，现共 94 个。
+- **夹具**：`unsup_dts14_le_cd`（与实测文件开头同构）、`unsup_dts14_be_after_silence`（前有 1000 字节静音）、`unsup_dts16_le`、`unsup_dts16_be`、`unsup_iec61937_ac3`。码流内容是合成的：同步字、帧头字段加随机字节。现有 87 个 WAV 夹具逐字节不变，现共 94 个。
 - **最大连续输入**：由一帧变为 4096 字节，仍小于核心最小输入窗口 8192 字节。
 - **模拟摘要的变化**：WAV 1000 种子与 FLAC 1200 种子中，有 3 行与 W1 时不同，都是 FLAC 场景中与读取分块、时序有关的种子：
   - 种子 441、501：读取错误场景，出错前完整解码的帧数取决于随机读取长度；
@@ -184,7 +184,7 @@ cargo +nightly fuzz run wav_decode corpus/wav_decode_w1b -- \
 - 诊断子命令 `decode` / `tone`；
 - 无法识别的文件头写明前 4 字节与推断的类型，原来只报 “Unsupported（无明细）”。
 
-**文件开头的 ID3v2 标签**（Windows 实测的第二个文件 b.flac：文件头为 `49 44 33 03`，即 ID3v2.3 标签在 `fLaC` 之前，常见于被标签软件写过的 FLAC）：
+**文件开头的 ID3v2 标签**（Windows 实测中的一个 FLAC 文件：文件头为 `49 44 33 03`，即 ID3v2.3 标签在 `fLaC` 之前，常见于被标签软件写过的 FLAC）：
 
 - 行为：`qy-codec-auto` 在识别容器前，按标签头声明的长度跳过 ID3v2 标签（可连续多个），再识别其后的 `RIFF`/`fLaC` 等标记。跳过的是元数据，样本不受影响。播放时实时输出“已跳过文件开头的 ID3v2 标签（N 字节，元数据，不含音频）”，`qybit decode` 同样写明。
 - 依据：
@@ -203,18 +203,15 @@ cargo +nightly fuzz run wav_decode corpus/wav_decode_w1b -- \
     - 记录：初始语料为全部 WAV/FLAC 夹具 × 3 种前缀，`cargo +nightly fuzz run auto_decode -- -max_total_time=600 -max_len=1048576 -seed=1`，开发机（4 核），600 秒、233419 次执行，0 崩溃。
     - 首轮发现的问题出在测试工具：给 v2.3 标签加了只在 v2.4 定义的标签尾。已改为只给 v2.4 加标签尾，解码器未改。
 
-**修正后的真机试听**（同一台 LG UltraFine，WASAPI 独占，2026-10-14，用户报告）：
+**修正后的真机试听**（同一端点，WASAPI 独占，2026-10-14，人工试听）：
 
-- 换用普通 PCM WAV（44.1 kHz / 16 位立体声）：独占打开 44.1 kHz / 16 位，448 帧缓冲；播放约 126 秒后用户按 Ctrl+C 中断。期间欠载 0 次，队列最低 557 ms，用户听感干净。
-- b.flac（开头为 ID3v2.3 标签）：拉取 `43fffd7` 并重新编译后可以播放，用户听感干净。
+- 换用普通 PCM WAV（44.1 kHz / 16 位立体声）：独占打开 44.1 kHz / 16 位，448 帧缓冲；播放约 126 秒后按 Ctrl+C 中断。期间欠载 0 次，队列最低 557 ms，听感干净。
+- 开头带 ID3v2.3 标签的 FLAC 文件：`43fffd7` 起可以播放，听感干净。
 - 这些是人耳试听，没有回录证据，不证明设备端 bit-perfect。
 - **设备格式矩阵**（`format_matrix_and_sequential`，70 项）：
-  - 独占初始化成功的 8 项都完整播放：排空、帧数一致、欠载 0；其余 62 项由驱动以 `AUDCLNT_E_UNSUPPORTED_FORMAT`（0x88890008）拒绝，是设备能力结果。
-  - 成功的 8 项是 44.1 kHz 与 48 kHz 各 4 项：单声道 WAVEFORMATEX 16/16、双声道 EXTENSIBLE 16/16、双声道 EXTENSIBLE 32/24、双声道 WAVEFORMATEX 16/16。
-  - 单声道 EXTENSIBLE（掩码 FC）全部被拒，同样的单声道用 WAVEFORMATEX 描述则可以。
-  - 被拒的还有：24/24 紧凑、32/32、88.2 kHz 及以上、全部多声道。
+  - 凡独占初始化成功的项都完整播放：排空、帧数一致、欠载 0；其余项由驱动以 `AUDCLNT_E_UNSUPPORTED_FORMAT`（0x88890008）拒绝，按“设备不支持”明确报告，属于设备能力，不是错误。
   - 测试本身的问题：断言项数写的是 60，F1 加入 10 项多声道时没有改，所以在项数断言处失败。顺序换曲已经执行，结果在 JSON 报告里，但没有经过断言核对。已改为取矩阵定义的项数，需要重跑。
-  - 发现：播放器协商只用 EXTENSIBLE。在这台设备上，16 位单声道文件会被拒绝，虽然 WAVEFORMATEX 单声道可用。是否把 WAVEFORMATEX 加为单/双声道 16 位的候选，另行决定。
+  - 矩阵中出现了驱动拒绝 16 位单声道的 EXTENSIBLE、却接受同参数 WAVEFORMATEX 的情况。播放器原先只用 EXTENSIBLE，这类文件会被拒绝。现已为标准单声道与立体声加入 WAVEFORMATEX 候选，见 [m0-t5-wasapi.md](m0-t5-wasapi.md)“16/16 的 WAVEFORMATEX 候选”。
 - 系统音量滑块不起作用，符合预期：独占模式绕过 Windows 混音器，软件增益恒为 1。音量需由设备端控制（README “使用（Windows）”）。
 
 ## 7. 范围外

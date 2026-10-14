@@ -133,7 +133,11 @@ impl WaveFormatEx {
         }
     }
 
-    /// 由设备格式构造；只接受 C16/V16、小端。
+    /// 由设备格式构造；只接受 C16/V16、小端，且声道布局为标准单声道 `[FC]` 或立体声 `[FL FR]`。
+    ///
+    /// 依据：Microsoft Learn `WAVEFORMATEX`：`nChannels` 为 1 是单声道、2 是立体声，没有声道
+    /// 掩码；`WAVE_FORMAT_PCM` 的 `wBitsPerSample` 为 8 或 16。其他布局（如只占左声道位置的
+    /// 单声道）无法用它表示，返回 [`FormatError::UndefinedLayout`]，以免丢失声道位置。
     pub const fn from_device(f: &DeviceFormat) -> Result<Self, FormatError> {
         if !matches!(f.endian(), Endian::Little) {
             return Err(FormatError::Layout);
@@ -143,6 +147,10 @@ impl WaveFormatEx {
         }
         if f.valid_bits() != 16 {
             return Err(FormatError::ValidBits);
+        }
+        let mask = f.layout().mask();
+        if mask != ChannelLayout::MONO.mask() && mask != ChannelLayout::STEREO.mask() {
+            return Err(FormatError::UndefinedLayout);
         }
         Self::pcm16(f.sample_rate(), f.channels())
     }
@@ -505,5 +513,26 @@ mod tests {
             WaveFormatEx::from_device(&d16v12),
             Err(FormatError::ValidBits)
         );
+        // WAVEFORMATEX 没有声道掩码：只接受标准单声道 [FC] 与立体声 [FL FR]。
+        for (mask, ok) in [
+            (0x4u32, true),
+            (0x3, true),
+            (0x1, false),
+            (0x5, false),
+            (0x600, false),
+        ] {
+            let Some(layout) = ChannelLayout::from_mask(mask) else {
+                panic!("{mask:#x}");
+            };
+            let Ok(d) = DeviceFormat::wasapi_layout(44_100, layout, 16, 16) else {
+                panic!("{mask:#x}");
+            };
+            let want = if ok {
+                WaveFormatEx::pcm16(44_100, layout.channels())
+            } else {
+                Err(FormatError::UndefinedLayout)
+            };
+            assert_eq!(WaveFormatEx::from_device(&d), want, "{mask:#x}");
+        }
     }
 }

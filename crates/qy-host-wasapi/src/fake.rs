@@ -5,7 +5,7 @@
 use qy_core::{DeviceFormat, SourceFormat};
 use qy_player::testing::{FakeBackend, Negotiator};
 
-use crate::attempt::{Attempt, Descriptor, Negotiation, OpenFailure, candidates};
+use crate::attempt::{Attempt, Descriptor, Negotiation, OpenFailure, attempts};
 
 pub const AUDCLNT_E_UNSUPPORTED_FORMAT: i32 = 0x8889_0008_u32 as i32;
 
@@ -14,6 +14,8 @@ pub const AUDCLNT_E_UNSUPPORTED_FORMAT: i32 = 0x8889_0008_u32 as i32;
 pub struct WasapiNegotiator {
     /// 只尝试该 (C, V) 与描述类型（矩阵逐项测试用）。
     pub forced: Option<((u8, u8), Descriptor)>,
+    /// 模拟只接受 WAVEFORMATEX 描述 16/16 的驱动：16/16 的 EXTENSIBLE 请求被拒。
+    pub extensible_16_rejected: bool,
 }
 
 impl Negotiator for WasapiNegotiator {
@@ -28,10 +30,7 @@ impl Negotiator for WasapiNegotiator {
         let list: Vec<((u8, u8), Descriptor)> = match self.forced {
             Some((cv, d)) if cv.1 >= source.bits() => vec![(cv, d)],
             Some(_) => Vec::new(),
-            None => candidates(source)
-                .into_iter()
-                .map(|cv| (cv, Descriptor::Extensible))
-                .collect(),
+            None => attempts(source, None),
         };
         for ((c, v), descriptor) in list {
             let Ok(format) =
@@ -39,7 +38,10 @@ impl Negotiator for WasapiNegotiator {
             else {
                 continue;
             };
-            let ok = supported.contains(&(c, v));
+            let ok = supported.contains(&(c, v))
+                && !(self.extensible_16_rejected
+                    && (c, v) == (16, 16)
+                    && descriptor == Descriptor::Extensible);
             negotiation.attempts.push(Attempt {
                 format,
                 descriptor,
@@ -63,7 +65,15 @@ impl Negotiator for WasapiNegotiator {
 
 /// WASAPI 形状的假后端：整包假设备，优先级记录名为 MMCSS。
 pub fn fake_backend(supported: &[(u8, u8)]) -> FakeBackend<WasapiNegotiator> {
-    let mut b = FakeBackend::with_negotiator(supported, WasapiNegotiator::default());
+    fake_backend_with(supported, WasapiNegotiator::default())
+}
+
+/// 同 [`fake_backend`]，协商行为由 `negotiator` 给出。
+pub fn fake_backend_with(
+    supported: &[(u8, u8)],
+    negotiator: WasapiNegotiator,
+) -> FakeBackend<WasapiNegotiator> {
+    let mut b = FakeBackend::with_negotiator(supported, negotiator);
     b.priority.label = Some(crate::MMCSS_LABEL);
     b
 }

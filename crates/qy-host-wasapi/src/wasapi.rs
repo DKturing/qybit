@@ -2,7 +2,7 @@
 //!
 //! 平台边界的 `unsafe` 集中于此模块，每处注明依据。
 //!
-//! 协商：在渲染线程内初始化 COM（MTA），按 [`candidates`] 依次尝试设备格式；
+//! 协商：在渲染线程内初始化 COM（MTA），按 [`attempts`] 依次尝试设备格式与描述类型；
 //! 每次尝试激活新的 `IAudioClient`，先以独占模式 `IsFormatSupported`，成功再
 //! `Initialize(EXCLUSIVE, EVENTCALLBACK, period, period)`。若返回
 //! `AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED`，按文档用 `GetBufferSize` 计算对齐周期
@@ -43,7 +43,7 @@ use qy_player::render::{
 };
 use qy_player::{Backend, PendingStream, RunningStream, Submission};
 
-use crate::attempt::{Attempt, Descriptor, Negotiation, OpenFailure, candidates};
+use crate::attempt::{Attempt, Descriptor, Negotiation, OpenFailure, attempts};
 
 /// `E_UNEXPECTED`：`GetBuffer` 成功却返回空指针时报告。
 const E_UNEXPECTED: i32 = 0x8000_FFFF_u32 as i32;
@@ -98,9 +98,7 @@ fn win32_code(code: HRESULT) -> u32 {
 /// WASAPI 独占后端。
 pub struct WasapiBackend {
     pub device_id: String,
-    /// 16/16 格式使用的描述类型；默认 EXTENSIBLE（T6 矩阵另测 WAVEFORMATEX）。
-    pub descriptor_16: Descriptor,
-    /// 只尝试该 (C, V) 与描述类型（矩阵逐项测试用）；为 `None` 时按 [`candidates`]。
+    /// 只尝试该 (C, V) 与描述类型（矩阵逐项测试用）；为 `None` 时按 [`attempts`]。
     pub forced: Option<((u8, u8), Descriptor)>,
     /// 只请求该容器位宽（16/24/32）的格式。驱动对某种格式回报支持、实际播放却异常时用来排查；
     /// 只限定容器表示，样本值不变（pack 按设备格式左对齐放置）。
@@ -111,7 +109,6 @@ impl WasapiBackend {
     pub fn new(device_id: impl Into<String>) -> Self {
         Self {
             device_id: device_id.into(),
-            descriptor_16: Descriptor::Extensible,
             forced: None,
             container: None,
         }
@@ -143,18 +140,7 @@ impl Backend for WasapiBackend {
         let list: Vec<((u8, u8), Descriptor)> = match self.forced {
             Some((cv, d)) if cv.1 >= source.bits() => vec![(cv, d)],
             Some(_) => Vec::new(),
-            None => candidates(&source)
-                .into_iter()
-                .filter(|&(c, _)| self.container.is_none_or(|k| k == c))
-                .map(|cv| {
-                    let d = if cv == (16, 16) {
-                        self.descriptor_16
-                    } else {
-                        Descriptor::Extensible
-                    };
-                    (cv, d)
-                })
-                .collect(),
+            None => attempts(&source, self.container),
         };
         let handle =
             std::thread::spawn(move || stream_thread(&id, &source, &list, &info_tx, &go_rx));
@@ -549,7 +535,6 @@ pub fn device_matrix(
     let items = matrix_items();
     let entries = run_matrix(&items, &mut res, work_dir, |item| WasapiBackend {
         device_id: device_id.to_string(),
-        descriptor_16: Descriptor::Extensible,
         forced: Some(((item.container_bits, item.valid_bits), item.descriptor)),
         container: None,
     })

@@ -23,6 +23,29 @@ pub enum Descriptor {
     WaveFormatEx,
 }
 
+/// 协商尝试顺序：每个候选 (C, V) 先用 EXTENSIBLE；16/16 且源为标准单声道 `[FC]` 或立体声
+/// `[FL FR]` 时，紧接着用同参数的 WAVEFORMATEX 再试一次。`container` 为 `Some(k)` 时只保留
+/// 容器位宽为 k 的候选。
+///
+/// 两种描述承载的字节完全相同（同一 pack 结果），只是格式结构不同；有的驱动只接受其中一种
+/// （例如单声道只接受 WAVEFORMATEX），所以都试。WAVEFORMATEX 没有声道掩码，只表示单声道与
+/// 立体声（Microsoft Learn `WAVEFORMATEX`），其他布局不用它，以免丢失声道位置。
+pub fn attempts(src: &SourceFormat, container: Option<u8>) -> Vec<((u8, u8), Descriptor)> {
+    let ex16 = DeviceFormat::wasapi_layout(src.sample_rate(), src.layout(), 16, 16)
+        .is_ok_and(|f| qy_pcm_format::wave::WaveFormatEx::from_device(&f).is_ok());
+    let mut v = Vec::new();
+    for cv in candidates(src) {
+        if container.is_some_and(|k| k != cv.0) {
+            continue;
+        }
+        v.push((cv, Descriptor::Extensible));
+        if cv == (16, 16) && ex16 {
+            v.push((cv, Descriptor::WaveFormatEx));
+        }
+    }
+    v
+}
+
 /// 一次格式尝试的记录（每次尝试使用新的音频客户端）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attempt {
@@ -101,7 +124,9 @@ mod tests {
     use qy_player::{HostResources, play};
 
     use super::*;
-    use crate::fake::{AUDCLNT_E_UNSUPPORTED_FORMAT, fake_backend};
+    use crate::fake::{
+        AUDCLNT_E_UNSUPPORTED_FORMAT, WasapiNegotiator, fake_backend, fake_backend_with,
+    };
 
     const ALL: [(u8, u8); 4] = [(16, 16), (24, 24), (32, 24), (32, 32)];
 
@@ -124,6 +149,114 @@ mod tests {
             }
         }
         r
+    }
+
+    fn src(rate: u32, mask: u32, bits: u8) -> SourceFormat {
+        let Some(l) = qy_core::ChannelLayout::from_mask(mask) else {
+            panic!("{mask:#x}");
+        };
+        match SourceFormat::with_layout(rate, l, bits) {
+            Ok(f) => f,
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+
+    /// 尝试顺序：16/16 的 EXTENSIBLE 之后紧跟 WAVEFORMATEX，仅限标准单声道与立体声。
+    #[test]
+    fn attempts_add_waveformatex_for_standard_mono_and_stereo_16() {
+        use Descriptor::{Extensible as X, WaveFormatEx as W};
+        assert_eq!(
+            attempts(&src(44_100, 0x4, 16), None),
+            vec![
+                ((16, 16), X),
+                ((16, 16), W),
+                ((24, 24), X),
+                ((32, 24), X),
+                ((32, 32), X)
+            ]
+        );
+        assert_eq!(
+            attempts(&src(48_000, 0x3, 16), Some(16)),
+            vec![((16, 16), X), ((16, 16), W)]
+        );
+        assert_eq!(
+            attempts(&src(48_000, 0x3, 16), Some(32)),
+            vec![((32, 24), X), ((32, 32), X)]
+        );
+        // 位置不是 [FC] / [FL FR] 的单/双声道、多声道：WAVEFORMATEX 无法表示，不加。
+        for mask in [0x1, 0x600, 0x3F] {
+            assert!(
+                attempts(&src(48_000, mask, 16), None)
+                    .iter()
+                    .all(|&(_, d)| d == X),
+                "{mask:#x}"
+            );
+        }
+        // 源超过 16 位：没有 16/16 候选，也就没有 WAVEFORMATEX。
+        assert_eq!(
+            attempts(&src(96_000, 0x3, 24), None),
+            vec![((24, 24), X), ((32, 24), X), ((32, 32), X)]
+        );
+    }
+
+    /// 驱动拒绝 16/16 EXTENSIBLE、接受 WAVEFORMATEX：改用 WAVEFORMATEX 播放，设备字节与 data 块相同；
+    /// 非标准布局的单声道不改用 WAVEFORMATEX，按无可用格式失败。
+    #[test]
+    fn waveformatex_fallback_plays_same_bytes() {
+        let Ok(mut res) = HostResources::new() else {
+            panic!("res");
+        };
+        for name in ["pcm16_mono_8k_fmt18.wav", "pcm16_stereo_44k.wav"] {
+            let mut b = fake_backend_with(
+                &[(16, 16)],
+                WasapiNegotiator {
+                    extensible_16_rejected: true,
+                    ..WasapiNegotiator::default()
+                },
+            );
+            let r = play(&mut b, &mut res, &[fixture_path(name)]);
+            assert!(r.finished && r.software_path_intact(), "{name}: {r:?}");
+            let n = &r.streams[0].negotiation;
+            let d: Vec<_> = n.attempts.iter().map(|a| a.descriptor).collect();
+            assert_eq!(
+                d,
+                [Descriptor::Extensible, Descriptor::WaveFormatEx],
+                "{name}"
+            );
+            assert_eq!(
+                n.attempts[0].is_format_supported,
+                Some(AUDCLNT_E_UNSUPPORTED_FORMAT)
+            );
+            assert_eq!(n.chosen, Some(1), "{name}");
+            let s = r.summary();
+            assert!(
+                s.contains("（WAVEFORMATEX）IsFormatSupported(独占) 0x00000000"),
+                "{s}"
+            );
+            let outs = b.outputs();
+            let raw = data_chunk(&fixture(name));
+            assert_eq!(outs.len(), 1);
+            assert_eq!(&outs[0].rendered[..raw.len()], &raw[..], "{name}");
+        }
+        let mut b = fake_backend_with(
+            &[(16, 16)],
+            WasapiNegotiator {
+                extensible_16_rejected: true,
+                ..WasapiNegotiator::default()
+            },
+        );
+        let r = play(
+            &mut b,
+            &mut res,
+            &[fixture_path("ext16_mono_left_mask.wav")],
+        );
+        assert!(!r.finished);
+        let n = &r.open_failures[0].negotiation;
+        assert!(
+            n.attempts
+                .iter()
+                .all(|a| a.descriptor == Descriptor::Extensible)
+        );
     }
 
     #[test]

@@ -46,7 +46,8 @@ pub enum FormatError {
     Overflow,
     /// 字节序或有效位放置方式不符合目标描述（如 WASAPI 要求小端、高位对齐）。
     Layout,
-    /// 多于 2 声道但没有给出声道布局，或布局声道数与声道数不符（F1）。
+    /// 多于 2 声道但没有给出声道布局，或布局声道数与声道数不符（F1）；或布局不是目标描述
+    /// 能表示的布局（`WAVEFORMATEX` 只表示标准单声道 `[FC]` 与立体声 `[FL FR]`）。
     UndefinedLayout,
     /// 声道布局不是掩码顺序（按位从低到高），目标描述（WAVEFORMATEXTENSIBLE）无法表示。
     LayoutOrder,
