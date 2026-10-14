@@ -11,6 +11,6 @@
 | ID3v2.4.0 结构规范 §3.1 | ID3v2 标签跳过 | id3.org（通过 RFC 9639 的引用核对出处） | — |
 
 **核对记录**：
-- **RFC 9639**：PDF 标题、编号、类别、作者（M.Q.C. van Beurden、A. Weaver）与日期正确。与工作组仓库的源文本相比，有 RFC 编辑阶段的措辞修改（如 “STREAMINFO block” 改为 “streaminfo metadata block”）和 Markdown 格式差异，条款引用以 PDF 的章节号为准。M1 实现 FLAC 时主要对照 libFLAC 源码，尚未按 RFC 全文逐条复核，另行安排。
+- **RFC 9639**：PDF 标题、编号、类别、作者（M.Q.C. van Beurden、A. Weaver）与日期正确。与工作组仓库的源文本相比，有 RFC 编辑阶段的措辞修改（如 “STREAMINFO block” 改为 “streaminfo metadata block”）和 Markdown 格式差异，条款引用以 PDF 的章节号为准。M1 实现 FLAC 时 RFC 原文无法取得，章节号按 RFC 结构引用，行为以 libFLAC 源码核对；现已按 PDF 核对 [m1-t2-flac.md](m1-t2-flac.md) 的章节号并更正两处，条款内容的逐条复核另行安排。
 - **AIFF 1.3**：修订历史为 1.1（1988-01-21）、1.2（1988-06-17）、1.3（1989-01-04）。
 - **AIFF-C**：正文只定义 `NONE`、`ACE2`、`ACE8`、`MAC3`、`MAC6` 五种压缩类型；`sowt`、`twos`、`raw `、`fl32` 等是之后由其他文档引入的扩展。
