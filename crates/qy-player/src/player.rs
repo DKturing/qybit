@@ -18,7 +18,7 @@ use std::fs::File;
 use std::io::{self, ErrorKind, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use qy_core::engine::{HostAction, HostEvent, Poll, Wait};
@@ -54,6 +54,10 @@ pub trait TrackSource {
     fn count(&self) -> u32;
     /// 打开第 `track` 首。
     fn open(&mut self, track: u32) -> io::Result<Self::Reader>;
+    /// 第 `track` 首的显示名（实时输出用）。
+    fn name(&self, track: u32) -> String {
+        format!("第 {} 首", u64::from(track) + 1)
+    }
 }
 
 /// 文件路径列表。
@@ -72,6 +76,22 @@ impl TrackSource for Files<'_> {
             None => Err(io::Error::new(ErrorKind::NotFound, "曲目编号越界")),
         }
     }
+
+    fn name(&self, track: u32) -> String {
+        self.0.get(track as usize).map_or_else(
+            || format!("第 {} 首", track + 1),
+            |p| p.display().to_string(),
+        )
+    }
+}
+
+/// 播放时的实时输出与中断。
+pub struct PlayControl<'a> {
+    /// 每条进度信息（曲目开始、设备协商结果、跳过、结构修正、失败、中断）调用一次，每次一行或
+    /// 几行完整文本；播放结束后的完整报告仍由 [`PlaybackReport::summary`] 给出。
+    pub on_line: &'a mut dyn FnMut(&str),
+    /// 置位后停止播放：立即停止设备、丢弃队列（不排空），报告照常返回并标记为已中断。
+    pub stop: Option<&'a AtomicBool>,
 }
 
 /// 生产端等待队列空间时的休眠间隔。
@@ -84,6 +104,8 @@ struct Player<'a, B: Backend, S: TrackSource> {
     file: Option<S::Reader>,
     active: Option<Active<B>>,
     report: PlaybackReport<B::Attempt>,
+    ctl: PlayControl<'a>,
+    count: u32,
 }
 
 /// 依次播放 `files`，直到完成、失败或设备出错。
@@ -101,6 +123,24 @@ pub fn play_source<B: Backend, S: TrackSource>(
     res: &mut HostResources,
     source: &mut S,
 ) -> PlaybackReport<B::Attempt> {
+    play_with(
+        backend,
+        res,
+        source,
+        PlayControl {
+            on_line: &mut |_| {},
+            stop: None,
+        },
+    )
+}
+
+/// 同 [`play_source`]，并给出实时进度与中断（命令行播放用）。
+pub fn play_with<'a, B: Backend, S: TrackSource>(
+    backend: &'a mut B,
+    res: &'a mut HostResources,
+    source: &'a mut S,
+    ctl: PlayControl<'a>,
+) -> PlaybackReport<B::Attempt> {
     let count = source.count();
     // 清理上一次播放可能残留的状态（旧代次），丢弃其控制动作。
     res.engine.stop();
@@ -113,6 +153,8 @@ pub fn play_source<B: Backend, S: TrackSource>(
         file: None,
         active: None,
         report: PlaybackReport::default(),
+        ctl,
+        count,
     };
     p.run();
     p.report
@@ -125,8 +167,27 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
         }
     }
 
+    fn line(&mut self, text: &str) {
+        (self.ctl.on_line)(text);
+    }
+
+    /// 中断：立即停止核心与设备（不排空），之后旧代次的回报一律拒绝。
+    fn interrupt(&mut self) {
+        self.report.interrupted = true;
+        self.line("已中断：停止播放（不排空队列）。");
+        self.res.engine.stop();
+        while let Some(a) = self.res.engine.take_control() {
+            self.execute(a);
+        }
+        self.finish_stream(true);
+    }
+
     fn run(&mut self) {
         loop {
+            if self.ctl.stop.is_some_and(|s| s.load(Ordering::Acquire)) {
+                self.interrupt();
+                break;
+            }
             let poll = self.res.engine.poll();
             self.sync_pushed();
             match poll {
@@ -173,18 +234,23 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
     /// 执行引擎动作；返回 false 表示播放结束。
     fn execute(&mut self, action: HostAction) -> bool {
         match action {
-            HostAction::Open { generation, track } => match self.source.open(track) {
-                Ok(f) => {
-                    self.file = Some(f);
-                    self.handle(HostEvent::Opened { generation });
+            HostAction::Open { generation, track } => {
+                let name = self.source.name(track);
+                let count = self.count;
+                self.line(&format!("▶ 曲目 {}/{count}：{name}", u64::from(track) + 1));
+                match self.source.open(track) {
+                    Ok(f) => {
+                        self.file = Some(f);
+                        self.handle(HostEvent::Opened { generation });
+                    }
+                    Err(e) => {
+                        let m = format!("打开曲目 {track} 失败: {e}");
+                        self.line(&m);
+                        self.report.messages.push(m);
+                        self.handle(HostEvent::OpenFailed { generation });
+                    }
                 }
-                Err(e) => {
-                    self.report
-                        .messages
-                        .push(format!("打开曲目 {track} 失败: {e}"));
-                    self.handle(HostEvent::OpenFailed { generation });
-                }
-            },
+            }
             HostAction::Read {
                 generation,
                 request,
@@ -207,6 +273,27 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 if let Some(a) = self.active.as_mut() {
                     a.plan = plan;
                 }
+                // 实时输出协商结果（源格式、每次请求与结果、选定的设备格式）。
+                let mut text = String::new();
+                if let Some(a) = self.active.as_ref() {
+                    text.push_str("  设备流已打开：\n");
+                    crate::report::negotiation_text(&mut text, &a.negotiation);
+                    if let Some(p) = &a.plan {
+                        let _ = std::fmt::Write::write_fmt(
+                            &mut text,
+                            format_args!("  播放计划：{p}\n"),
+                        );
+                    }
+                } else if let Some(f) = self.report.open_failures.last() {
+                    let _ = std::fmt::Write::write_fmt(
+                        &mut text,
+                        format_args!("  设备打开失败：{}\n", f.message),
+                    );
+                    crate::report::negotiation_text(&mut text, &f.negotiation);
+                }
+                if !text.is_empty() {
+                    self.line(text.trim_end());
+                }
             }
             HostAction::StartDevice => self.start_if_pending(),
             HostAction::DrainDevice => {
@@ -218,8 +305,21 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 self.report.protocol_errors += 1;
                 self.report.messages.push("桌面渲染循环尚未实现暂停".into());
             }
-            HostAction::TrackSkipped { track, fault } => self.report.skipped.push((track, fault)),
-            HostAction::Repaired { track, repair } => self.report.repairs.push((track, repair)),
+            HostAction::TrackSkipped { track, fault } => {
+                self.line(&format!(
+                    "  曲目 {} 已跳过：{}",
+                    u64::from(track) + 1,
+                    crate::report::fault_text(&fault)
+                ));
+                self.report.skipped.push((track, fault));
+            }
+            HostAction::Repaired { track, repair } => {
+                self.line(&format!(
+                    "  曲目 {} 按规则修正文件结构：{repair}（样本未改动）",
+                    u64::from(track) + 1
+                ));
+                self.report.repairs.push((track, repair));
+            }
             HostAction::Finished => {
                 self.report.finished = !self.report.device_error;
                 return false;
@@ -604,6 +704,70 @@ mod tests {
             assert!(w.low_frames() > 0 && w.critical_frames() > 0, "{w:?}");
             assert_eq!(r.exit_code(), 0, "{s}");
         }
+    }
+
+    /// 实时输出：曲目开始、源格式、每次请求与选定的设备格式、结构修正；中断时停止设备并标记。
+    #[test]
+    fn live_lines_and_interrupt() {
+        let files: Vec<PathBuf> = ["pcm16_stereo_44k.wav", "fix_data_partial_frame.wav"]
+            .iter()
+            .map(|n| fixture_path(n))
+            .collect();
+        let mut b = backend(&ALL, FakeDevice::Packet);
+        let Ok(mut res) = HostResources::new() else {
+            panic!("res");
+        };
+        let mut lines = Vec::new();
+        let r = play_with(
+            &mut b,
+            &mut res,
+            &mut Files(&files),
+            PlayControl {
+                on_line: &mut |l: &str| lines.push(l.to_string()),
+                stop: None,
+            },
+        );
+        let all = lines.join("\n");
+        assert!(r.finished, "{all}");
+        assert!(all.contains("▶ 曲目 1/2："), "{all}");
+        assert!(all.contains("pcm16_stereo_44k.wav"), "{all}");
+        assert!(all.contains("▶ 曲目 2/2："), "{all}");
+        assert!(all.contains("设备流已打开"), "{all}");
+        assert!(
+            all.contains("源格式：44100 Hz / 2 声道 / 16 位有效"),
+            "{all}"
+        );
+        assert!(all.contains("← 已协商"), "{all}");
+        assert!(all.contains("曲目 2 按规则修正文件结构"), "{all}");
+
+        // 中断：第二首开始时置位，播放立即停止，报告标记中断，消费端归还。
+        let stop = AtomicBool::new(false);
+        let mut b = backend(&ALL, FakeDevice::Packet);
+        let mut lines = Vec::new();
+        let r = play_with(
+            &mut b,
+            &mut res,
+            &mut Files(&files),
+            PlayControl {
+                on_line: &mut |l: &str| {
+                    if l.starts_with("▶ 曲目 2/2") {
+                        stop.store(true, Ordering::Release);
+                    }
+                    lines.push(l.to_string());
+                },
+                stop: Some(&stop),
+            },
+        );
+        let s = r.summary();
+        assert!(r.interrupted && !r.finished, "{s}");
+        assert_eq!(r.exit_code(), 1);
+        assert!(s.contains("已按用户要求中断"), "{s}");
+        assert!(lines.iter().any(|l| l.starts_with("已中断")), "{lines:?}");
+        assert!(res.consumer.is_some(), "消费端须归还");
+        // 中断之后同一资源可以再次播放。
+        let mut b = backend(&ALL, FakeDevice::Packet);
+        let r = play(&mut b, &mut res, &files[..1]);
+        assert!(r.finished && r.software_path_intact());
     }
 
     /// W1：修正按曲目写入报告（不改样本：设备字节等于独立参考）；R5 截断写明缺少的字节数；

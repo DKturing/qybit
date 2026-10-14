@@ -56,7 +56,11 @@ fn run(cmd: Command) -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Command::Play { device, files } => {
+        Command::Play {
+            device,
+            files,
+            container,
+        } => {
             let info = match endpoint_info(&device) {
                 Ok(i) => i,
                 Err(e) => {
@@ -77,8 +81,12 @@ fn run(cmd: Command) -> ExitCode {
                 }
             };
             let mut backend = qy_host_wasapi::wasapi::WasapiBackend::new(device);
-            let report = qy_player::play(&mut backend, &mut res, &files);
-            print!("{}", report.summary());
+            backend.container = container;
+            if let Some(c) = container {
+                println!("只请求容器 {c} 位的设备格式（--container）");
+            }
+            let stop = interrupt_flag(qy_host_wasapi::interrupt::install());
+            let report = play_live(&mut backend, &mut res, &files, stop);
             ExitCode::from(report.exit_code())
         }
         Command::Matrix { device, out } => {
@@ -143,7 +151,15 @@ fn run(cmd: Command) -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Command::Play { device, files } => {
+        Command::Play {
+            device,
+            files,
+            container,
+        } => {
+            if container.is_some() {
+                eprintln!("错误：--container 目前只用于 Windows WASAPI");
+                return ExitCode::FAILURE;
+            }
             if let Err(e) = check_device(&device) {
                 eprintln!("错误：{e}");
                 return ExitCode::FAILURE;
@@ -157,8 +173,8 @@ fn run(cmd: Command) -> ExitCode {
                 }
             };
             let mut backend = AlsaBackend::new(device, RealOpener, RtPriority::default());
-            let report = qy_player::play(&mut backend, &mut res, &files);
-            print!("{}", report.summary());
+            let stop = interrupt_flag(qy_host_alsa::linux::interrupt::install());
+            let report = play_live(&mut backend, &mut res, &files, stop);
             ExitCode::from(report.exit_code())
         }
         Command::Matrix { device, out } => {
@@ -204,6 +220,77 @@ fn run(cmd: Command) -> ExitCode {
 #[cfg(target_os = "linux")]
 fn check_device(device: &str) -> Result<(), String> {
     qy_host_alsa::pcm_name_check(device)
+}
+
+/// Ctrl+C 处理安装失败时仍可播放，只是不能中途优雅停止。
+#[cfg(any(windows, target_os = "linux"))]
+fn interrupt_flag(
+    r: Result<&'static std::sync::atomic::AtomicBool, String>,
+) -> Option<&'static std::sync::atomic::AtomicBool> {
+    match r {
+        Ok(f) => Some(f),
+        Err(e) => {
+            eprintln!("警告：{e}；Ctrl+C 将直接结束进程，不输出报告");
+            None
+        }
+    }
+}
+
+/// 播放并实时输出进度（曲目、源格式、协商结果、跳过与修正），结束或中断后输出完整报告。
+#[cfg(any(windows, target_os = "linux"))]
+fn play_live<B: qy_player::Backend>(
+    backend: &mut B,
+    res: &mut qy_player::HostResources,
+    files: &[std::path::PathBuf],
+    stop: Option<&std::sync::atomic::AtomicBool>,
+) -> qy_player::PlaybackReport<B::Attempt> {
+    use std::io::Write;
+    println!("（Ctrl+C 停止并输出报告）");
+    let report = qy_player::play_with(
+        backend,
+        res,
+        &mut Files(files),
+        qy_player::PlayControl {
+            on_line: &mut |l: &str| {
+                println!("{l}");
+                let _ = std::io::stdout().flush();
+            },
+            stop,
+        },
+    );
+    println!("\n—— 播放报告 ——");
+    print!("{}", report.summary());
+    report
+}
+
+/// 命令行给出的文件列表。
+#[cfg(any(windows, target_os = "linux"))]
+struct Files<'a>(&'a [std::path::PathBuf]);
+
+#[cfg(any(windows, target_os = "linux"))]
+impl qy_player::TrackSource for Files<'_> {
+    type Reader = std::fs::File;
+
+    fn count(&self) -> u32 {
+        u32::try_from(self.0.len()).unwrap_or(u32::MAX)
+    }
+
+    fn open(&mut self, track: u32) -> std::io::Result<std::fs::File> {
+        match self.0.get(track as usize) {
+            Some(p) => std::fs::File::open(p),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "曲目编号越界",
+            )),
+        }
+    }
+
+    fn name(&self, track: u32) -> String {
+        self.0.get(track as usize).map_or_else(
+            || format!("第 {} 首", track + 1),
+            |p| p.display().to_string(),
+        )
+    }
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]

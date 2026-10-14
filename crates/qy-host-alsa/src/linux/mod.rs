@@ -2,6 +2,7 @@
 
 pub mod capture;
 pub mod devices;
+pub mod interrupt;
 pub mod occupants;
 pub mod priority;
 pub mod real;

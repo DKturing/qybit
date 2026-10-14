@@ -126,6 +126,8 @@ pub struct PlaybackReport<A> {
     pub finished: bool,
     /// 渲染线程以错误结束（如设备失效）。
     pub device_error: bool,
+    /// 按用户要求中断（如 Ctrl+C）。
+    pub interrupted: bool,
     pub protocol_errors: u32,
 }
 
@@ -140,6 +142,7 @@ impl<A> Default for PlaybackReport<A> {
             messages: Vec::new(),
             finished: false,
             device_error: false,
+            interrupted: false,
             protocol_errors: 0,
         }
     }
@@ -219,7 +222,7 @@ fn applied_text(out: &mut String, a: Option<AppliedParams>) {
     out.push('\n');
 }
 
-fn negotiation_text<A: AttemptRecord>(out: &mut String, n: &Negotiation<A>) {
+pub(crate) fn negotiation_text<A: AttemptRecord>(out: &mut String, n: &Negotiation<A>) {
     let s = &n.source;
     let _ = writeln!(
         out,
@@ -343,6 +346,9 @@ impl<A: AttemptRecord> PlaybackReport<A> {
         }
         if self.device_error {
             o.push_str("输出设备错误：播放已停止。\n");
+        }
+        if self.interrupted {
+            o.push_str("已按用户要求中断（未排空，正在播放的曲目没有放完）。\n");
         }
         if self.software_path_intact() {
             o.push_str(

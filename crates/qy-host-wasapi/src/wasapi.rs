@@ -102,6 +102,9 @@ pub struct WasapiBackend {
     pub descriptor_16: Descriptor,
     /// 只尝试该 (C, V) 与描述类型（矩阵逐项测试用）；为 `None` 时按 [`candidates`]。
     pub forced: Option<((u8, u8), Descriptor)>,
+    /// 只请求该容器位宽（16/24/32）的格式。驱动对某种格式回报支持、实际播放却异常时用来排查；
+    /// 只限定容器表示，样本值不变（pack 按设备格式左对齐放置）。
+    pub container: Option<u8>,
 }
 
 impl WasapiBackend {
@@ -110,6 +113,7 @@ impl WasapiBackend {
             device_id: device_id.into(),
             descriptor_16: Descriptor::Extensible,
             forced: None,
+            container: None,
         }
     }
 }
@@ -141,6 +145,7 @@ impl Backend for WasapiBackend {
             Some(_) => Vec::new(),
             None => candidates(&source)
                 .into_iter()
+                .filter(|&(c, _)| self.container.is_none_or(|k| k == c))
                 .map(|cv| {
                     let d = if cv == (16, 16) {
                         self.descriptor_16
@@ -546,6 +551,7 @@ pub fn device_matrix(
         device_id: device_id.to_string(),
         descriptor_16: Descriptor::Extensible,
         forced: Some(((item.container_bits, item.valid_bits), item.descriptor)),
+        container: None,
     })
     .map_err(|e| e.to_string())?;
     let mut backend = WasapiBackend::new(device_id);

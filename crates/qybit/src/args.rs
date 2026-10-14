@@ -5,7 +5,8 @@ use std::path::PathBuf;
 pub const USAGE: &str = "\
 用法:
   qybit list-devices                         列出可用输出设备（Windows：端点 ID 与名称；Linux：hw 设备名）
-  qybit --device <设备> <文件>...            按顺序播放 WAV/FLAC（按文件头识别）
+  qybit --device <设备> [--container 16|24|32] <文件>...
+                                             按顺序播放 WAV/FLAC（按文件头识别）；Ctrl+C 停止并输出报告
   qybit matrix --device <设备> [--out <目录>]
                                              运行设备格式矩阵，写出 JSON/CSV 报告
   qybit --version | --help
@@ -15,13 +16,23 @@ pub const USAGE: &str = "\
 PowerShell 会把未加引号的 {…} 当成脚本块，端点 ID 要加单引号：
   qybit --device '{0.0.0.00000000}.{…}' a.wav
 
-退出码：0 完整播放；2 播放完成但有欠载；1 失败（含设备不支持、打开失败、设备错误）。";
+--container：只请求该容器位宽的设备格式（目前只用于 Windows）。驱动对某种格式回报支持、实际播放
+却是杂音时用来排查，例如 24 位源用 --container 32 避开 3 字节紧凑格式；样本值不变。
+
+退出码：0 完整播放；2 播放完成但有欠载；1 失败（含设备不支持、打开失败、设备错误、中断）。";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     ListDevices,
-    Play { device: String, files: Vec<PathBuf> },
-    Matrix { device: String, out: PathBuf },
+    Play {
+        device: String,
+        files: Vec<PathBuf>,
+        container: Option<u8>,
+    },
+    Matrix {
+        device: String,
+        out: PathBuf,
+    },
     Version,
     Help,
 }
@@ -54,16 +65,29 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         Some("--device") => {
             let device = device_value(&mut it)?;
             let mut files = Vec::new();
-            for a in it {
-                if a.starts_with('-') {
+            let mut container = None;
+            while let Some(a) = it.next() {
+                if a == "--container" {
+                    container = Some(match value(&mut it, "--container")?.as_str() {
+                        "16" => 16,
+                        "24" => 24,
+                        "32" => 32,
+                        x => return Err(format!("--container 只接受 16、24 或 32，收到 {x}")),
+                    });
+                } else if a.starts_with('-') {
                     return Err(format!("未知参数：{a}"));
+                } else {
+                    files.push(PathBuf::from(a));
                 }
-                files.push(PathBuf::from(a));
             }
             if files.is_empty() {
                 return Err("至少需要一个音频文件（WAV 或 FLAC）".into());
             }
-            Ok(Command::Play { device, files })
+            Ok(Command::Play {
+                device,
+                files,
+                container,
+            })
         }
         Some(x) if !x.starts_with('-') => Err(format!(
             "未指定设备：播放需要 --device <端点ID>（可用 qybit list-devices 查看），收到 {x}"
@@ -111,9 +135,19 @@ mod tests {
             p(&["--device", "{0.0.0.00000000}.{x}", "a.wav", "b.wav"]),
             Ok(Command::Play {
                 device: "{0.0.0.00000000}.{x}".into(),
-                files: vec!["a.wav".into(), "b.wav".into()]
+                files: vec!["a.wav".into(), "b.wav".into()],
+                container: None,
             })
         );
+        assert_eq!(
+            p(&["--device", "id", "a.wav", "--container", "32", "b.flac"]),
+            Ok(Command::Play {
+                device: "id".into(),
+                files: vec!["a.wav".into(), "b.flac".into()],
+                container: Some(32),
+            })
+        );
+        assert!(p(&["--device", "id", "--container", "20", "a.wav"]).is_err());
         assert_eq!(
             p(&["matrix", "--device", "id"]),
             Ok(Command::Matrix {

@@ -5,7 +5,8 @@
 //! - `wasapi`（仅 Windows）：WASAPI 独占事件驱动后端与 MMCSS，渲染使用
 //!   `qy_player::render::packet` 整包循环；
 //! - `sdk_format`（仅 Windows）：纯格式描述到 SDK 结构的字段映射；
-//! - `endpoints`（仅 Windows）：端点枚举。
+//! - `endpoints`（仅 Windows）：端点枚举；
+//! - `interrupt`（仅 Windows）：Ctrl+C 中断标志。
 //!
 //! 宿主资源、播放驱动与报告见 `qy-player`。
 
@@ -14,6 +15,8 @@ pub mod matrix;
 
 #[cfg(windows)]
 pub mod endpoints;
+#[cfg(windows)]
+pub mod interrupt;
 #[cfg(windows)]
 pub mod sdk_format;
 #[cfg(windows)]
