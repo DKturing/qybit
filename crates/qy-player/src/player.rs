@@ -1104,7 +1104,7 @@ mod tests {
             assert!(!text.contains("软件路径无损"), "{text}");
             // 协商记录写源文件的实际格式，并注明按 2 声道请求设备。
             assert!(
-                text.contains("源格式：8000 Hz / 1 声道 / 16 位有效（--mono-to-stereo：按 2 声道 [FL FR] 请求设备）"),
+                text.contains("源格式：8000 Hz / 1 声道 / 16 位有效（单声道复制到左右两路：按 2 声道 [FL FR] 请求设备）"),
                 "{text}"
             );
             // 设备打开之后才报告声道已改变。

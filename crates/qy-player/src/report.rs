@@ -92,7 +92,7 @@ pub struct RateProbe {
     /// 其中端点接受的采样率。
     pub accepted: Vec<u32>,
     /// 源为单声道 `[FC]` 且所有采样率都被拒时，按立体声 `[FL FR]`（同样的位深候选）查询被接受的
-    /// 采样率（含源采样率）。用来说明 `--mono-to-stereo` 能否让该文件播放；不会自动改用立体声。
+    /// 采样率（含源采样率）。用来说明单声道复制到左右两路（`--mono-to-stereo` / 图形界面选项）能否让该文件播放；不会自动改用立体声。
     pub stereo_accepted: Option<Vec<u32>>,
 }
 
@@ -352,7 +352,7 @@ pub(crate) fn negotiation_text<A: AttemptRecord>(out: &mut String, n: &Negotiati
     if n.duplicated_mono {
         let _ = write!(
             out,
-            "（--mono-to-stereo：按 {} 声道 {} 请求设备）",
+            "（单声道复制到左右两路：按 {} 声道 {} 请求设备）",
             n.source.channels(),
             n.source.layout()
         );
@@ -412,8 +412,9 @@ fn rate_probe_text(out: &mut String, p: &RateProbe, source_rate: u32) {
                 let _ = writeln!(
                     out,
                     "  声道探测：端点在所有查询的采样率下都不接受单声道 [FC]；按立体声 [FL FR] 查询，\
-                     端点接受 {} Hz（含源的 {source_rate} Hz）。可用 --mono-to-stereo 明确开启单声道\
-                     复制（样本值不变，报告标为“声道已改变”，不是严格路径）。",
+                     端点接受 {} Hz（含源的 {source_rate} Hz）。可明确开启“单声道复制到左右两路”\
+                     （命令行 --mono-to-stereo，图形界面同名复选框；样本值不变，报告标为“声道已改变”，\
+                     不是严格路径）。",
                     rate_list(st)
                 );
             }
@@ -421,7 +422,7 @@ fn rate_probe_text(out: &mut String, p: &RateProbe, source_rate: u32) {
                 let _ = writeln!(
                     out,
                     "  声道探测：端点在所有查询的采样率下都不接受单声道 [FC]；按立体声 [FL FR] 查询，\
-                     端点接受 {} Hz，不含源的 {source_rate} Hz。即使开启 --mono-to-stereo 也不能播放\
+                     端点接受 {} Hz，不含源的 {source_rate} Hz。即使开启单声道复制到左右两路也不能播放\
                      （本程序不重采样）。",
                     rate_list(st)
                 );

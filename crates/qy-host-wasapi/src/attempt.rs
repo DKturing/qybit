@@ -377,7 +377,7 @@ mod tests {
         assert!(!p.checked.contains(&8_000));
         let s = r.summary();
         assert!(
-            s.contains("源格式：8000 Hz / 1 声道 / 16 位有效（--mono-to-stereo：按 2 声道 [FL FR] 请求设备）"),
+            s.contains("源格式：8000 Hz / 1 声道 / 16 位有效（单声道复制到左右两路：按 2 声道 [FL FR] 请求设备）"),
             "{s}"
         );
         assert!(
@@ -447,7 +447,7 @@ mod tests {
         );
         let s = r.summary();
         assert!(
-            s.contains("按立体声 [FL FR] 查询，端点接受 44100、48000 Hz（含源的 48000 Hz）。可用 --mono-to-stereo"),
+            s.contains("按立体声 [FL FR] 查询，端点接受 44100、48000 Hz（含源的 48000 Hz）。可明确开启“单声道复制到左右两路”"),
             "{s}"
         );
 
@@ -459,7 +459,7 @@ mod tests {
         );
         let s = r.summary();
         assert!(
-            s.contains("不含源的 8000 Hz。即使开启 --mono-to-stereo 也不能播放"),
+            s.contains("不含源的 8000 Hz。即使开启单声道复制到左右两路也不能播放"),
             "{s}"
         );
 
