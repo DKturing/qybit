@@ -35,6 +35,8 @@ fn frames_start(data: &[u8]) -> usize {
 
 struct Run {
     attempts: u64,
+    incomplete: u64,
+    frames: u64,
     scanned_bytes: u64,
     sample_ops: u64,
     calls: u64,
@@ -85,6 +87,8 @@ fn bytewise(name: &str) -> (usize, Run) {
         data.len() - start,
         Run {
             attempts: m.parse_attempts,
+            incomplete: m.incomplete_attempts,
+            frames: m.frames,
             scanned_bytes: m.scanned_bits.div_ceil(8),
             sample_ops: m.sample_ops,
             calls,
@@ -114,6 +118,9 @@ fn max_block_frame_bytewise_is_log_attempts_linear_scan() {
         log2 + 2
     );
     assert!(r.scanned_bytes <= 5 * f, "扫描 {} > 5F", r.scanned_bytes);
+    // 每次尝试要么因输入不足失败、要么成功解出一帧。
+    assert!(r.incomplete > 0 && r.frames > 0);
+    assert_eq!(r.incomplete + r.frames, r.attempts);
     // 成功一次的样本运算为 2 声道 × 65535 + 解相关 65535；失败尝试只在完整子帧后计数。
     assert!(
         r.sample_ops >= 3 * 65_535 && r.sample_ops <= 3 * 3 * 65_535,

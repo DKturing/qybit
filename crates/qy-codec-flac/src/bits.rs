@@ -108,6 +108,19 @@ impl<'a> Bits<'a> {
 mod tests {
     use super::*;
 
+    /// 输入不足时读位置移到末尾（本次尝试读取的位数按已扫描的全部输入计，用于重试复杂度统计）。
+    #[test]
+    fn incomplete_read_moves_to_end() {
+        let d = [0xAB, 0xCD, 0xEF];
+        let mut b = Bits::new(&d);
+        assert_eq!(b.read(4), Ok(0xA));
+        assert_eq!(b.read(24), Err(Incomplete));
+        assert_eq!(b.bit_pos(), 24);
+        let mut b = Bits::new(&d[..1]);
+        assert_eq!(b.read(9), Err(Incomplete));
+        assert_eq!(b.bit_pos(), 8);
+    }
+
     #[test]
     fn reads_bits_signed_and_unary() {
         let d = [0b1010_1100, 0b0000_0001, 0xFF, 0x80, 0x00, 0x00, 0x00, 0x01];
