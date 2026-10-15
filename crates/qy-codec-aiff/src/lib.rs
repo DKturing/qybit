@@ -800,6 +800,46 @@ impl Decoder for AiffDecoder {
     }
 }
 
+/// M2 T5：Kani 有界证明（`cargo kani -p qy-codec-aiff`）。80 位扩展精度采样率的换算对任意 10 字节
+/// 不 panic（移位量受检查），返回值精确：`Some(r)` 时 r ≥ 1 且 r 与 m × 2^(e − 16383 − 63) 精确
+/// 相等（不四舍五入）；正的有限整数值且不超过 `u32::MAX` 时必然返回 `Some`。
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    #[kani::proof]
+    fn extended_to_u32_is_exact() {
+        let b: [u8; 10] = kani::any();
+        let r = extended_to_u32(b);
+        let se = u16::from_be_bytes([b[0], b[1]]);
+        let exp = i32::from(se & 0x7FFF);
+        let m = u64::from_be_bytes([b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9]]);
+        let shift = exp - 16383 - 63;
+        // 独立判断：值是否为不超过 u32::MAX 的正整数，是则求出它。
+        let positive = se & 0x8000 == 0 && exp != 0x7FFF && m != 0;
+        let expect: Option<u128> = if !positive {
+            None
+        } else if shift >= 0 {
+            if shift >= 32 {
+                None
+            } else {
+                Some(u128::from(m) << shift)
+            }
+        } else {
+            let s = shift.unsigned_abs();
+            if s >= 64 {
+                None
+            } else if (u128::from(m) >> s) << s == u128::from(m) {
+                Some(u128::from(m) >> s)
+            } else {
+                None
+            }
+        };
+        let expect = expect.filter(|&v| v >= 1 && v <= u128::from(u32::MAX));
+        assert!(r.map(u128::from) == expect);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

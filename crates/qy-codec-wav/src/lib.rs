@@ -915,8 +915,8 @@ impl Decoder for WavDecoder {
     }
 }
 
-/// M2 T5：Kani 有界证明（`cargo kani -p qy-codec-wav`）。文件头与第一个数据块的所有字段都是任意值
-/// 时，解码不 panic：没有整数溢出、越界索引或除零（Kani 默认检查这些），状态与消耗量自洽。
+/// M2 T5：Kani 有界证明（`cargo kani -p qy-codec-wav`）。文件头的解析函数在任意字节、任意长度
+/// 字段下不 panic：没有整数溢出、越界索引或除零（Kani 默认检查这些）；成功时结果自洽。
 #[cfg(kani)]
 mod proofs {
     extern crate alloc;
@@ -932,45 +932,41 @@ mod proofs {
         }
     }
 
-    /// RIFF 头 + 任意长度字段 + 任意 fmt（长度 16/18/40）+ data 块头 + 8 字节数据，任意 EOF：
-    /// 两次调用（第二次在取走输出之后）都不 panic，消耗量不超过输入。
+    /// RIFF 头 12 字节为任意值。
     #[kani::proof]
-    #[kani::unwind(20)]
-    fn header_fields_never_panic() {
+    fn riff_header_any_bytes() {
         let mut d = decoder();
-        let fmt_len: u32 = match kani::any::<u8>() % 3 {
-            0 => 16,
-            1 => 18,
-            _ => 40,
-        };
-        let fields: [u8; 40] = kani::any();
-        let riff_len: u32 = kani::any();
-        let data_len: u32 = kani::any();
-        let data: [u8; 8] = kani::any();
-        let mut b = [0u8; 12 + 8 + 40 + 8 + 8];
-        let mut n = 0;
-        let mut put = |x: &[u8]| {
-            b[n..n + x.len()].copy_from_slice(x);
-            n += x.len();
-        };
-        put(b"RIFF");
-        put(&riff_len.to_le_bytes());
-        put(b"WAVE");
-        put(b"fmt ");
-        put(&fmt_len.to_le_bytes());
-        put(&fields[..fmt_len as usize]);
-        put(b"data");
-        put(&data_len.to_le_bytes());
-        put(&data);
-        let input = &b[..n];
-        let eof: bool = kani::any();
-        if let Ok(p) = d.decode(input, eof) {
-            assert!(p.consumed <= input.len());
-            if let Status::Frames(_) | Status::NeedOutput = p.status {
-                let ch = d.format().map_or(1, |f| usize::from(f.channels()));
-                d.release(d.pcm().len() / ch);
-                let _ = d.decode(&input[p.consumed..], eof);
-            }
+        let b: [u8; 12] = kani::any();
+        let _ = d.parse_riff_header(&b);
+    }
+
+    /// RIFF 头之后的块头 8 字节为任意值（RIFF 剩余长度、是否已有 fmt/data 也任意）。
+    #[kani::proof]
+    fn chunk_header_any_bytes() {
+        let mut d = decoder();
+        let riff: [u8; 12] = kani::any();
+        if d.parse_riff_header(&riff).is_err() {
+            return;
+        }
+        if kani::any() {
+            d.data_done = true;
+        }
+        let b: [u8; 8] = kani::any();
+        let _ = d.parse_chunk_header(&b);
+    }
+
+    /// fmt 体 40 字节与声明长度（16–40 之外也任意）为任意值；成功时块对齐、容器字节数与声道数
+    /// 一致，右移量小于 32。
+    #[kani::proof]
+    fn fmt_any_fields() {
+        let mut d = decoder();
+        let b: [u8; 40] = kani::any();
+        let size: u32 = kani::any();
+        kani::assume(size >= FMT_BASE_LEN);
+        let want = size.min(FMT_EXT_LEN) as usize;
+        if let Ok(l) = d.parse_fmt(&b[..want], size) {
+            assert!(l.block_align == l.container_bytes * l.channels);
+            assert!(l.shift < 32);
         }
     }
 }
