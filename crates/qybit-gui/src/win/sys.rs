@@ -51,22 +51,26 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MB_ICONINFORMATION, MB_OK, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, MoveWindow,
     NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassW, SPI_GETNONCLIENTMETRICS,
     SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetMenu, SetWindowPos, SetWindowTextW,
-    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_HSCROLL, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSW,
-    WS_BORDER, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE,
+    WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_HSCROLL, WM_NOTIFY, WM_SETFONT,
+    WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP,
+    WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
 use super::app::{
     App, COLUMNS, ID_ABOUT, ID_ADD_FILES, ID_ADD_FOLDER, ID_CLEAR, ID_EXIT, ID_NEXT, ID_PLAY,
     ID_PREV, ID_REMOVE, ID_STOP, IDC_DEVICE, IDC_FORMAT, IDC_LIST, IDC_LOG, IDC_MONO, IDC_SEEK,
-    IDC_STATUS, Input, Op, about_text,
+    IDC_STATUS, IDC_VOLUME, IDC_VOLUME_LABEL, Input, Op, VolumeView, about_text,
 };
 use super::sim::Sim;
+use qy_host_wasapi::volume::EndpointVolume;
 
 /// STATIC 控件样式（winuser.h：`SS_LEFT` 0x0、`SS_NOPREFIX` 0x80、`SS_ENDELLIPSIS` 0x4000）。
 /// windows crate 把它们放在 System_SystemServices 模块，为三个常量不引入该特性。
 const SS_LEFT: u32 = 0x0000;
+/// winuser.h：`SS_RIGHT` 0x2。
+const SS_RIGHT: u32 = 0x0002;
 const SS_NOPREFIX: u32 = 0x0080;
 const SS_ENDELLIPSIS: u32 = 0x4000;
 /// 进度条当前位置（commctrl.h：`TBM_GETPOS` 定义为 `WM_USER`，0x400）；windows crate 未导出。
@@ -88,6 +92,8 @@ struct Handles {
     status: HWND,
     format: HWND,
     seek: HWND,
+    volume: HWND,
+    volume_label: HWND,
 }
 
 thread_local! {
@@ -99,11 +105,87 @@ thread_local! {
     /// 正在拖动或按住点击进度条（到 `TB_ENDTRACK` 为止）：此间不按播放状态移动滑块，否则松开时
     /// 读到的是被状态快照拉回的当前位置（S1）。
     static DRAGGING: Cell<bool> = const { Cell::new(false) };
+    /// 当前输出设备的音量控制（GUI T5）；打开失败时为原因。
+    static VOLUME: RefCell<Option<Result<EndpointVolume, String>>> = const { RefCell::new(None) };
+    /// 正在拖动音量滑块：此间不按读回的音量移动滑块。
+    static VOL_DRAGGING: Cell<bool> = const { Cell::new(false) };
+    /// 模拟设备模式（只供界面核对）：不打开真实端点的音量。
+    static SIM_MODE: Cell<bool> = const { Cell::new(false) };
+    /// 音量标签上一次的文字（相同时不重设，避免闪烁）。
+    static VOL_TEXT: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 /// 跨线程通知状态：主窗口句柄（整数形式）与“已投递未处理”标志（合并连续通知）。
 static MAIN: AtomicIsize = AtomicIsize::new(0);
 static PENDING: AtomicBool = AtomicBool::new(false);
+
+/// 打开当前选定设备的音量控制并显示（GUI T5）。在界面线程调用（COM 单线程套间已初始化）。
+fn open_volume() {
+    let opened = if SIM_MODE.get() {
+        Err("模拟设备，没有音量控制".to_string())
+    } else {
+        let id = APP.with(|a| a.try_borrow().ok().and_then(|g| g.as_ref()?.device_id()));
+        EndpointVolume::open(id.as_deref()).map_err(|e| e.message())
+    };
+    VOLUME.with_borrow_mut(|v| *v = Some(opened));
+    show_volume();
+}
+
+/// 读回音量并更新标签与滑块（拖动中不移动滑块）。
+fn show_volume() {
+    let Some(h) = HANDLES.get() else {
+        return;
+    };
+    let view = VOLUME.with_borrow(|v| match v {
+        None => VolumeView::Unavailable("尚未打开".to_string()),
+        Some(Err(e)) => VolumeView::Unavailable(e.clone()),
+        Some(Ok(ev)) if !ev.hardware_volume() => VolumeView::NoHardware,
+        Some(Ok(ev)) => match ev.level() {
+            Ok(l) => VolumeView::Hardware {
+                scalar: l.scalar,
+                db: l.db,
+                muted: l.muted,
+            },
+            Err(e) => VolumeView::Unavailable(e.message()),
+        },
+    });
+    let text = view.text();
+    let changed = VOL_TEXT.with_borrow_mut(|t| {
+        let changed = *t != text;
+        if changed {
+            t.clone_from(&text);
+        }
+        changed
+    });
+    let pos = view.position();
+    // SAFETY: 句柄有效；文本缓冲在调用期间有效。
+    unsafe {
+        if changed {
+            let t = wide(&text);
+            let _ = SetWindowTextW(h.volume_label, PCWSTR(t.as_ptr()));
+        }
+        let _ = EnableWindow(h.volume, pos.is_some());
+        if !VOL_DRAGGING.get() {
+            SendMessageW(
+                h.volume,
+                TBM_SETPOS,
+                Some(WPARAM(1)),
+                Some(LPARAM(pos.unwrap_or(0) as isize)),
+            );
+        }
+    }
+}
+
+/// 设置硬件音量（0–100）。设备没有硬件音量时 [`EndpointVolume::set_scalar`] 拒绝，不改变
+/// 软件音量。
+fn set_volume(pos: u32) {
+    VOLUME.with_borrow(|v| {
+        if let Some(Ok(ev)) = v {
+            let _ = ev.set_scalar(pos.min(100) as f32 / 100.0);
+        }
+    });
+    show_volume();
+}
 
 /// 拖动或按住进度条时在状态栏第一栏显示“松开后定位到 …”。
 fn seek_preview(h: Handles, permille: u32) {
@@ -126,9 +208,9 @@ fn seek_preview(h: Handles, permille: u32) {
     }
 }
 
-/// 鼠标在进度条滑轨上的位置（0–1000）。滑块中心的行程是滑轨两端各减去半个滑块宽度
+/// 鼠标在滑轨上的位置（0–`max`）。滑块中心的行程是滑轨两端各减去半个滑块宽度
 /// （`TBM_GETCHANNELRECT`、`TBM_GETTHUMBRECT`，客户区坐标）。
-fn click_position(seek: HWND) -> Option<u32> {
+fn click_position(seek: HWND, max: i64) -> Option<u32> {
     let mut pt = POINT::default();
     let (mut channel, mut thumb) = (RECT::default(), RECT::default());
     // SAFETY: 输出参数指向本函数的局部变量；进度条句柄有效。
@@ -156,7 +238,7 @@ fn click_position(seek: HWND) -> Option<u32> {
         return None;
     }
     let x = pt.x.clamp(start, end);
-    u32::try_from(i64::from(x - start) * 1000 / i64::from(end - start)).ok()
+    u32::try_from(i64::from(x - start) * max / i64::from(end - start)).ok()
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -225,6 +307,8 @@ pub fn run() -> ExitCode {
             for op in ops {
                 exec(op);
             }
+            SIM_MODE.set(sim.is_some());
+            open_volume();
             // 命令行给出的文件与文件夹（如“打开方式”）加入播放列表。
             let mut args = sim_files;
             args.extend(std::env::args_os().skip(1).map(PathBuf::from));
@@ -384,7 +468,29 @@ fn create(title: &str) -> Option<Handles> {
                 0,
                 IDC_SEEK,
             )?,
+            volume: child(
+                TRACKBAR_CLASSW,
+                w!(""),
+                WS_TABSTOP | WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
+                0,
+                IDC_VOLUME,
+            )?,
+            volume_label: child(
+                w!("STATIC"),
+                w!(""),
+                WINDOW_STYLE(SS_RIGHT | SS_ENDELLIPSIS | SS_NOPREFIX),
+                0,
+                IDC_VOLUME_LABEL,
+            )?,
         };
+        SendMessageW(h.volume, TBM_SETRANGEMIN, Some(WPARAM(0)), Some(LPARAM(0)));
+        SendMessageW(
+            h.volume,
+            TBM_SETRANGEMAX,
+            Some(WPARAM(1)),
+            Some(LPARAM(100)),
+        );
+        let _ = EnableWindow(h.volume, false);
         SendMessageW(h.seek, TBM_SETRANGEMIN, Some(WPARAM(0)), Some(LPARAM(0)));
         SendMessageW(h.seek, TBM_SETRANGEMAX, Some(WPARAM(1)), Some(LPARAM(1000)));
         let _ = EnableWindow(h.seek, false);
@@ -560,13 +666,26 @@ fn layout(h: &Handles) {
             bar_h,
             true,
         );
-        let (fmt_y, fmt_h) = (bar_y + bar_h + s(4), s(20));
+        let (fmt_y, fmt_h) = (bar_y + bar_h + s(4), s(24));
+        // 格式行右侧：设备硬件音量的读数标签与滑块（GUI T5）。
+        let (vol_w, label_w) = (s(140), s(300));
+        let vol_x = (rc.right - s(6) - vol_w).max(0);
+        let label_x = (vol_x - s(4) - label_w).max(0);
+        let _ = MoveWindow(h.volume, vol_x, fmt_y, vol_w, fmt_h, true);
+        let _ = MoveWindow(
+            h.volume_label,
+            label_x,
+            fmt_y + s(4),
+            label_w,
+            fmt_h - s(4),
+            true,
+        );
         let _ = MoveWindow(
             h.format,
             s(8),
-            fmt_y,
-            (rc.right - s(16)).max(0),
-            fmt_h,
+            fmt_y + s(4),
+            (label_x - s(16)).max(0),
+            fmt_h - s(4),
             true,
         );
         let (seek_y, seek_h) = (fmt_y + fmt_h, s(26));
@@ -866,14 +985,53 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             LRESULT(0)
         }
+        // 窗口重新激活时重新打开音量控制：用户可能在系统中换了默认设备或改了音量。
+        WM_ACTIVATE => {
+            if loword(wparam.0) != 0 {
+                open_volume();
+            }
+            LRESULT(0)
+        }
         WM_QY_NOTIFY => {
             PENDING.store(false, Ordering::Release);
             dispatch(Input::Notify);
+            show_volume();
             LRESULT(0)
         }
         // 进度条（S1）：拖动或按住滑轨时只在状态栏预览时间，松开（TB_ENDTRACK，键盘操作也以此
         // 结束）时按滑块位置定位。点击滑轨时滑块直接移到点击处（系统默认每次只移动一页）。
         WM_HSCROLL => {
+            // 设备硬件音量（GUI T5）：拖动中即设置，松开后读回。
+            if let Some(h) = HANDLES.get()
+                && lparam.0 == h.volume.0 as isize
+            {
+                let code = u32::from(loword(wparam.0));
+                if code == TB_ENDTRACK {
+                    VOL_DRAGGING.set(false);
+                    show_volume();
+                } else {
+                    VOL_DRAGGING.set(code == TB_THUMBTRACK);
+                    // SAFETY: 只读查询鼠标左键状态（区分点击滑轨与 PageUp/PageDown 键）；音量滑块
+                    // 句柄有效。
+                    unsafe {
+                        if matches!(code, TB_PAGEUP | TB_PAGEDOWN)
+                            && GetKeyState(i32::from(VK_LBUTTON.0)) < 0
+                            && let Some(pos) = click_position(h.volume, 100)
+                        {
+                            SendMessageW(
+                                h.volume,
+                                TBM_SETPOS,
+                                Some(WPARAM(1)),
+                                Some(LPARAM(pos as isize)),
+                            );
+                        }
+                    }
+                    // SAFETY: 音量滑块句柄有效；只读查询。
+                    let pos = unsafe { SendMessageW(h.volume, TBM_GETPOS, None, None) };
+                    set_volume(u32::try_from(pos.0).unwrap_or(0));
+                }
+                return LRESULT(0);
+            }
             if let Some(h) = HANDLES.get()
                 && lparam.0 == h.seek.0 as isize
             {
@@ -886,7 +1044,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         DRAGGING.set(true);
                         // SAFETY: 只读查询鼠标左键状态；高位为 1 表示按下（区分点击与 PageUp/PageDown 键）。
                         if unsafe { GetKeyState(i32::from(VK_LBUTTON.0)) } < 0
-                            && let Some(pos) = click_position(h.seek)
+                            && let Some(pos) = click_position(h.seek, 1000)
                         {
                             // SAFETY: 进度条句柄有效。
                             unsafe {
@@ -922,6 +1080,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         let i = unsafe { SendMessageW(h.device, CB_GETCURSEL, None, None) };
                         if i.0 >= 0 {
                             dispatch(Input::Device(i.0 as usize));
+                            open_volume();
                         }
                     }
                 }

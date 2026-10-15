@@ -246,6 +246,7 @@ jobs:
             $ms = New-Object System.IO.MemoryStream; $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
             Write-Output "===== 状态 $name"
             Write-Output "状态栏：$(Text $h 205)"
+            Write-Output "音量：$(Text $h 209)"
             Write-Output "日志（最后 25 行）："
             (Text $h 204) -split "`r`n" | Select-Object -Last 25 | ForEach-Object { Write-Output "  | $_" }
             Write-Output "SHOT-BEGIN $name"
