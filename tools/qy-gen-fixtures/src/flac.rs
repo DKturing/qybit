@@ -1837,6 +1837,25 @@ fn cli_cases() -> Vec<CliCase> {
         args: &["--lax", "-b", "16384"],
         mask: None,
     });
+    // S1 定位：flac 命令行写的定位表（每 2 秒一点）与不写定位表。
+    v.push(CliCase {
+        name: "seek_cli_table",
+        rate: SEEK_RATE,
+        ch: 1,
+        bits: 16,
+        vals: smooth(911, SEEK_FRAMES, 1, 16, 0.5),
+        args: &["-b", "576", "-S", "2s"],
+        mask: None,
+    });
+    v.push(CliCase {
+        name: "seek_cli_notable",
+        rate: SEEK_RATE,
+        ch: 1,
+        bits: 16,
+        vals: smooth(911, SEEK_FRAMES, 1, 16, 0.5),
+        args: &["-b", "576", "--no-seektable"],
+        mask: None,
+    });
     // F1：多声道（按声道可辨识的信号；flac 从 WAVE 掩码写入 WAVEFORMATEXTENSIBLE_CHANNEL_MASK）。
     let mc: [(&'static str, u32, u16, u16, u32, u64); 7] = [
         ("cli_16_3ch_48k", 48_000, 3, 16, 0x7, 31),
@@ -1861,6 +1880,137 @@ fn cli_cases() -> Vec<CliCase> {
             mask: Some(mask),
         });
     }
+    v
+}
+
+// ---------------------------------------------------------------- S1 定位
+
+/// 定位夹具的格式：2 kHz 单声道 16 位、8 秒（16 000 帧）。采样率低使 1 秒只有 2000 帧、
+/// 一个 576 帧的块约 0.29 秒，二分查找（落到目标前 1 秒以内才停）有实际的跳转，参考文件也小。
+const SEEK_RATE: u32 = 2_000;
+const SEEK_FRAMES: usize = 16_000;
+
+/// SEEKTABLE 块（RFC 9639 §8.5）：每个点 18 字节——样本号、相对第一帧帧头的字节偏移（均为
+/// 64 位大端）与该帧的样本数（16 位）；`placeholders` 个占位点（样本号全 1）放在最后。
+fn seektable(points: &[(u64, u64, u16)], placeholders: usize) -> Vec<u8> {
+    let mut b = Vec::new();
+    for &(sample, offset, n) in points {
+        b.extend_from_slice(&sample.to_be_bytes());
+        b.extend_from_slice(&offset.to_be_bytes());
+        b.extend_from_slice(&n.to_be_bytes());
+    }
+    for _ in 0..placeholders {
+        b.extend_from_slice(&u64::MAX.to_be_bytes());
+        b.extend_from_slice(&[0; 10]);
+    }
+    b
+}
+
+/// 每隔 `every` 个样本取一个帧起点作为定位点。
+fn seek_points(frames: &[(Vec<u8>, usize)], every: usize) -> Vec<(u64, u64, u16)> {
+    let (mut sample, mut offset, mut next) = (0usize, 0usize, 0usize);
+    let mut points = Vec::new();
+    for (f, n) in frames {
+        if sample >= next {
+            points.push((sample as u64, offset as u64, *n as u16));
+            next = sample + every;
+        }
+        sample += n;
+        offset += f.len();
+    }
+    points
+}
+
+fn seek_cases() -> Vec<Fixture> {
+    let mut v = Vec::new();
+    // 可变块：块大小按 576、1000、300、1152、2000 循环，帧号字段为样本号（§9.1.5）。
+    let vals = smooth(909, SEEK_FRAMES, 1, 16, 0.5);
+    let sizes = [576usize, 1000, 300, 1152, 2000];
+    let mut frames = Vec::new();
+    let (mut start, mut k) = (0usize, 0usize);
+    while start < vals.len() {
+        let end = (start + sizes[k % sizes.len()]).min(vals.len());
+        let f = FrameSpec {
+            variable: true,
+            ..frame_spec(
+                SEEK_RATE,
+                16,
+                Assign::Indep,
+                start as u64,
+                vec![sub(Kind::Fixed(2, rice(8)))],
+            )
+        };
+        frames.push((write_frame(&f, &[vals[start..end].to_vec()]), end - start));
+        start = end;
+        k += 1;
+    }
+    let table = seektable(&seek_points(&frames, 4_000), 2);
+    // 内容错误的定位表（表不可信，定位须经试探确认）：偏移落在帧中间、样本号与偏移不对应
+    // （声称 8000 而实为约 12000 处的帧）、偏移越过文件末尾。
+    let good = seek_points(&frames, 4_000);
+    let mut bad: Vec<(u64, u64, u16)> = good.clone();
+    if let (Some(p1), Some(p3)) = (good.get(1).copied(), good.get(3).copied()) {
+        bad[1] = (p1.0, p1.1 + 333, p1.2);
+        bad[2] = (8_000, p3.1, p3.2);
+    }
+    bad.push((14_000, 10_000_000, 576));
+    let bad_table = seektable(&bad, 0);
+    let mut s = stream(SEEK_RATE, 1, 16, frames);
+    v.push(crafted(
+        "seek_variable_notable",
+        &s,
+        vals.clone(),
+        "S1 定位：可变块（576/1000/300/1152/2000 循环），无定位表",
+    ));
+    s.meta = vec![(3, table.clone())];
+    v.push(crafted(
+        "seek_variable_table",
+        &s,
+        vals.clone(),
+        "S1 定位：可变块，定位表每 2 秒一点并含 2 个占位点",
+    ));
+    s.meta = vec![(3, bad_table)];
+    v.push(crafted(
+        "seek_bad_table",
+        &s,
+        vals.clone(),
+        "S1 定位：可变块，定位表内容错误（偏移落在帧中间、样本号与偏移不对应、偏移越界）",
+    ));
+    s.meta = vec![(3, table.clone())];
+    s.total_override = Some(0);
+    v.push(crafted(
+        "seek_total0_table",
+        &s,
+        vals.clone(),
+        "S1 定位：STREAMINFO 总样本数为 0（未知），有定位表",
+    ));
+    s.meta.clear();
+    v.push(crafted(
+        "seek_total0",
+        &s,
+        vals,
+        "S1 定位：STREAMINFO 总样本数为 0（未知），无定位表",
+    ));
+
+    // 误同步：定长 576 帧的 verbatim 子帧，样本大量取 −8 / −7（16 位大端即 FF F8 / FF F9，
+    // 与帧同步码相同），二分查找落在样本数据中时须由 CRC-8 与 CRC-16 排除。
+    let mut r = Lcg(910);
+    let vals: Vec<i64> = (0..SEEK_FRAMES)
+        .map(|i| match i % 3 {
+            0 => -8,
+            1 => -7 - (r.next() % 2) as i64,
+            _ => r.range(-30_000, 30_000),
+        })
+        .collect();
+    let frames = encode_blocks(&vals, 1, SEEK_RATE, 16, 576, Assign::Indep, &|_| {
+        vec![sub(Kind::Verbatim)]
+    });
+    v.push(crafted(
+        "seek_falsesync",
+        &stream(SEEK_RATE, 1, 16, frames),
+        vals,
+        "S1 定位：verbatim 样本中大量出现同步码样式 FF F8 / FF F9，无定位表",
+    ));
     v
 }
 
@@ -1986,6 +2136,7 @@ pub fn generate(out: &Path) -> Result<()> {
         });
     }
     fixtures.extend(crafted_cases());
+    fixtures.extend(seek_cases());
     fixtures.extend(error_cases());
 
     let mut coverage = std::collections::BTreeMap::<String, u32>::new();

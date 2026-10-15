@@ -156,9 +156,12 @@ fn structs_hold_no_block_sized_storage() {
     // Core<WavDecoder> 由 232 增至 280 字节，Core 的上限相应由 256 调为 320；FlacDecoder 不变。
     // S1：Core 加入定位状态（待定位目标、进行中的目标、顺序解码要丢弃的帧数与标志，均为标量），
     // WavDecoder 加入 data 起点，Core<WavDecoder> 由 280 增至 352 字节，上限由 320 调为 384。
+    // S1：FlacDecoder 加入定位状态（源偏移、第一帧位置、定位表位置、第一帧长度与块大小、
+    // 二分查找的上下界与阶段、待丢弃样本数与跳转请求，均为标量），由 ≤ 256 增至 392 字节，
+    // 上限调为 448（仍远小于最小的块缓冲 73 728 字节）。
     let d = std::mem::size_of::<FlacDecoder>();
     let c = std::mem::size_of::<Core<WavDecoder>>();
-    assert!(d <= 256, "FlacDecoder {d} 字节");
+    assert!(d <= 448, "FlacDecoder {d} 字节");
     assert!(c <= 384, "Core {c} 字节");
 }
 

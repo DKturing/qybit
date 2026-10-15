@@ -27,6 +27,13 @@ pub fn seeds(name: &str) -> &'static str {
         "wasted_bits" => "smooth 303",
         "fixed_orders_and_lpc32" => "smooth 404",
         "variable_blocksize_uncommon" => "smooth 505",
+        "seek_cli_table" | "seek_cli_notable" => "smooth 911",
+        "seek_variable_notable"
+        | "seek_variable_table"
+        | "seek_bad_table"
+        | "seek_total0_table"
+        | "seek_total0" => "smooth 909",
+        "seek_falsesync" => "Lcg 910",
         "rate_code12_7khz" => "smooth 7606",
         "rate_code13_11025" => "smooth 11631",
         "rate_code14_100k" => "smooth 100606",
@@ -75,6 +82,7 @@ pub fn expected_branches(name: &str) -> &'static [&'static str] {
         "cli_24_rice2_noise" => &["residual_type=RICE2"],
         "cli_16_blocksize_1000" => &["blocksize=1000"],
         "cli_16_blocksize_16384" => &["blocksize=16384"],
+        "seek_falsesync" => &["type=VERBATIM"],
         "max_block_verbatim_32_stereo" => &["blocksize=65535", "type=VERBATIM"],
         "side_33bit_extremes" => &[
             "channel_assignment=LEFT_SIDE",

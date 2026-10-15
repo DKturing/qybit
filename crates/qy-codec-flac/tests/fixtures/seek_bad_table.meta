@@ -1,0 +1,6 @@
+result ok
+detail -
+format 2000 1 16
+layout 0x4
+frames 16000
+origin 手写：S1 定位：可变块，定位表内容错误（偏移落在帧中间、样本号与偏移不对应、偏移越界）

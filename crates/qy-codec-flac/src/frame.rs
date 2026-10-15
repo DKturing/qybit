@@ -53,6 +53,8 @@ pub struct Decoded {
     pub block_size: usize,
     /// 可变块大小策略。
     pub variable: bool,
+    /// 帧头的编码号（§9.1.5）：可变块为首个样本号，固定块为帧号。
+    pub number: u64,
 }
 
 /// 一次尝试的结果与统计。
@@ -151,7 +153,7 @@ fn decode_inner(
     if b.read(1)? != 0 {
         return bad(FlacError::ReservedCode);
     }
-    let _number = utf8_number(b, variable)?;
+    let number = utf8_number(b, variable)?;
     let block_size = match bs_code {
         0 => return bad(FlacError::ReservedCode),
         1 => 192,
@@ -264,6 +266,7 @@ fn decode_inner(
         len: body_len + 2,
         block_size,
         variable,
+        number,
     })
 }
 

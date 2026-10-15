@@ -1,0 +1,6 @@
+result ok
+detail -
+format 2000 1 16
+layout 0x4
+frames 16000
+origin flac 命令行：-b 576 --no-seektable

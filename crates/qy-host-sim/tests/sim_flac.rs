@@ -61,6 +61,9 @@ fn load_fixtures() -> Vec<Fixture> {
                 .collect()
         })
         .unwrap_or_default();
+    // S1 定位夹具（2 kHz、8 秒）专用于 core_seek：读一次就能装满队列，不满足本文件“重启时
+    // 有在途读取”等场景对夹具时长的假设，不放进随机曲目池。
+    names.retain(|n| !n.starts_with("seek_"));
     names.sort();
     names
         .into_iter()

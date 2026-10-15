@@ -1,0 +1,6 @@
+result ok
+detail -
+format 2000 1 16
+layout 0x4
+frames 16000
+origin 手写：S1 定位：可变块（576/1000/300/1152/2000 循环），无定位表

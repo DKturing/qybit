@@ -411,8 +411,11 @@ impl<D: Decoder> Core<D> {
     /// 取得下一个宿主操作；`None` 表示正在等待回报或已空闲。
     pub fn poll(&mut self) -> Option<Action> {
         // 每次最多推进有限步（解析头部、跳过 chunk 等），不会无限循环：
-        // 每一步要么返回动作，要么切换到返回动作的状态。
-        for _ in 0..8 {
+        // 每一步要么返回动作，要么切换到返回动作的状态。顺序定位（S1）丢弃样本时，每一步都在
+        // 消耗输入或样本，直到需要读取（返回 `Read`）或曲目结束，这些步不计入上限。
+        let mut budget = 8u32;
+        while budget > 0 {
+            budget -= 1;
             match self.state {
                 State::Idle
                 | State::Opening
@@ -488,8 +491,13 @@ impl<D: Decoder> Core<D> {
                     });
                 }
                 State::Run => {
+                    let before = (self.discard, self.filled, self.decoder.pcm().len());
                     if let Some(action) = self.step() {
                         return Some(action);
+                    }
+                    let after = (self.discard, self.filled, self.decoder.pcm().len());
+                    if before.0 > 0 && after != before && self.state == State::Run {
+                        budget += 1;
                     }
                 }
             }

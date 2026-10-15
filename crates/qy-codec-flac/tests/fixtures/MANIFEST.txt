@@ -12,6 +12,8 @@ cli_16_wasted_bits: flac --silent --force --no-padding  -o cli_16_wasted_bits.fl
 cli_24_rice2_noise: flac --silent --force --no-padding -8 -o cli_24_rice2_noise.flac cli_24_rice2_noise.wav
 cli_16_blocksize_1000: flac --silent --force --no-padding -b 1000 -o cli_16_blocksize_1000.flac cli_16_blocksize_1000.wav
 cli_16_blocksize_16384: flac --silent --force --no-padding --lax -b 16384 -o cli_16_blocksize_16384.flac cli_16_blocksize_16384.wav
+seek_cli_table: flac --silent --force --no-padding -b 576 -S 2s -o seek_cli_table.flac seek_cli_table.wav
+seek_cli_notable: flac --silent --force --no-padding -b 576 --no-seektable -o seek_cli_notable.flac seek_cli_notable.wav
 cli_16_3ch_48k: flac --silent --force --no-padding  -o cli_16_3ch_48k.flac cli_16_3ch_48k.wav
 cli_16_4ch_44k_quad: flac --silent --force --no-padding  -o cli_16_4ch_44k_quad.flac cli_16_4ch_44k_quad.wav
 cli_24_5ch_48k: flac --silent --force --no-padding  -o cli_24_5ch_48k.flac cli_24_5ch_48k.wav
@@ -63,6 +65,14 @@ cli_16_blocksize_16384 -> ok -
   sha256 12dbe104984a22bf1c7e1cc3f6978cc14af62c0f203ad296c8d8df118903f5db
   88572 字节；来源：flac 命令行：--lax -b 16384；种子：smooth 22
   核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 96000 Hz/2 声道/16 位/最大块 16384/总样本 40000；块大小 ["16384", "7232"]；分支要求 ["blocksize=16384"] 满足
+seek_cli_table -> ok -
+  sha256 9e44ce1597e09fcaede65c3405cc89c38dbc65b41ea9c42463002092aaf25584
+  18574 字节；来源：flac 命令行：-b 576 -S 2s；种子：smooth 911
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 2000 Hz/1 声道/16 位/最大块 576/总样本 16000；块大小 ["448", "576"]；分支要求 [] 满足
+seek_cli_notable -> ok -
+  sha256 208c0b7080393db26be2cfab68d9c8e9f1cf782b173ace794f0e149602aa9512
+  18498 字节；来源：flac 命令行：-b 576 --no-seektable；种子：smooth 911
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 2000 Hz/1 声道/16 位/最大块 576/总样本 16000；块大小 ["448", "576"]；分支要求 [] 满足
 cli_16_3ch_48k -> ok -
   sha256 b3652440698dc2b9727c733c4df184b75a9c5fe0410edbddcd26db2eea12f566
   16520 字节；来源：flac 命令行：；种子：smooth 31（声道签名）
@@ -167,6 +177,30 @@ short_tail_frame -> ok -
   sha256 5710241351adc88d24bf4065c310b64b537125ffaf1f085bfd9bd2a60e350790
   1318 字节；来源：手写：固定块 512，尾帧 17 帧；种子：smooth 808
   核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 22050 Hz/1 声道/16 位/最大块 512/总样本 1041；块大小 ["17", "512"]；分支要求 ["blocksize=17", "blocksize=512"] 满足
+seek_variable_notable -> ok -
+  sha256 e8438684dd35d23efe9b211b4851cc1ae1c8fbb8701601355649e0004ed954fd
+  19152 字节；来源：手写：S1 定位：可变块（576/1000/300/1152/2000 循环），无定位表；种子：smooth 909
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 2000 Hz/1 声道/16 位/最大块 2000/总样本 16000；块大小 ["1000", "1152", "2000", "300", "340", "576"]；分支要求 [] 满足
+seek_variable_table -> ok -
+  sha256 854efc987d933f8e18e28df906ec88439531f765600abd41732c13680df87338
+  19264 字节；来源：手写：S1 定位：可变块，定位表每 2 秒一点并含 2 个占位点；种子：smooth 909
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 2000 Hz/1 声道/16 位/最大块 2000/总样本 16000；块大小 ["1000", "1152", "2000", "300", "340", "576"]；分支要求 [] 满足
+seek_bad_table -> ok -
+  sha256 b26f73f0d62f49cb2b3537bc2d1768a1f2a274a4f838b1eefef365643fc02247
+  19246 字节；来源：手写：S1 定位：可变块，定位表内容错误（偏移落在帧中间、样本号与偏移不对应、偏移越界）；种子：smooth 909
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 2000 Hz/1 声道/16 位/最大块 2000/总样本 16000；块大小 ["1000", "1152", "2000", "300", "340", "576"]；分支要求 [] 满足
+seek_total0_table -> ok -
+  sha256 c0a8a7d0126537bba6d6be77f8e90a04d701853b03d09f6e97e4606b14f2faeb
+  19264 字节；来源：手写：S1 定位：STREAMINFO 总样本数为 0（未知），有定位表；种子：smooth 909
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 2000 Hz/1 声道/16 位/最大块 2000/总样本 0；块大小 ["1000", "1152", "2000", "300", "340", "576"]；分支要求 [] 满足
+seek_total0 -> ok -
+  sha256 0a6d53d9bcf8b4b8d38ed3bb2e87983d8b7c90c759706bce48d46060b339f8c0
+  19152 字节；来源：手写：S1 定位：STREAMINFO 总样本数为 0（未知），无定位表；种子：smooth 909
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 2000 Hz/1 声道/16 位/最大块 2000/总样本 0；块大小 ["1000", "1152", "2000", "300", "340", "576"]；分支要求 [] 满足
+seek_falsesync -> ok -
+  sha256 b517bcaec54daaeaead787f2241f2bd7292ad56949ddf9a7db991d0bf3bfd90d
+  32324 字节；来源：手写：S1 定位：verbatim 样本中大量出现同步码样式 FF F8 / FF F9，无定位表；种子：Lcg 910
+  核对：libFLAC 参考解码（raw，有符号小端 16 位）逐样本一致；metaflac 2000 Hz/1 声道/16 位/最大块 576/总样本 16000；块大小 ["448", "576"]；分支要求 ["type=VERBATIM"] 满足
 err_header_crc -> Malformed HeaderCrc
   sha256 8ff3572c9dbbc2f47b7c6a93d4e4f16b81bdc986e1861a3c54cd38ae87b1a1f2
   3404 字节；来源：手写错误：首帧帧头 1 位翻转；种子：smooth 909 / 1001–1004（错误夹具）
@@ -258,31 +292,32 @@ err_vorbis_comment_overrun -> Malformed BadVorbisComment
 
 # libFLAC --analyze 分支覆盖（含该分支的有效夹具数）
 blocksize=65535: 1
-channel_assignment=INDEPENDENT: 27
+channel_assignment=INDEPENDENT: 35
 channel_assignment=LEFT_SIDE: 4
 channel_assignment=MID_SIDE: 8
 channel_assignment=RIGHT_SIDE: 2
 escape_partition: 2
-residual_type=RICE: 29
+residual_type=RICE: 36
 residual_type=RICE2: 10
 type=CONSTANT: 2
-type=FIXED: 18
+type=FIXED: 23
 type=FIXED order=0: 2
 type=FIXED order=1: 7
-type=FIXED order=2: 15
+type=FIXED order=2: 20
 type=FIXED order=3: 2
 type=FIXED order=4: 2
-type=LPC: 19
+type=LPC: 21
 type=LPC order=10: 3
 type=LPC order=11: 2
 type=LPC order=12: 2
 type=LPC order=2: 2
+type=LPC order=3: 2
 type=LPC order=32: 1
-type=LPC order=4: 1
-type=LPC order=5: 2
-type=LPC order=6: 7
+type=LPC order=4: 3
+type=LPC order=5: 4
+type=LPC order=6: 9
 type=LPC order=7: 9
 type=LPC order=8: 12
 type=LPC order=9: 1
-type=VERBATIM: 6
+type=VERBATIM: 7
 wasted_bits>0: 9

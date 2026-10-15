@@ -1,0 +1,6 @@
+result ok
+detail -
+format 2000 1 16
+layout 0x4
+frames 16000
+origin 手写：S1 定位：verbatim 样本中大量出现同步码样式 FF F8 / FF F9，无定位表

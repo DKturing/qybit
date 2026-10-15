@@ -22,7 +22,7 @@ mod crc;
 mod frame;
 
 use qy_core::engine::{CapabilityError, DecoderDemand, Resources};
-use qy_core::{ChannelLayout, DecodeError, Decoder, Progress, SourceFormat, Status};
+use qy_core::{ChannelLayout, DecodeError, Decoder, Progress, SeekError, SourceFormat, Status};
 
 /// 解码器容量配置（宿主声明）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,6 +272,33 @@ enum Vc {
     Tail,
 }
 
+/// 定位（S1）的跳转次数上限：超过时从已确认的、目标之前最近的帧起顺序解码。
+const MAX_SEEK_JUMPS: u32 = 32;
+
+/// 定位过程（S1）。位置均为距源开头的字节数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Seeking {
+    target: u64,
+    /// 已确认的、不晚于目标的帧起点（字节位置、首样本号）。
+    lo: (u64, u64),
+    /// 已确认的、晚于目标的帧起点。
+    hi: Option<(u64, u64)>,
+    jumps: u32,
+    /// 上一次试探落在源末尾之后（一个字节也没读到）：不知道文件实际多长，下一次取上下界中点
+    /// 而不按样本号插值（定位表的偏移越界时，插值每次只能缩小一小部分范围）。
+    beyond_end: bool,
+    phase: Phase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// 重新读取定位表（§8.5）：还剩 `left` 个点；`best` 为目前不晚于目标的最大点
+    /// （样本号、相对第一帧帧头的字节偏移）。
+    Table { left: u32, best: Option<(u64, u64)> },
+    /// 在 `start` 之后找帧：当前输入从 `at` 开始。
+    Probe { start: u64, at: u64 },
+}
+
 /// 声道掩码标签名（含 `=`，大小写不敏感）。
 const MASK_TAG: &[u8] = b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=";
 /// 解析声道掩码标签时最多读入的字段长度；更长的字段不是该标签的合法形式，按普通注释跳过。
@@ -285,6 +312,8 @@ struct StreamInfo {
     format: Option<SourceFormat>,
     /// STREAMINFO 声明的最大块（不可信，只用于播放计划）。
     max_block: u32,
+    /// 最小块等于最大块：固定块大小的码流（§8.2），帧号可换算为样本号（S1 定位）。
+    fixed_size: bool,
     max_frame: u32,
     total_samples: u64,
 }
@@ -312,6 +341,20 @@ pub struct FlacDecoder {
     /// 已发布、未取走的交错样本 `pcm[start..end]`。
     start: usize,
     end: usize,
+    /// 已消耗的总字节数（S1 定位用：当前输入第一个字节的位置）。
+    offset: u64,
+    /// 第一帧帧头的位置（S1）。
+    first_frame: Option<u64>,
+    /// SEEKTABLE 内容的位置与长度（S1）：定位时重新读取，不缓存表。
+    table: Option<(u64, u32)>,
+    /// 第一帧的字节长度与块大小（S1）：固定块策略下由帧号换算样本号，并估计每样本字节数。
+    nominal: Option<(usize, usize)>,
+    /// 定位进行中（S1）。
+    seeking: Option<Seeking>,
+    /// 顺序解码到目标时还要丢弃的样本帧数（S1）。
+    skip: u64,
+    /// 等待核心取走的跳转位置（S1）。
+    request: Option<u64>,
     #[cfg(any(test, feature = "test-metrics"))]
     metrics: Metrics,
 }
@@ -338,6 +381,13 @@ impl FlacDecoder {
             decoded_samples: 0,
             start: 0,
             end: 0,
+            offset: 0,
+            first_frame: None,
+            table: None,
+            nominal: None,
+            seeking: None,
+            skip: 0,
+            request: None,
             #[cfg(any(test, feature = "test-metrics"))]
             metrics: Metrics::default(),
         })
@@ -404,6 +454,7 @@ impl FlacDecoder {
     fn parse_stream_info(&mut self, b: &[u8]) -> Result<(), FlacError> {
         // §8.2：min/max 块（16/16）、min/max 帧（24/24）、采样率 20、声道−1 3、
         // 位深−1 5、总样本 36、MD5 128。
+        let min_block = u16::from_be_bytes([b[0], b[1]]);
         let max_block = u16::from_be_bytes([b[2], b[3]]);
         let max_frame = u32::from_be_bytes([0, b[7], b[8], b[9]]);
         let rate = (u32::from(b[10]) << 12) | (u32::from(b[11]) << 4) | (u32::from(b[12]) >> 4);
@@ -448,6 +499,7 @@ impl FlacDecoder {
             },
             format: None,
             max_block: u32::from(max_block),
+            fixed_size: min_block == max_block,
             max_frame,
             total_samples: total,
         });
@@ -624,6 +676,16 @@ impl FlacDecoder {
                         (0, false) if len == 34 => State::StreamInfo { last },
                         (0, _) | (_, false) => return self.fail(FlacError::BadStreamInfo),
                         (127, _) => return self.fail(FlacError::BadMetadataType),
+                        // 寻道表（§8.5）：记下位置，定位时再读；照常跳过。
+                        (3, true) => {
+                            if self.table.is_none() {
+                                self.table = Some((self.offset + pos as u64, len));
+                            }
+                            State::Skip {
+                                remaining: len,
+                                last,
+                            }
+                        }
                         (4, true) => State::Comment {
                             remaining: len,
                             last,
@@ -712,96 +774,402 @@ impl FlacDecoder {
         let Some(info) = self.info else {
             return self.fail(FlacError::BadStreamInfo);
         };
-        if avail.is_empty() {
-            if !eof {
+        if self.first_frame.is_none() {
+            self.first_frame = Some(self.offset + pos as u64);
+        }
+        // 顺序解码到定位目标时整帧丢弃的帧在本次调用内继续解码（循环，不递归）。
+        let mut used = 0usize;
+        loop {
+            let avail = &avail[used..];
+            let pos = pos + used;
+            if avail.is_empty() {
+                if !eof {
+                    return Ok(Progress {
+                        consumed: pos,
+                        status: Status::NeedInput,
+                    });
+                }
+                // 码流结束：已知总样本数时核对，帧边界处的截断也能发现。
+                if info.total_samples != 0 {
+                    if self.decoded_samples < info.total_samples {
+                        return self.fail(FlacError::Truncated);
+                    }
+                    if self.decoded_samples > info.total_samples {
+                        return self.fail(FlacError::TotalSamplesMismatch);
+                    }
+                }
+                self.state = State::End;
+                return Ok(Progress {
+                    consumed: pos,
+                    status: Status::End,
+                });
+            }
+            // 未达门槛且未 EOF：不重新解析。
+            if !eof && avail.len() < self.retry_at {
                 return Ok(Progress {
                     consumed: pos,
                     status: Status::NeedInput,
                 });
             }
-            // 码流结束：已知总样本数时核对，帧边界处的截断也能发现。
-            if info.total_samples != 0 {
-                if self.decoded_samples < info.total_samples {
-                    return self.fail(FlacError::Truncated);
+            let window = self.cap.input_window;
+            let slice = &avail[..avail.len().min(window)];
+            let attempt = frame::decode(
+                slice,
+                &info.params,
+                self.cap.max_block,
+                self.workspace,
+                self.pcm,
+            );
+            #[cfg(any(test, feature = "test-metrics"))]
+            {
+                self.metrics.parse_attempts += 1;
+                self.metrics.scanned_bits += attempt.bits;
+                self.metrics.sample_ops += attempt.sample_ops;
+            }
+            #[cfg(not(any(test, feature = "test-metrics")))]
+            let _ = (attempt.bits, attempt.sample_ops);
+            match attempt.result {
+                Ok(d) => {
+                    if *self.blocking.get_or_insert(d.variable) != d.variable {
+                        return self.fail(FlacError::StreamMismatch);
+                    }
+                    #[cfg(any(test, feature = "test-metrics"))]
+                    {
+                        self.metrics.frames += 1;
+                    }
+                    if self.nominal.is_none() {
+                        self.nominal = Some((d.len, d.block_size));
+                    }
+                    self.retry_at = 0;
+                    self.decoded_samples += d.block_size as u64;
+                    let ch = info.params.channels as usize;
+                    let drop = usize::try_from(self.skip)
+                        .unwrap_or(usize::MAX)
+                        .min(d.block_size);
+                    self.skip -= drop as u64;
+                    if drop == d.block_size {
+                        self.start = 0;
+                        self.end = 0;
+                        used += d.len;
+                        continue;
+                    }
+                    self.start = drop * ch;
+                    self.end = d.block_size * ch;
+                    return Ok(Progress {
+                        consumed: pos + d.len,
+                        status: Status::Frames(d.block_size - drop),
+                    });
                 }
-                if self.decoded_samples > info.total_samples {
-                    return self.fail(FlacError::TotalSamplesMismatch);
+                Err(frame::FrameError::Bad(e)) => return self.fail(e),
+                Err(frame::FrameError::Incomplete) => {
+                    #[cfg(any(test, feature = "test-metrics"))]
+                    {
+                        self.metrics.incomplete_attempts += 1;
+                    }
+                    let n = slice.len();
+                    // 窗口之外还有数据：帧超出窗口容量，不是截断（即使已到 EOF）。
+                    if avail.len() > window {
+                        return self.fail(FlacError::FrameTooLarge);
+                    }
+                    if eof {
+                        return self.fail(FlacError::Truncated);
+                    }
+                    if n >= window {
+                        return self.fail(FlacError::FrameTooLarge);
+                    }
+                    // STREAMINFO 声明的最大帧长度不可信，只作提示：实际以窗口容量为界。
+                    // 这里 n ≥ 1（输入非空），翻倍后必然比 n 大。
+                    self.retry_at = n.saturating_mul(2).min(window);
+                    return Ok(Progress {
+                        consumed: pos,
+                        status: Status::NeedInput,
+                    });
                 }
             }
-            self.state = State::End;
-            return Ok(Progress {
-                consumed: pos,
-                status: Status::End,
-            });
         }
-        // 未达门槛且未 EOF：不重新解析。
-        if !eof && avail.len() < self.retry_at {
+    }
+
+    // ---- S1 定位 ----
+
+    /// 开始定位（核心在首次产出 PCM 之后调用）：有定位表时先跳到表重新读取；没有表时按比例
+    /// 估计位置开始二分；总样本数未知又没有表时不支持（核心就地顺序解码）。
+    fn seek_to(&mut self, target: u64) -> Result<u64, SeekError> {
+        let (Some(info), Some(first), Some(_), State::Frames) =
+            (self.info, self.first_frame, self.nominal, self.state)
+        else {
+            return Err(SeekError::Unsupported);
+        };
+        let total = info.total_samples;
+        if total != 0 && target >= total {
+            return Err(SeekError::PastEnd);
+        }
+        // 固定块策略下帧号 × 块大小才是样本号，只在固定块大小的码流中成立（§9.1.5）；块大小
+        // 不一的固定块码流不试探，就地顺序解码。
+        if self.blocking == Some(false) && !info.fixed_size {
+            return Err(SeekError::Unsupported);
+        }
+        let mut s = Seeking {
+            target,
+            lo: (first, 0),
+            hi: None,
+            jumps: 1,
+            beyond_end: false,
+            phase: Phase::Probe {
+                start: first,
+                at: first,
+            },
+        };
+        let to = match self.table {
+            Some((at, len)) => {
+                s.phase = Phase::Table {
+                    left: len / 18,
+                    best: None,
+                };
+                at
+            }
+            None if total == 0 => return Err(SeekError::Unsupported),
+            None => {
+                let g = self.guess(&s);
+                s.phase = Phase::Probe { start: g, at: g };
+                g
+            }
+        };
+        self.seeking = Some(s);
+        self.start = 0;
+        self.end = 0;
+        self.retry_at = 0;
+        self.skip = 0;
+        self.offset = to;
+        Ok(to)
+    }
+
+    /// 下一次试探的位置：已知上界时在上下界之间按样本号插值，否则按第一帧的每样本字节数外推；
+    /// 再向前退两个第一帧长度，使落点之后找到的帧更可能不晚于目标。结果在 [下界, 上界) 内。
+    fn guess(&self, s: &Seeking) -> u64 {
+        let (lo_off, lo_s) = s.lo;
+        let (len, block) = self.nominal.unwrap_or((1, 1));
+        let ahead = u128::from(s.target.saturating_sub(lo_s));
+        let est = match s.hi {
+            Some((ho, _)) if s.beyond_end && ho > lo_off => {
+                (u128::from(lo_off) + u128::from(ho)) / 2 + 2 * len as u128
+            }
+            Some((ho, hs)) if hs > lo_s && ho > lo_off => {
+                u128::from(lo_off) + ahead * u128::from(ho - lo_off) / u128::from(hs - lo_s)
+            }
+            _ => u128::from(lo_off) + ahead * len as u128 / block.max(1) as u128,
+        };
+        let g = u64::try_from(est.saturating_sub(2 * len as u128))
+            .unwrap_or(u64::MAX)
+            .max(lo_off);
+        match s.hi {
+            Some((ho, _)) => g.min(ho.saturating_sub(1)).max(lo_off),
+            None => g,
+        }
+    }
+
+    /// 请核心把读取位置移到 `to`，丢弃本次输入。
+    fn jump(&mut self, to: u64, input_len: usize) -> Result<Progress, DecodeError> {
+        self.request = Some(to);
+        self.offset = to;
+        self.retry_at = 0;
+        Ok(Progress {
+            consumed: input_len,
+            status: Status::NeedInput,
+        })
+    }
+
+    /// 已离目标足够近（不超过 1 秒的样本）、范围已窄、跳转次数用完或不能二分（总样本数未知）时，
+    /// 从已确认的下界帧顺序解码并丢弃目标之前的样本；否则继续试探。
+    fn next_jump(&mut self, mut s: Seeking, input_len: usize) -> Result<Progress, DecodeError> {
+        let Some(info) = self.info else {
+            return self.fail(FlacError::BadStreamInfo);
+        };
+        let (len, _) = self.nominal.unwrap_or((1, 1));
+        let near = s.target - s.lo.1 <= u64::from(info.params.sample_rate);
+        let narrow =
+            s.hi.is_some_and(|(ho, _)| ho.saturating_sub(s.lo.0) <= 4 * len as u64);
+        if near || narrow || info.total_samples == 0 || s.jumps >= MAX_SEEK_JUMPS {
+            self.seeking = None;
+            self.skip = s.target - s.lo.1;
+            self.decoded_samples = s.lo.1;
+            return self.jump(s.lo.0, input_len);
+        }
+        let g = self.guess(&s);
+        s.jumps += 1;
+        s.phase = Phase::Probe { start: g, at: g };
+        self.seeking = Some(s);
+        self.jump(g, input_len)
+    }
+
+    fn seek_step(&mut self, s: Seeking, input: &[u8], eof: bool) -> Result<Progress, DecodeError> {
+        match s.phase {
+            Phase::Table { left, best } => self.table_step(s, left, best, input, eof),
+            Phase::Probe { start, at } => self.probe_step(s, start, at, input, eof),
+        }
+    }
+
+    /// 读取定位表的点（每点 18 字节，§8.5），跳过占位点（样本号全 1）。表读完（或源结束）后
+    /// 到选中的点试探；没有可用的点时按无表处理。表的内容不可信：选中的点仍要经试探确认。
+    fn table_step(
+        &mut self,
+        mut s: Seeking,
+        mut left: u32,
+        mut best: Option<(u64, u64)>,
+        input: &[u8],
+        eof: bool,
+    ) -> Result<Progress, DecodeError> {
+        let mut pos = 0usize;
+        while left > 0 && input.len() - pos >= 18 {
+            let p = &input[pos..pos + 18];
+            let sample = u64::from_be_bytes([p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]]);
+            let off = u64::from_be_bytes([p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]]);
+            if sample != u64::MAX && sample <= s.target && best.is_none_or(|(b, _)| sample > b) {
+                best = Some((sample, off));
+            }
+            pos += 18;
+            left -= 1;
+        }
+        if left > 0 && !eof {
+            s.phase = Phase::Table { left, best };
+            self.seeking = Some(s);
             return Ok(Progress {
                 consumed: pos,
                 status: Status::NeedInput,
             });
         }
+        let point = best.and_then(|(_, off)| s.lo.0.checked_add(off));
+        match point {
+            Some(at) if at > s.lo.0 => {
+                s.jumps += 1;
+                s.phase = Phase::Probe { start: at, at };
+                self.seeking = Some(s);
+                self.jump(at, input.len())
+            }
+            _ => self.next_jump(s, input.len()),
+        }
+    }
+
+    /// 从 `at` 起找帧同步：同步码 `0xFFF8`/`0xFFF9`（阻塞策略位须与码流一致），再整帧解码——
+    /// 帧头 CRC-8、与 STREAMINFO 一致、帧尾 CRC-16 都通过才算找到；否则是音频数据里的误同步，
+    /// 继续向后找。
+    fn probe_step(
+        &mut self,
+        mut s: Seeking,
+        start: u64,
+        at: u64,
+        input: &[u8],
+        eof: bool,
+    ) -> Result<Progress, DecodeError> {
+        let Some(info) = self.info else {
+            return self.fail(FlacError::BadStreamInfo);
+        };
         let window = self.cap.input_window;
-        let slice = &avail[..avail.len().min(window)];
-        let attempt = frame::decode(
-            slice,
-            &info.params,
-            self.cap.max_block,
-            self.workspace,
-            self.pcm,
-        );
-        #[cfg(any(test, feature = "test-metrics"))]
-        {
-            self.metrics.parse_attempts += 1;
-            self.metrics.scanned_bits += attempt.bits;
-            self.metrics.sample_ops += attempt.sample_ops;
-        }
-        #[cfg(not(any(test, feature = "test-metrics")))]
-        let _ = (attempt.bits, attempt.sample_ops);
-        match attempt.result {
-            Ok(d) => {
-                if *self.blocking.get_or_insert(d.variable) != d.variable {
-                    return self.fail(FlacError::StreamMismatch);
+        let bit = self.blocking.map(u8::from);
+        let mut i = 0usize;
+        while i + 1 < input.len() {
+            if input[i] == 0xFF
+                && input[i + 1] & 0xFE == 0xF8
+                && bit.is_none_or(|b| input[i + 1] & 1 == b)
+            {
+                let slice = &input[i..input.len().min(i + window)];
+                let attempt = frame::decode(
+                    slice,
+                    &info.params,
+                    self.cap.max_block,
+                    self.workspace,
+                    self.pcm,
+                );
+                match attempt.result {
+                    Ok(d) => return self.probed(s, at + i as u64, d, i, input.len()),
+                    // 帧可能还没读全：保留从候选同步码起的输入，等更多数据。
+                    Err(frame::FrameError::Incomplete) if !eof && slice.len() < window => {
+                        s.phase = Phase::Probe {
+                            start,
+                            at: at + i as u64,
+                        };
+                        self.seeking = Some(s);
+                        return Ok(Progress {
+                            consumed: i,
+                            status: Status::NeedInput,
+                        });
+                    }
+                    _ => {}
                 }
-                #[cfg(any(test, feature = "test-metrics"))]
-                {
-                    self.metrics.frames += 1;
-                }
-                self.retry_at = 0;
-                self.decoded_samples += d.block_size as u64;
-                self.start = 0;
-                self.end = d.block_size * info.params.channels as usize;
-                Ok(Progress {
-                    consumed: pos + d.len,
-                    status: Status::Frames(d.block_size),
-                })
             }
-            Err(frame::FrameError::Bad(e)) => self.fail(e),
-            Err(frame::FrameError::Incomplete) => {
-                #[cfg(any(test, feature = "test-metrics"))]
-                {
-                    self.metrics.incomplete_attempts += 1;
-                }
-                let n = slice.len();
-                // 窗口之外还有数据：帧超出窗口容量，不是截断（即使已到 EOF）。
-                if avail.len() > window {
-                    return self.fail(FlacError::FrameTooLarge);
-                }
-                if eof {
-                    return self.fail(FlacError::Truncated);
-                }
-                if n >= window {
-                    return self.fail(FlacError::FrameTooLarge);
-                }
-                // STREAMINFO 声明的最大帧长度不可信，只作提示：实际以窗口容量为界。
-                // 这里 n ≥ 1（输入非空），翻倍后必然比 n 大。
-                self.retry_at = n.saturating_mul(2).min(window);
-                Ok(Progress {
-                    consumed: pos,
-                    status: Status::NeedInput,
-                })
-            }
+            i += 1;
         }
+        if !eof {
+            // 没有候选：丢弃已扫描的字节，保留最后一个（可能是同步码的前半）。
+            let consumed = input.len().saturating_sub(1);
+            s.phase = Phase::Probe {
+                start,
+                at: at + consumed as u64,
+            };
+            self.seeking = Some(s);
+            return Ok(Progress {
+                consumed,
+                status: Status::NeedInput,
+            });
+        }
+        // 到源末尾也没有帧：`start` 之后没有帧起点，上界前移到这里。
+        s.beyond_end = at == start && input.is_empty();
+        let end = info.total_samples;
+        s.hi = Some(match s.hi {
+            Some((ho, hs)) if ho <= start => (ho, hs),
+            _ => (start, end),
+        });
+        self.next_jump(s, input.len())
+    }
+
+    /// 试探找到一帧（位于 `f`，首样本号 `first`）。含目标时落在此帧：丢弃目标之前的样本，其后的
+    /// 输入照常解码；否则更新上界或下界再试。
+    fn probed(
+        &mut self,
+        mut s: Seeking,
+        f: u64,
+        d: frame::Decoded,
+        i: usize,
+        input_len: usize,
+    ) -> Result<Progress, DecodeError> {
+        let Some(info) = self.info else {
+            return self.fail(FlacError::BadStreamInfo);
+        };
+        let (_, nominal_block) = self.nominal.unwrap_or((0, d.block_size));
+        let first = if d.variable {
+            d.number
+        } else {
+            d.number.saturating_mul(nominal_block as u64)
+        };
+        let block = d.block_size as u64;
+        if first <= s.target && s.target < first.saturating_add(block) {
+            self.seeking = None;
+            self.retry_at = 0;
+            self.decoded_samples = first + block;
+            let drop = (s.target - first) as usize;
+            let ch = info.params.channels as usize;
+            self.start = drop * ch;
+            self.end = d.block_size * ch;
+            return Ok(Progress {
+                consumed: i + d.len,
+                status: Status::Frames(d.block_size - drop),
+            });
+        }
+        let Phase::Probe { start, .. } = s.phase else {
+            return self.fail(FlacError::BadStreamInfo);
+        };
+        if first > s.target {
+            s.hi = Some(match s.hi {
+                // 又找到已知的上界帧：[start, 上界) 内没有帧起点，上界前移到 start。
+                Some((ho, hs)) if ho <= f => (start.min(ho), hs),
+                _ => (f, first),
+            });
+        } else if f >= s.lo.0 {
+            s.lo = (f + d.len as u64, first + block);
+        }
+        s.beyond_end = false;
+        self.start = 0;
+        self.end = 0;
+        self.next_jump(s, input_len)
     }
 }
 
@@ -833,6 +1201,13 @@ impl Decoder for FlacDecoder {
         self.decoded_samples = 0;
         self.start = 0;
         self.end = 0;
+        self.offset = 0;
+        self.first_frame = None;
+        self.table = None;
+        self.nominal = None;
+        self.seeking = None;
+        self.skip = 0;
+        self.request = None;
     }
 
     fn format(&self) -> Option<SourceFormat> {
@@ -850,7 +1225,25 @@ impl Decoder for FlacDecoder {
                 status: Status::NeedOutput,
             });
         }
-        self.step(input, eof)
+        let r = match self.seeking.take() {
+            Some(s) => self.seek_step(s, input, eof),
+            None => self.step(input, eof),
+        };
+        // 跳转时位置已设为目标，本次输入整体丢弃，不计入。
+        if let Ok(p) = r
+            && self.request.is_none()
+        {
+            self.offset += p.consumed as u64;
+        }
+        r
+    }
+
+    fn seek(&mut self, frame: u64) -> Result<u64, SeekError> {
+        self.seek_to(frame)
+    }
+
+    fn seek_request(&mut self) -> Option<u64> {
+        self.request.take()
     }
 
     fn pcm(&self) -> &[i32] {
