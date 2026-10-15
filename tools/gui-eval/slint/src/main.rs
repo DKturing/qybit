@@ -64,6 +64,25 @@ fn main() -> Result<(), slint::PlatformError> {
             row.set_row_data(0, StandardListViewItem::from(""));
         }
     });
+    // 系统文件拖放：Slint 1.18 未转交，经 winit 窗口事件取得（追加到列表末尾）。
+    {
+        use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
+        let m = model.clone();
+        ui.window().on_winit_window_event(move |_, event| {
+            if let winit::event::WindowEvent::DroppedFile(path) = event {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let cells: Vec<StandardListViewItem> = ["", name.as_str(), "", ""]
+                    .iter()
+                    .map(|s| StandardListViewItem::from(*s))
+                    .collect();
+                m.push(ModelRc::from(Rc::new(VecModel::from(cells))));
+            }
+            EventResult::Propagate
+        });
+    }
     let start = Instant::now();
     let timer = slint::Timer::default();
     if std::env::var_os("QY_EVAL_STATIC").is_none() {

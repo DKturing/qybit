@@ -87,6 +87,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
+      - name: Slint 需要 fontconfig 开发包（构建时链接系统库）
+        if: matrix.sample == 'slint'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - name: 编译
         run: |
           cargo fetch --locked

@@ -9,7 +9,7 @@ description = "GUI T1 选型样例：Slint（列表、按钮、4 Hz 状态行、
 [workspace]
 
 [dependencies]
-slint = { version = "=1.18.1" }
+slint = { version = "=1.18.1", features = ["unstable-winit-030"] }
 
 [profile.release]
 strip = true
