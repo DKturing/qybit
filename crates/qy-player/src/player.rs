@@ -12,14 +12,17 @@
 //! - 打开失败（设备不支持、独占失败等）回报 `DeviceOpenFailed`，不做任何回退；
 //! - 播放失败时排空已入队的有效音频后停止；渲染线程出错（设备失效等）时停止核心。
 //!
-//! 桌面渲染循环尚未实现暂停；本驱动不发起暂停，收到暂停动作按协议错误记录。
+//! 播放控制（GUI T2）：[`PlayControl::commands`] 接收暂停、恢复、上一首、下一首、跳曲与停止，
+//! 转交引擎执行（规则在引擎中，CLI 与 GUI 共用）；暂停时渲染线程送静音、不取队列，静音单独
+//! 计数，不算欠载。[`PlayControl::on_status`] 给出节流后的状态快照（界面显示用）。
 
 use std::fs::File;
 use std::io::{self, ErrorKind, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 
 use qy_core::engine::{HostAction, HostEvent, Poll, Wait};
 use qy_core::{DeviceFormat, Generation, SourceFormat};
@@ -85,14 +88,59 @@ impl TrackSource for Files<'_> {
     }
 }
 
-/// 播放时的实时输出与中断。
+/// 播放控制命令（GUI T2）。由引擎按其规则执行：切歌丢弃已入队的音频并从目标曲目开头播放，
+/// 暂停时设备输出静音（单独计数，不算欠载）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    Pause,
+    Resume,
+    /// 下一首（相对正在播放的曲目）；已是最后一首时停止。
+    Next,
+    /// 上一首（第一首时从头重播）。
+    Prev,
+    /// 跳到第 k 首（从 0 起）；超出列表时忽略。
+    Goto(u32),
+    /// 停止：立即停止设备、丢弃队列（不排空），报告标记为已中断。
+    Stop,
+}
+
+/// 播放状态快照（界面显示用；生产端线程生成，不涉及渲染线程的实时路径）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Status {
+    /// 播放列表在进行中（含排空尾部）。
+    pub active: bool,
+    pub paused: bool,
+    /// 正在播放的曲目（从 0 起）。
+    pub track: u32,
+    /// 该曲目已由设备取走的帧数（设备格式帧；最多含一个设备缓冲尚未发声）。
+    pub position_frames: u64,
+    /// 正在解码的源格式（同格式连续曲目时可能已是下一首）。
+    pub source: Option<SourceFormat>,
+    /// 当前设备流的格式。
+    pub device: Option<DeviceFormat>,
+    /// 本次播放累计的欠载事件与缺失帧（含正在进行的流）。
+    pub underrun_events: u64,
+    pub underrun_frames: u64,
+    /// 本次播放累计的暂停静音帧（不是欠载）。
+    pub paused_frames: u64,
+}
+
+/// 播放时的实时输出、中断与控制。
 pub struct PlayControl<'a> {
     /// 每条进度信息（曲目开始、设备协商结果、跳过、结构修正、失败、中断）调用一次，每次一行或
     /// 几行完整文本；播放结束后的完整报告仍由 [`PlaybackReport::summary`] 给出。
     pub on_line: &'a mut dyn FnMut(&str),
     /// 置位后停止播放：立即停止设备、丢弃队列（不排空），报告照常返回并标记为已中断。
     pub stop: Option<&'a AtomicBool>,
+    /// 控制命令（非阻塞读取；发送端断开不影响播放）。
+    pub commands: Option<&'a Receiver<Command>>,
+    /// 状态快照：状态变化时立即调用，播放中至多每 [`STATUS_INTERVAL`] 调用一次，结束时调用
+    /// 一次（`active` 为假）。回调在生产端线程执行，应很快返回（如存入共享状态并通知界面）。
+    pub on_status: Option<&'a mut dyn FnMut(&Status)>,
 }
+
+/// 播放中状态快照的最小间隔。
+pub const STATUS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 生产端等待队列空间时的休眠间隔。
 const FULL_QUEUE_SLEEP: Duration = Duration::from_millis(2);
@@ -106,6 +154,10 @@ struct Player<'a, B: Backend, S: TrackSource> {
     report: PlaybackReport<B::Attempt>,
     ctl: PlayControl<'a>,
     count: u32,
+    /// 上次给出的状态与时间。
+    last_status: Option<(Status, Instant)>,
+    /// 当前流已置 EOF、等待渲染线程播完（排空期间照常处理控制命令与状态）。
+    draining: bool,
 }
 
 /// 依次播放 `files`，直到完成、失败或设备出错。
@@ -130,6 +182,8 @@ pub fn play_source<B: Backend, S: TrackSource>(
         PlayControl {
             on_line: &mut |_| {},
             stop: None,
+            commands: None,
+            on_status: None,
         },
     )
 }
@@ -155,8 +209,11 @@ pub fn play_with<'a, B: Backend, S: TrackSource>(
         report: PlaybackReport::default(),
         ctl,
         count,
+        last_status: None,
+        draining: false,
     };
     p.run();
+    p.status(true);
     p.report
 }
 
@@ -189,14 +246,108 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
         self.finish_stream(true);
     }
 
+    /// 执行已收到的控制命令；返回 false 表示按命令停止。
+    fn commands(&mut self) -> bool {
+        let Some(rx) = self.ctl.commands else {
+            return true;
+        };
+        while let Ok(cmd) = rx.try_recv() {
+            let e = &mut self.res.engine;
+            match cmd {
+                Command::Pause => e.pause(),
+                Command::Resume => e.resume(),
+                Command::Next => e.next(),
+                Command::Prev => e.prev(),
+                Command::Goto(k) if k < self.count => e.skip_to(k),
+                Command::Goto(_) => continue,
+                Command::Stop => return false,
+            }
+            match cmd {
+                Command::Next | Command::Prev | Command::Goto(_) => {
+                    self.report.user_skips += 1;
+                    let (track, _) = self.res.engine.playing_progress();
+                    let what = if self.res.engine.is_active() {
+                        format!("从曲目 {} 开始", u64::from(track) + 1)
+                    } else {
+                        "已是最后一首，停止".to_string()
+                    };
+                    self.line(&format!("⏭ 按操作切换：丢弃已入队的音频，{what}"));
+                }
+                Command::Pause => self.line("⏸ 暂停（设备输出静音，不算欠载）"),
+                Command::Resume => self.line("▶ 继续"),
+                Command::Stop => {}
+            }
+            // 引擎排队的控制动作（关闭音源、停止设备、暂停/恢复）立即执行。
+            while let Some(a) = self.res.engine.take_control() {
+                if !self.execute(a) {
+                    break;
+                }
+            }
+            self.status(true);
+        }
+        true
+    }
+
+    /// 给出状态快照：`force` 或状态变化时立即给出，否则按 [`STATUS_INTERVAL`] 节流。
+    fn status(&mut self, force: bool) {
+        if self.ctl.on_status.is_none() {
+            return;
+        }
+        let e = &self.res.engine;
+        let (track, position_frames) = e.playing_progress();
+        let finished = self.report.streams.iter().filter_map(|s| s.render.as_ref());
+        let (mut ue, mut uf, mut pf) = (0, 0, 0);
+        for r in finished {
+            ue += r.underrun_events;
+            uf += r.underrun_frames;
+            pf += r.paused_frames;
+        }
+        if let Some(a) = &self.active {
+            ue += a.ctl.underrun_events.load(Ordering::Acquire);
+            uf += a.ctl.underrun_frames.load(Ordering::Acquire);
+            pf += a.ctl.paused_frames.load(Ordering::Acquire);
+        }
+        let now = Status {
+            active: e.is_active(),
+            paused: e.is_paused(),
+            track,
+            position_frames,
+            source: qy_core::Decoder::format(e.decoder()),
+            device: self.active.as_ref().map(|a| a.format),
+            underrun_events: ue,
+            underrun_frames: uf,
+            paused_frames: pf,
+        };
+        let changed = self.last_status.is_none_or(|(prev, at)| {
+            let discrete = |s: &Status| {
+                (
+                    s.active,
+                    s.paused,
+                    s.track,
+                    s.source,
+                    s.device,
+                    s.underrun_events,
+                )
+            };
+            discrete(&prev) != discrete(&now) || at.elapsed() >= STATUS_INTERVAL
+        });
+        if force || changed {
+            if let Some(f) = self.ctl.on_status.as_mut() {
+                f(&now);
+            }
+            self.last_status = Some((now, Instant::now()));
+        }
+    }
+
     fn run(&mut self) {
         loop {
-            if self.ctl.stop.is_some_and(|s| s.load(Ordering::Acquire)) {
+            if self.ctl.stop.is_some_and(|s| s.load(Ordering::Acquire)) || !self.commands() {
                 self.interrupt();
                 break;
             }
             let poll = self.res.engine.poll();
             self.sync_pushed();
+            self.status(false);
             match poll {
                 Poll::Action(a) => {
                     if !self.execute(a) {
@@ -214,8 +365,9 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                         break;
                     }
                 }
+                Poll::Wait(Wait::Device) if self.draining => self.poll_drain(),
                 Poll::Wait(w) => {
-                    // 本宿主同步回报所有读取与设备事件，不应等待。
+                    // 本宿主同步回报读取与设备打开结果，只有排空需要等待。
                     self.report.protocol_errors += 1;
                     self.report.messages.push(format!("引擎意外等待：{w:?}"));
                     break;
@@ -311,14 +463,15 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 }
             }
             HostAction::StartDevice => self.start_if_pending(),
-            HostAction::DrainDevice => {
-                self.finish_stream(false);
-                self.handle(HostEvent::DeviceDrained);
-            }
+            HostAction::DrainDevice => self.begin_drain(),
             HostAction::StopDevice => self.finish_stream(true),
             HostAction::PauseDevice | HostAction::ResumeDevice => {
-                self.report.protocol_errors += 1;
-                self.report.messages.push("桌面渲染循环尚未实现暂停".into());
+                let pause = action == HostAction::PauseDevice;
+                match &self.active {
+                    Some(a) => a.ctl.pause.store(pause, Ordering::Release),
+                    // 引擎只对已启动的设备发出暂停/恢复。
+                    None => self.report.protocol_errors += 1,
+                }
             }
             HostAction::TrackSkipped { track, fault } => {
                 self.line(&format!(
@@ -465,10 +618,40 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
         }
     }
 
+    /// 排空开始：置 EOF（尚未启动的流以排空方式启动），之后由 [`Self::poll_drain`] 等它播完。
+    /// 不在此阻塞，排空期间仍响应暂停、切歌与停止。
+    fn begin_drain(&mut self) {
+        match &self.active {
+            Some(a) => {
+                a.ctl.eof.store(true, Ordering::Release);
+                self.start_if_pending();
+                self.draining = true;
+            }
+            None => self.handle(HostEvent::DeviceDrained),
+        }
+    }
+
+    /// 排空中：渲染线程结束后回收流并回报 `DeviceDrained`，否则短暂休眠。
+    fn poll_drain(&mut self) {
+        let done = match self.active.as_ref().map(|a| &a.stream) {
+            Some(Stream::Running(r)) => r.is_finished(),
+            _ => true,
+        };
+        if done {
+            self.finish_stream(false);
+            self.handle(HostEvent::DeviceDrained);
+        } else {
+            std::thread::sleep(FULL_QUEUE_SLEEP);
+        }
+    }
+
     /// 队列满：启动尚未开始的流，或休眠等待渲染线程取走数据。
     /// 渲染线程已结束（出错）时返回 false。
     fn wait_for_space(&mut self) -> bool {
-        self.start_if_pending();
+        // 暂停时尚未启动的流在恢复之前不启动（引擎恢复时发出 StartDevice）。
+        if !self.res.engine.is_paused() {
+            self.start_if_pending();
+        }
         match self.active.as_ref().map(|a| &a.stream) {
             Some(Stream::Running(r)) if r.is_finished() => {
                 self.report.device_error = true;
@@ -501,6 +684,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
     /// 结束当前流并归还消费端、记录报告：`stop` 为 false 时置 EOF 等它播完退出（排空），
     /// 为 true 时立即停止（停止/切歌，丢弃队列中的数据）。
     fn finish_stream(&mut self, stop: bool) {
+        self.draining = false;
         let Some(active) = self.active.take() else {
             return;
         };
@@ -769,6 +953,8 @@ mod tests {
             PlayControl {
                 on_line: &mut |l: &str| lines.push(l.to_string()),
                 stop: None,
+                commands: None,
+                on_status: None,
             },
         );
         let all = lines.join("\n");
@@ -800,6 +986,8 @@ mod tests {
                     lines.push(l.to_string());
                 },
                 stop: Some(&stop),
+                commands: None,
+                on_status: None,
             },
         );
         let s = r.summary();
@@ -835,6 +1023,8 @@ mod tests {
             PlayControl {
                 on_line: &mut |l: &str| lines.push(l.to_string()),
                 stop: None,
+                commands: None,
+                on_status: None,
             },
         );
         let all = lines.join("\n");
@@ -887,6 +1077,8 @@ mod tests {
                 PlayControl {
                     on_line: &mut |l: &str| lines.push(l.to_string()),
                     stop: None,
+                    commands: None,
+                    on_status: None,
                 },
             );
             let all = lines.join("\n");
@@ -953,6 +1145,8 @@ mod tests {
             PlayControl {
                 on_line: &mut |l: &str| lines.push(l.to_string()),
                 stop: None,
+                commands: None,
+                on_status: None,
             },
         );
         let _ = std::fs::remove_file(&path);
@@ -1207,5 +1401,225 @@ mod tests {
                 check_output(o, bytes);
             }
         }
+    }
+
+    // —— GUI T2：播放控制命令 ——
+
+    /// 44.1 kHz 双声道 16 位、每个样本不同（`salt` 区分曲目）的 WAV；返回路径与 data 字节。
+    fn distinct_track(dir: &std::path::Path, salt: u32, frames: usize) -> (PathBuf, Vec<u8>) {
+        let mut data = Vec::with_capacity(frames * 4);
+        for i in 0..frames as u32 * 2 {
+            let x = i
+                .wrapping_mul(2_654_435_761)
+                .wrapping_add(salt.wrapping_mul(0x9E37_79B9));
+            data.extend_from_slice(&((x >> 16) as u16).to_le_bytes());
+        }
+        let mut f = Vec::with_capacity(44 + data.len());
+        f.extend_from_slice(b"RIFF");
+        f.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        f.extend_from_slice(b"WAVEfmt ");
+        f.extend_from_slice(&16u32.to_le_bytes());
+        f.extend_from_slice(&1u16.to_le_bytes());
+        f.extend_from_slice(&2u16.to_le_bytes());
+        f.extend_from_slice(&44_100u32.to_le_bytes());
+        f.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+        f.extend_from_slice(&4u16.to_le_bytes());
+        f.extend_from_slice(&16u16.to_le_bytes());
+        f.extend_from_slice(b"data");
+        f.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        f.extend_from_slice(&data);
+        let path = dir.join(format!("track{salt}.wav"));
+        if let Err(e) = std::fs::write(&path, &f) {
+            panic!("{e}");
+        }
+        (path, data)
+    }
+
+    fn track_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("qybit-ctl-{}-{tag}", std::process::id()));
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            panic!("{e}");
+        }
+        dir
+    }
+
+    /// 播放并在每次状态快照时调用 `on`（可发送命令）；返回报告、输出与全部状态快照。
+    fn run_ctl(
+        backend: &mut FakeBackend,
+        files: &[PathBuf],
+        mut on: impl FnMut(&Status, &std::sync::mpsc::Sender<Command>),
+    ) -> (PlaybackReport<TestAttempt>, Vec<FakeOutput>, Vec<Status>) {
+        let Ok(mut res) = HostResources::new() else {
+            panic!("res");
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut seen = Vec::new();
+        let report = play_with(
+            backend,
+            &mut res,
+            &mut Files(files),
+            PlayControl {
+                on_line: &mut |_| {},
+                stop: None,
+                commands: Some(&rx),
+                on_status: Some(&mut |s: &Status| {
+                    seen.push(*s);
+                    on(s, &tx);
+                }),
+            },
+        );
+        assert!(res.consumer.is_some(), "消费端须归还");
+        (report, backend.outputs(), seen)
+    }
+
+    /// 去掉插入的静音后与期望一致：期望是输出中插入零字节后的子序列；返回插入的字节数。
+    fn without_silence(rendered: &[u8], expected: &[u8]) -> usize {
+        let (mut j, mut inserted) = (0usize, 0usize);
+        for &b in rendered {
+            if j < expected.len() && b == expected[j] {
+                j += 1;
+            } else {
+                assert_eq!(b, 0, "插入的字节须为静音");
+                inserted += 1;
+            }
+        }
+        assert_eq!(j, expected.len(), "有效字节不完整");
+        inserted
+    }
+
+    const TENTH: u64 = 4_410;
+
+    /// 跳曲、下一首、上一首（按真实时间消费的设备，位置可控）：切歌丢弃已入队的音频，
+    /// 新的输出流从目标曲目开头逐字节一致；被切走的流未排空、不记欠载。
+    #[test]
+    fn goto_next_and_prev_restart_from_target_track() {
+        let dir = track_dir("skip");
+        let tracks: Vec<(PathBuf, Vec<u8>)> =
+            (0..3).map(|k| distinct_track(&dir, k, 26_460)).collect();
+        let files: Vec<PathBuf> = tracks.iter().map(|t| t.0.clone()).collect();
+        let data = |k: usize| tracks[k].1.clone();
+
+        // 第 1 首播到 0.1 秒时跳到第 3 首。
+        let mut b = backend(&ALL, FakeDevice::Clock);
+        let mut sent = false;
+        let (r, outs, _) = run_ctl(&mut b, &files, |s, tx| {
+            if !sent && s.track == 0 && s.position_frames >= TENTH {
+                sent = tx.send(Command::Goto(2)).is_ok();
+            }
+        });
+        assert!(r.finished && r.user_skips == 1, "{r:?}");
+        assert_eq!(outs.len(), 2);
+        let first = &outs[0];
+        assert_eq!(first.report.end, RenderEnd::Stopped);
+        let played = first.report.valid_frames as usize * 4;
+        assert!(played >= TENTH as usize * 4 && played < data(0).len());
+        assert!(
+            first.rendered[..played] == data(0)[..played],
+            "被切走的曲目须是其开头"
+        );
+        assert_eq!(first.report.underrun_events, 0);
+        check_output(&outs[1], &data(2));
+        assert!(!r.software_path_intact(), "有曲目没有放完");
+        assert!(r.summary().contains("按操作切换曲目 1 次"));
+
+        // 下一首，再上一首：上一首相对正在播放的第 2 首，回到第 1 首并播完全部。
+        let mut b = backend(&ALL, FakeDevice::Clock);
+        let mut stage = 0;
+        let (r, outs, _) = run_ctl(&mut b, &files, |s, tx| match stage {
+            0 if s.track == 0 && s.position_frames >= TENTH => {
+                stage += usize::from(tx.send(Command::Next).is_ok());
+            }
+            1 if s.track == 1 && s.position_frames >= TENTH => {
+                stage += usize::from(tx.send(Command::Prev).is_ok());
+            }
+            _ => {}
+        });
+        assert!(r.finished && r.user_skips == 2, "{r:?}");
+        assert_eq!(outs.len(), 3);
+        let p1 = outs[1].report.valid_frames as usize * 4;
+        assert!(p1 >= TENTH as usize * 4 && outs[1].rendered[..p1] == data(1)[..p1]);
+        check_output(&outs[2], &[data(0), data(1), data(2)].concat());
+
+        // 停止命令：立即停止、不排空，报告标记中断。
+        let mut b = backend(&ALL, FakeDevice::Clock);
+        let mut sent = false;
+        let (r, outs, seen) = run_ctl(&mut b, &files, |s, tx| {
+            if !sent && s.position_frames >= TENTH {
+                sent = tx.send(Command::Stop).is_ok();
+            }
+        });
+        assert!(r.interrupted && !r.finished, "{r:?}");
+        assert_eq!(outs.len(), 1);
+        assert_eq!(outs[0].report.end, RenderEnd::Stopped);
+        assert_eq!(
+            seen.last().map(|s| s.active),
+            Some(false),
+            "结束时给出非活动状态"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 暂停与恢复（按真实时间消费的设备）：暂停期间设备得到静音，单独计数、不算欠载；恢复后
+    /// 有效字节逐字节一致，播放记录仍可描述为软件路径完整。状态快照反映暂停。
+    #[test]
+    fn pause_and_resume_keep_bytes_and_count_silence_separately() {
+        let dir = track_dir("pause");
+        let (path, data) = distinct_track(&dir, 7, 26_460);
+        let mut b = backend(&ALL, FakeDevice::Clock);
+        let mut stage = 0;
+        let (r, outs, seen) = run_ctl(&mut b, &[path], |s, tx| match stage {
+            0 if s.position_frames >= TENTH => {
+                stage += usize::from(tx.send(Command::Pause).is_ok());
+            }
+            1 if s.paused && s.paused_frames >= 2 * TENTH => {
+                stage += usize::from(tx.send(Command::Resume).is_ok());
+            }
+            _ => {}
+        });
+        assert_eq!(stage, 2);
+        assert!(r.software_path_intact(), "{}", r.summary());
+        assert_eq!(outs.len(), 1);
+        let o = &outs[0];
+        assert!(o.report.paused_frames >= 2 * TENTH, "{:?}", o.report);
+        assert_eq!(o.report.underrun_events, 0);
+        assert_eq!(o.report.valid_frames as usize * 4, data.len());
+        let inserted = without_silence(&o.rendered, &data);
+        // 插入的静音 = 暂停静音 + 尾部填充 + 排空。
+        let r2 = &o.report;
+        assert_eq!(
+            inserted as u64,
+            (r2.paused_frames + r2.tail_fill_frames + r2.drain_frames) * 4
+        );
+        assert!(seen.iter().any(|s| s.paused && s.device.is_some()));
+        assert!(r.summary().contains("暂停：送出静音"), "{}", r.summary());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 设备启动前暂停：预填完成后不启动，恢复后才启动；没有暂停静音，输出逐字节一致。
+    #[test]
+    fn pause_before_start_defers_device_start() {
+        let dir = track_dir("prestart");
+        let (path, data) = distinct_track(&dir, 9, 44_100);
+        for device in DEVICES {
+            let mut b = backend(&ALL, device);
+            let mut stage = 0;
+            let (r, outs, seen) = run_ctl(&mut b, std::slice::from_ref(&path), |s, tx| {
+                match stage {
+                    0 => stage += usize::from(tx.send(Command::Pause).is_ok()),
+                    // 状态快照节流 100 ms：此时预填早已完成，设备仍未启动。
+                    1 if s.paused && s.device.is_some() => {
+                        stage += usize::from(tx.send(Command::Resume).is_ok());
+                    }
+                    _ => {}
+                }
+            });
+            assert_eq!(stage, 2, "{device:?}");
+            assert!(r.software_path_intact(), "{device:?} {}", r.summary());
+            assert_eq!(outs.len(), 1);
+            assert_eq!(outs[0].report.paused_frames, 0, "{device:?}");
+            check_output(&outs[0], &data);
+            assert!(seen.iter().any(|s| s.paused && s.position_frames == 0));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

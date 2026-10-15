@@ -22,7 +22,9 @@ pub mod signal;
 pub mod testing;
 
 pub use backend::{Backend, PendingStream, RunningStream};
-pub use player::{PlayControl, TrackSource, play, play_source, play_with};
+pub use player::{
+    Command, PlayControl, STATUS_INTERVAL, Status, TrackSource, play, play_source, play_with,
+};
 pub use report::{
     AppliedParams, AttemptRecord, Evidence, Negotiation, OpenFailure, PhysicalSpeakers,
     PlaybackReport, RateProbe, StreamReport, Submission, fault_text,

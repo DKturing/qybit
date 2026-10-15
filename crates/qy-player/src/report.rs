@@ -236,6 +236,8 @@ pub struct PlaybackReport<A> {
     pub device_error: bool,
     /// 按用户要求中断（如 Ctrl+C）。
     pub interrupted: bool,
+    /// 按用户操作切换曲目（上一首、下一首、跳曲）的次数；被切走的曲目没有放完。
+    pub user_skips: u32,
     pub protocol_errors: u32,
 }
 
@@ -252,6 +254,7 @@ impl<A> Default for PlaybackReport<A> {
             finished: false,
             device_error: false,
             interrupted: false,
+            user_skips: 0,
             protocol_errors: 0,
         }
     }
@@ -509,6 +512,13 @@ impl<A: AttemptRecord> PlaybackReport<A> {
                         r.underrun_events,
                         r.underrun_frames
                     );
+                    if r.paused_frames > 0 {
+                        let _ = writeln!(
+                            o,
+                            "  暂停：送出静音 {} 帧（按操作暂停，不是欠载）",
+                            r.paused_frames
+                        );
+                    }
                     for u in r.underrun_records() {
                         let _ = writeln!(
                             o,
@@ -551,6 +561,13 @@ impl<A: AttemptRecord> PlaybackReport<A> {
         }
         if self.interrupted {
             o.push_str("已按用户要求中断（未排空，正在播放的曲目没有放完）。\n");
+        }
+        if self.user_skips > 0 {
+            let _ = writeln!(
+                o,
+                "按操作切换曲目 {} 次（被切走的曲目没有放完）。",
+                self.user_skips
+            );
         }
         if self.software_path_intact() && !self.channels_altered.is_empty() {
             o.push_str(

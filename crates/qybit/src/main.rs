@@ -299,6 +299,8 @@ fn play_live<B: qy_player::Backend>(
                 let _ = std::io::stdout().flush();
             },
             stop,
+            commands: None,
+            on_status: None,
         },
     );
     println!("\n—— 播放报告 ——");

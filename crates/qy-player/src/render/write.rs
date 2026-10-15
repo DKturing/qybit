@@ -8,6 +8,8 @@
 //!   （写入序号、设备帧位置、后端报告的缺失帧），用 `recover` 恢复后重新预填、再启动；
 //!   该段播放记录因此不能描述为完整保真。
 //! - 已确认 EOF 且队列已空：`drain` 播完已写入的音频后结束。
+//! - 暂停时（已启动）按可写空间写入静音、不从队列取数，单独计数，不记为欠载；尚未启动时
+//!   暂停则不启动。已确认 EOF 且队列已空时照常排空。
 //! - 收到停止请求立即 `stop`（丢弃设备中数据），不排空；API 错误立即结束并报告。
 //!
 //! 本循环只做有界搬运与计数：不解码、不 pack、不分配、不读文件、不等待 UI；
@@ -19,7 +21,7 @@ use std::time::Duration;
 use qy_pcm_format::ring::FrameConsumer;
 
 use super::{
-    ApiError, ApiOp, ErrorCode, RenderControl, RenderEnd, RenderReport, ThreadPriority,
+    ApiError, ApiOp, ErrorCode, RenderControl, RenderEnd, RenderReport, SILENCE, ThreadPriority,
     UnderrunRecord, WaitResult, with_priority,
 };
 
@@ -130,6 +132,19 @@ impl<A: WriteApi> Loop<'_, A> {
                 self.api.drain()?;
                 return Ok(RenderEnd::Drained);
             }
+            if self.ctl.pause.load(Ordering::Acquire) {
+                if !started {
+                    std::thread::sleep(self.cfg.idle_sleep);
+                    continue;
+                }
+                self.wait()?;
+                if let Some(missing) = self.silence(report)? {
+                    self.xrun(report, missing)?;
+                    started = false;
+                    since_prepare = 0;
+                }
+                continue;
+            }
             if started {
                 match self.api.wait(self.cfg.event_timeout_ms)? {
                     WaitResult::Signaled => {}
@@ -179,6 +194,38 @@ impl<A: WriteApi> Loop<'_, A> {
             if fill.frames == 0 && !fill.full && !(eof && queue_empty) {
                 std::thread::sleep(self.cfg.idle_sleep);
             }
+        }
+    }
+
+    /// 已启动时等待设备可写；超时为错误。
+    fn wait(&mut self) -> Result<(), ApiError> {
+        match self.api.wait(self.cfg.event_timeout_ms)? {
+            WaitResult::Signaled => Ok(()),
+            WaitResult::Timeout => Err(ApiError {
+                op: ApiOp::Wait,
+                code: ErrorCode::Timeout,
+            }),
+        }
+    }
+
+    /// 暂停：在可写空间内写入静音（不取队列）。设备已取空时返回缺失帧数。
+    fn silence(&mut self, report: &mut RenderReport) -> Result<Option<u32>, ApiError> {
+        let ba = self.cfg.block_align.max(1);
+        let room = match self.api.avail()? {
+            Avail::Ready(n) => n,
+            Avail::Xrun { missing_frames } => return Ok(Some(missing_frames)),
+        };
+        let frames = (room as usize).min(SILENCE.len() / ba);
+        if frames == 0 {
+            std::thread::sleep(self.cfg.idle_sleep);
+            return Ok(None);
+        }
+        match self.api.write(&SILENCE[..frames * ba])? {
+            Written::Frames(n) => {
+                report.paused(self.ctl, u64::from(n));
+                Ok(None)
+            }
+            Written::Xrun { missing_frames } => Ok(Some(missing_frames)),
         }
     }
 
@@ -472,5 +519,62 @@ mod tests {
         assert_eq!(r.end, RenderEnd::Drained);
         assert_eq!(r.valid_frames, 0);
         assert!(!api.calls.contains(&WCall::Start));
+    }
+
+    /// 暂停（GUI T2）：已启动时按可写空间写静音、不取队列、单独计数，不记为欠载；恢复后有效
+    /// 字节从暂停处继续，逐字节一致，最后照常排空。
+    #[test]
+    fn pause_writes_silence_without_consuming_queue() {
+        let f = fmt(8_000, 1, 16, 16);
+        let play = 80u32;
+        let (mut p, mut c) = ring(&f, 64_000);
+        let mut feeder = Feeder::new("pcm16_mono_8k_fmt18.wav", f, 20);
+        feeder.feed(&mut p, usize::MAX);
+        let expected = {
+            let raw = data_chunk(&fixture("pcm16_mono_8k_fmt18.wav"));
+            raw.repeat(20)
+        };
+        let ctl = Arc::new(RenderControl::default());
+        ctl.eof.store(true, Ordering::Release);
+        let hook_ctl = Arc::clone(&ctl);
+        // 第 5–14 次查询可写空间时处于暂停。
+        let hook = move |i: u64| {
+            hook_ctl
+                .pause
+                .store((5..15).contains(&i), Ordering::Release)
+        };
+        let mut api = FakeWriteApi::new(
+            256,
+            2,
+            7,
+            WriteWait::Scripted {
+                hook: Box::new(hook),
+                play,
+            },
+        );
+        let mut prio = FakePriority::default();
+        let r = render(&mut api, &mut prio, &mut c, &ctl, cfg(&f));
+        assert_eq!(r.end, RenderEnd::Drained);
+        assert_eq!(r.underrun_events, 0, "{r:?}");
+        assert!(r.paused_frames > 0);
+        assert_eq!(ctl.paused_frames.load(Ordering::Acquire), r.paused_frames);
+        assert_eq!(r.valid_frames, expected.len() as u64 / 2);
+        assert_eq!(
+            api.rendered.len() as u64,
+            (r.valid_frames + r.paused_frames) * 2
+        );
+        // 去掉插入的静音后与源一致：源是插入零字节后的子序列，且插入的字节数等于暂停帧。
+        let (mut j, mut inserted) = (0usize, 0u64);
+        for &b in &api.rendered {
+            if j < expected.len() && b == expected[j] {
+                j += 1;
+            } else {
+                assert_eq!(b, 0, "插入的字节须为静音");
+                inserted += 1;
+            }
+        }
+        assert_eq!(j, expected.len(), "有效字节不完整");
+        assert_eq!(inserted, r.paused_frames * 2);
+        check_write_calls(&api.calls);
     }
 }

@@ -646,13 +646,21 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
     /// 正在播放的曲目：队列中最后一个已开始播放的曲目边界；尚无输出时为正在解码的曲目。
     /// 上一首/下一首以此为准。
     pub fn playing_track(&self) -> u32 {
+        self.playing_progress().0
+    }
+
+    /// 正在播放的曲目与该曲目已由设备取走的帧数（设备格式帧；含设备缓冲中尚未发声的部分，
+    /// 最多一个设备缓冲）。尚无输出时为正在解码的曲目与 0。供界面显示播放进度。
+    pub fn playing_progress(&self) -> (u32, u64) {
         let consumed = self.consumed_frames();
         self.marks[..self.marks_len]
             .iter()
             .rev()
             .find(|m| m.1 <= consumed)
             .or(self.marks[..self.marks_len].first())
-            .map_or(self.core.track(), |m| m.0)
+            .map_or((self.core.track(), 0), |m| {
+                (m.0, consumed.saturating_sub(m.1))
+            })
     }
 
     /// 丢弃已播完曲目的边界；返回是否还能记录新边界。

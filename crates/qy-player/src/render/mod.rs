@@ -6,6 +6,9 @@
 //! - [`write`]：支持短写的后端（ALSA `writei`）。只提交队列中已有的完整帧，设备只接受
 //!   一部分时其余留在队列，下次继续；不补静音，设备取空由后端报告为 xrun（欠载）。
 //!
+//! 暂停（[`RenderControl::pause`]）时两个循环都向设备送静音、不从队列取数，静音帧单独计数，
+//! 不记为欠载（引擎规定的暂停语义）。
+//!
 //! 两个循环都只做有界拷贝/搬运与计数：不解码、不 pack、不分配、不读文件、不等待 UI。
 
 pub mod packet;
@@ -13,6 +16,9 @@ pub mod write;
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// 暂停时短写后端写出的静音来源（只读，不分配）。按整帧取用，帧宽不超过 18 声道 × 4 字节。
+static SILENCE: [u8; 4608] = [0; 4608];
 
 /// 保留的欠载明细条数（超出部分只计数）。
 pub const MAX_UNDERRUN_RECORDS: usize = 64;
@@ -24,6 +30,10 @@ pub struct RenderControl {
     pub eof: AtomicBool,
     /// 立即停止，不排空。
     pub stop: AtomicBool,
+    /// 暂停：设备输出静音，不从队列取数（可随时恢复）。
+    pub pause: AtomicBool,
+    /// 暂停期间送出的静音帧数（实时可读，不是欠载）。
+    pub paused_frames: AtomicU64,
     /// 生产端累计入队帧数。
     pub pushed_frames: AtomicU64,
     /// 渲染线程累计提交的有效帧数。
@@ -144,6 +154,8 @@ pub struct RenderReport {
     pub tail_fill_frames: u64,
     /// 排空阶段整包静音帧（仅整包后端）。
     pub drain_frames: u64,
+    /// 暂停期间送出的静音帧（不是欠载）。
+    pub paused_frames: u64,
     pub underrun_frames: u64,
     pub underrun_events: u64,
     pub underruns: [Option<UnderrunRecord>; MAX_UNDERRUN_RECORDS],
@@ -160,6 +172,7 @@ impl RenderReport {
             valid_frames: 0,
             tail_fill_frames: 0,
             drain_frames: 0,
+            paused_frames: 0,
             underrun_frames: 0,
             underrun_events: 0,
             underruns: [None; MAX_UNDERRUN_RECORDS],
@@ -182,6 +195,11 @@ impl RenderReport {
         ctl.underrun_events.fetch_add(1, Ordering::Release);
         ctl.underrun_frames
             .fetch_add(u64::from(record.missing_frames), Ordering::Release);
+    }
+
+    fn paused(&mut self, ctl: &RenderControl, frames: u64) {
+        self.paused_frames += frames;
+        ctl.paused_frames.fetch_add(frames, Ordering::Release);
     }
 
     fn valid(&mut self, ctl: &RenderControl, frames: u64) {

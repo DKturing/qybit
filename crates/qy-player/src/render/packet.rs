@@ -11,6 +11,8 @@
 //!   已确认 EOF（该格式不再有数据）后的不足是尾部整包填充，单独计数。
 //! - 排空：最后一包有效音频提交后，再提交 [`PacketConfig::drain_packets`] 个静音包，
 //!   等其对应事件到达（即最后的有效音频已由设备取走播放）后 `stop`。
+//! - 暂停时整包写静音、不从队列取数，单独计数，不记为欠载；排空阶段的包本来就是静音，
+//!   不受暂停影响。
 //! - 收到停止请求立即 `stop`，不排空；API 错误（如设备失效）立即结束并报告。
 //! - 线程开始时提升优先级，结束（正常、停止、错误）时在本线程撤销。
 //!
@@ -121,13 +123,14 @@ impl<A: PacketApi> Loop<'_, A> {
         // 先读 EOF 再取数据：生产端在推入最后一帧之后才置位，
         // 因此读到 EOF 时该格式的全部数据已对本线程可见。
         let eof = self.ctl.eof.load(Ordering::Acquire);
+        let paused = self.drain_left.is_none() && self.ctl.pause.load(Ordering::Acquire);
         let frames = self.cfg.buffer_frames;
         let ba = self.cfg.block_align;
         let packet_index = report.packets;
         let device_frame = packet_index * u64::from(frames);
         let buf = self.api.get_buffer(frames)?;
         let len_ok = buf.len() == frames as usize * ba;
-        let got = if len_ok && self.drain_left.is_none() {
+        let got = if len_ok && self.drain_left.is_none() && !paused {
             if !eof {
                 report
                     .watermark
@@ -151,6 +154,10 @@ impl<A: PacketApi> Loop<'_, A> {
         }
         let missing = frames - got as u32;
         report.packets += 1;
+        if paused {
+            report.paused(self.ctl, u64::from(frames));
+            return Ok(());
+        }
         report.valid(self.ctl, got as u64);
         match self.drain_left {
             Some(left) => {
@@ -418,5 +425,45 @@ mod tests {
         );
         assert_eq!(prio.reverts.load(Ordering::SeqCst), 0);
         assert_eq!(r.end, RenderEnd::Drained);
+    }
+
+    /// 暂停（GUI T2）：暂停期间整包送静音、不取队列、单独计数，不记为欠载；恢复后有效字节
+    /// 从暂停处继续，逐字节一致。
+    #[test]
+    fn pause_sends_silence_packets_without_consuming_queue() {
+        let f = fmt(44_100, 2, 16, 16);
+        let (mut p, mut c) = ring(&f, 768_000);
+        let mut feeder = Feeder::new("pcm16_stereo_44k.wav", f, 40);
+        feeder.feed(&mut p, usize::MAX);
+        let expected = data_chunk(&fixture("pcm16_stereo_44k.wav")).repeat(40);
+        let ctl = Arc::new(RenderControl::default());
+        ctl.eof.store(true, Ordering::Release);
+        let hook_ctl = Arc::clone(&ctl);
+        // 第 2–6 次等待之后的包暂停（5 包）。
+        let hook = move |w: u64| {
+            hook_ctl
+                .pause
+                .store((2..=6).contains(&w), Ordering::Release)
+        };
+        let mut api = FakeApi::new(B, 4, WaitMode::Scripted(Box::new(hook)));
+        let mut prio = FakePriority::default();
+        let r = render(&mut api, &mut prio, &mut c, &ctl, cfg(B, &f));
+        assert_eq!(r.end, RenderEnd::Drained);
+        assert_eq!(r.paused_frames, 5 * u64::from(B));
+        assert_eq!(ctl.paused_frames.load(Ordering::Acquire), r.paused_frames);
+        assert_eq!(r.underrun_events, 0);
+        assert_eq!(r.valid_frames, expected.len() as u64 / 4);
+        let pkt = B as usize * 4;
+        // 首包在启动前、第 k 次等待之后为第 k+1 包：第 3–7 包（从 0 起）是暂停静音。
+        for k in 3..=7 {
+            assert!(api.rendered[k * pkt..(k + 1) * pkt].iter().all(|&x| x == 0));
+        }
+        let valid: Vec<u8> = [&api.rendered[..3 * pkt], &api.rendered[8 * pkt..]]
+            .concat()
+            .into_iter()
+            .take(expected.len())
+            .collect();
+        assert!(valid == expected, "有效字节不一致");
+        check_calls(&api.calls, B);
     }
 }
