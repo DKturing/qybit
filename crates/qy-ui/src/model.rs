@@ -142,6 +142,21 @@ impl Model {
             .map(|i| &self.entries[i])
     }
 
+    /// 正在播放的曲目的播放位置与总长度（帧，文件头声明）及采样率（S1）。总长度未知（如 FLAC
+    /// 总样本数为 0、WAV 占位长度）或尚无状态时为 `None`。
+    pub fn playing_position(&self) -> Option<(u64, u64, u32)> {
+        let s = self.playing.as_ref()?.status?;
+        let Probe::Ready(info) = &self.playing_info()?.probe else {
+            return None;
+        };
+        let total = info.frames.filter(|&n| n > 0)?;
+        Some((
+            s.position_frames.min(total),
+            total,
+            info.format.sample_rate(),
+        ))
+    }
+
     pub fn is_paused(&self) -> bool {
         self.playing
             .as_ref()
@@ -376,6 +391,41 @@ impl Ui {
         Changes {
             status: true,
             ..Default::default()
+        }
+    }
+
+    /// 在正在播放的曲目内定位到第 `frame` 帧（S1）：丢弃已入队的音频，从该帧开始；暂停状态保持；
+    /// 等于或超过曲目长度时进入下一首。
+    pub fn seek(&mut self, frame: u64) {
+        if let Some(p) = self.model.playing.as_mut()
+            && !p.stopping
+        {
+            send(p, Command::Seek(frame));
+        }
+    }
+
+    /// 按总长度的千分比定位（进度条）。总长度未知时不做。
+    pub fn seek_permille(&mut self, permille: u32) {
+        if let Some((_, total, _)) = self.model.playing_position() {
+            let frame = u128::from(total) * u128::from(permille.min(1000)) / 1000;
+            self.seek(
+                u64::try_from(frame)
+                    .unwrap_or(u64::MAX)
+                    .min(total.saturating_sub(1)),
+            );
+        }
+    }
+
+    /// 相对当前位置前后移动 `seconds` 秒（键盘 ←/→），不早于曲目开头；越过结尾时进入下一首。
+    pub fn seek_by(&mut self, seconds: i64) {
+        if let Some((pos, _, rate)) = self.model.playing_position() {
+            let delta = seconds.unsigned_abs().saturating_mul(u64::from(rate));
+            let frame = if seconds < 0 {
+                pos.saturating_sub(delta)
+            } else {
+                pos.saturating_add(delta)
+            };
+            self.seek(frame);
         }
     }
 

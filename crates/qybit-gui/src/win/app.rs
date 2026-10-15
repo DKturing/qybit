@@ -23,6 +23,8 @@ pub const IDC_MONO: u16 = 203;
 pub const IDC_LOG: u16 = 204;
 pub const IDC_STATUS: u16 = 205;
 pub const IDC_FORMAT: u16 = 206;
+/// 进度条（S1 定位）：范围 0–1000（千分比）。
+pub const IDC_SEEK: u16 = 207;
 
 /// 播放列表的列：标题与宽度（96 DPI 下的像素）。
 pub const COLUMNS: [(&str, i32); 5] = [
@@ -46,6 +48,10 @@ pub enum Input {
     Mono(bool),
     /// 拖放或对话框选中的文件与文件夹。
     Paths(Vec<PathBuf>),
+    /// 进度条松开：按千分比定位（S1）。
+    Seek(u32),
+    /// 键盘 ←/→：相对当前位置前后移动若干秒（S1）。
+    SeekBy(i64),
     /// 后台线程有新事件。
     Notify,
 }
@@ -65,6 +71,8 @@ pub enum Op {
     },
     Log(String),
     PlayLabel(&'static str),
+    /// 进度条位置（千分比）；`None` 时不可用（未播放或总长度未知）。
+    Seekbar(Option<u32>),
     OpenFiles,
     OpenFolder,
     About,
@@ -123,6 +131,14 @@ impl App {
             }
             Input::Mono(on) => self.ui.set_mono_to_stereo(on),
             Input::Paths(paths) => self.ui.add_paths(paths),
+            Input::Seek(permille) => {
+                self.ui.seek_permille(permille);
+                Changes::default()
+            }
+            Input::SeekBy(seconds) => {
+                self.ui.seek_by(seconds);
+                Changes::default()
+            }
             Input::Notify => self.ui.pump(),
         };
         self.ops(changes)
@@ -142,6 +158,11 @@ impl App {
                 format: text::format_line(m),
             });
             ops.push(Op::PlayLabel(self.play_label()));
+            ops.push(Op::Seekbar(self.ui.model.playing_position().map(
+                |(pos, total, _)| {
+                    u32::try_from(u128::from(pos) * 1000 / u128::from(total.max(1))).unwrap_or(1000)
+                },
+            )));
         }
         if c.log {
             let lines: Vec<&str> = m.log.iter().map(String::as_str).collect();
@@ -158,6 +179,18 @@ impl App {
             log: true,
             session: true,
         })
+    }
+
+    /// 拖动进度条时的预览文字（不定位）。
+    pub fn seek_preview(&self, permille: u32) -> Option<String> {
+        let (_, total, rate) = self.ui.model.playing_position()?;
+        let frame =
+            u64::try_from(u128::from(total) * u128::from(permille.min(1000)) / 1000).ok()?;
+        Some(format!(
+            "松开后定位到 {} / {}",
+            text::duration(frame, rate),
+            text::duration(total, rate)
+        ))
     }
 
     fn play_label(&self) -> &'static str {

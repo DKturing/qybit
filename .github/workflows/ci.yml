@@ -277,6 +277,14 @@ jobs:
           $p = Gui $sim "ok" "short" $null
           Cmd $p 101; Start-Sleep -Seconds 4; Shot $p "10-播放完成"
           Close $p
+          # S1 定位：进度条设到一半，按松开滑块的方式（TB_ENDTRACK）定位。
+          $p = Gui $sim "ok" "stereo44" $null
+          Cmd $p 101; Start-Sleep -Milliseconds 1500
+          $tb = [W]::GetDlgItem($p.MainWindowHandle, 207)
+          [void][W]::SendInt($tb, 0x0405, [IntPtr]1, [IntPtr]500)
+          [void][W]::PostMessageW($p.MainWindowHandle, 0x0114, [IntPtr]8, $tb)
+          Start-Sleep -Seconds 2; Shot $p "12-定位到一半"
+          Close $p
           $p = Gui $rel $null $null @("`"$((Resolve-Path crates/qy-codec-wav/tests/fixtures/pcm16_stereo_44k.wav).Path)`"")
           Cmd $p 101; Start-Sleep -Seconds 3; Shot $p "11-真实WASAPI"
           Close $p

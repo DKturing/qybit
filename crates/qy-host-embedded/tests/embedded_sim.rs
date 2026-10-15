@@ -11,6 +11,7 @@
 //! 7. 板级能力不足（缺采样率、只支持双声道）；
 //! 8. 无文件系统的存储（曲目表 + `embedded_storage::ReadStorage` 闪存）：同一夹具播放列表与读错误；
 //! 9. O1：串口命令 `mono-to-stereo` 开启单声道复制（只支持双声道的板），播放中关闭只影响之后的曲目。
+//! 10. S1：串口命令 `seek`（FAT 与无文件系统存储）：定位后的输出从目标帧起与参考逐字节一致。
 
 mod common;
 
@@ -345,7 +346,7 @@ fn read_error_card_removal_and_rescan() {
 }
 
 /// 把一串字节送入行缓冲，执行命令，收集回应。
-fn send(p: &mut SimPlayer, lb: &mut LineBuffer<32>, bytes: &[u8]) -> String {
+fn send<S: Storage>(p: &mut SimPlayerWith<S>, lb: &mut LineBuffer<32>, bytes: &[u8]) -> String {
     let mut out = String::new();
     for &b in bytes {
         match lb.push(b) {
@@ -463,6 +464,64 @@ fn serial_commands() {
         let _ = write_notice(&mut ev, n);
     }
     eprintln!("{ev}");
+}
+
+/// S1：串口命令 `seek <毫秒>`。空闲时报错；L1（48 kHz）播放约 0.5 s 后定位到 1500 ms（第
+/// 72 000 帧）：此前的输出是 L1 的前缀，之后的段依次为 L1 从目标帧起的部分、L2、L3，与参考逐字节
+/// 一致，不计欠载。`storage` 为 FAT 或无文件系统两种存储。
+fn seek_script<S: Storage>(p: &mut SimPlayerWith<S>, w: &Shared, tracks: &[Track], what: &str) {
+    let mut lb = LineBuffer::<32>::new();
+    assert_eq!(send(p, &mut lb, b"seek 100\n"), "ERR seek idle\n", "{what}");
+    assert_eq!(send(p, &mut lb, b"seek\n"), "ERR bad-argument\n", "{what}");
+    assert!(p.play(0));
+    let (mut stage, mut t_mark, mut log) = (0, 0u64, String::new());
+    let mut notices = Vec::new();
+    run(p, w, 60_000_000, &mut notices, |p, w, n| {
+        let now = w.borrow().now;
+        let mut lb = LineBuffer::<32>::new();
+        match stage {
+            0 if n.iter().any(|n| matches!(n, Notice::Device { .. })) => {
+                t_mark = now;
+                stage = 1;
+            }
+            1 if now >= t_mark + 500_000 => {
+                log += &send(p, &mut lb, b"seek 1500\n");
+                stage = 2;
+            }
+            _ => {}
+        }
+    });
+    assert_eq!(log, "OK seek track=0 frame=72000\n", "{what}");
+    assert_eq!(notices.last(), Some(&Notice::Finished), "{what}");
+    let s = p.status();
+    assert_eq!(s.output.underruns, 0, "{what}：{s:?}");
+    let want = expected(tracks, &[true; 3], &[None; 3]);
+    let fb = want[0].4.len() / 144_000;
+    let wb = w.borrow();
+    let got: Vec<&common::Segment> = wb.segments.iter().filter(|s| !s.data.is_empty()).collect();
+    assert_eq!(got.len(), 4, "{what}：段数");
+    assert!(
+        got[0].data.len() < 72_000 * fb && want[0].4.starts_with(&got[0].data),
+        "{what}：定位前应为 L1 的前缀"
+    );
+    assert!(got[1].data == want[0].4[72_000 * fb..], "{what}：定位后");
+    assert!(
+        got[2].data == want[1].4 && got[3].data == want[2].4,
+        "{what}：L2、L3"
+    );
+}
+
+#[test]
+fn seek_command_restarts_at_target() {
+    let tracks = long_playlist();
+    let Ok((mut p, w, _)) = setup(disk(image(&tracks)), caps(), TIMING, ErrorPolicy::Skip) else {
+        panic!("时序");
+    };
+    seek_script(&mut p, &w, &tracks, "FAT");
+    let Ok((mut p, w)) = setup_flat(&tracks, disk(Vec::new()), TIMING, ErrorPolicy::Skip) else {
+        panic!("时序");
+    };
+    seek_script(&mut p, &w, &tracks, "无文件系统");
 }
 
 #[test]

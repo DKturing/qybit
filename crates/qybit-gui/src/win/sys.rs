@@ -25,13 +25,17 @@ use windows::Win32::UI::Controls::{
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMCOUNT, LVN_GETDISPINFOW, LVN_KEYDOWN, LVNI_SELECTED,
     LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_GRIDLINES, LVS_OWNERDATA, LVS_REPORT,
     LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, NM_DBLCLK, NMHDR, NMITEMACTIVATE, NMLVDISPINFOW,
-    NMLVKEYDOWN, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW, WC_COMBOBOXW, WC_LISTVIEWW,
+    NMLVKEYDOWN, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW, TB_ENDTRACK, TB_THUMBTRACK,
+    TBM_SETPOS, TBM_SETRANGEMAX, TBM_SETRANGEMIN, TBS_HORZ, TBS_NOTICKS, TRACKBAR_CLASSW,
+    WC_COMBOBOXW, WC_LISTVIEWW,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
     SystemParametersInfoForDpi,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DELETE, VK_RETURN, VK_SPACE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, VK_DELETE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE,
+};
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST,
@@ -47,15 +51,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PostMessageW, PostQuitMessage, RegisterClassW, SPI_GETNONCLIENTMETRICS, SW_SHOW,
     SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetMenu, SetWindowPos, SetWindowTextW, ShowWindow,
     TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_DPICHANGED, WM_DROPFILES, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD,
-    WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    WM_DPICHANGED, WM_DROPFILES, WM_HSCROLL, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSW, WS_BORDER,
+    WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
 use super::app::{
     App, COLUMNS, ID_ABOUT, ID_ADD_FILES, ID_ADD_FOLDER, ID_CLEAR, ID_EXIT, ID_NEXT, ID_PLAY,
-    ID_PREV, ID_REMOVE, ID_STOP, IDC_DEVICE, IDC_FORMAT, IDC_LIST, IDC_LOG, IDC_MONO, IDC_STATUS,
-    Input, Op, about_text,
+    ID_PREV, ID_REMOVE, ID_STOP, IDC_DEVICE, IDC_FORMAT, IDC_LIST, IDC_LOG, IDC_MONO, IDC_SEEK,
+    IDC_STATUS, Input, Op, about_text,
 };
 use super::sim::Sim;
 
@@ -64,6 +68,8 @@ use super::sim::Sim;
 const SS_LEFT: u32 = 0x0000;
 const SS_NOPREFIX: u32 = 0x0080;
 const SS_ENDELLIPSIS: u32 = 0x4000;
+/// 进度条当前位置（commctrl.h：`TBM_GETPOS` 定义为 `WM_USER`，0x400）；windows crate 未导出。
+const TBM_GETPOS: u32 = 0x0400;
 
 /// 后台线程有新事件（`PostMessageW` 投递，跨线程安全）。
 const WM_QY_NOTIFY: u32 = WM_APP + 1;
@@ -80,6 +86,7 @@ struct Handles {
     log: HWND,
     status: HWND,
     format: HWND,
+    seek: HWND,
 }
 
 thread_local! {
@@ -88,6 +95,8 @@ thread_local! {
     static FONT: Cell<HFONT> = const { Cell::new(HFONT(std::ptr::null_mut())) };
     /// 状态栏是否分两栏（第二栏为保真状态；未播放时只有一栏，结论文字可用整行）。
     static TWO_PARTS: Cell<bool> = const { Cell::new(false) };
+    /// 正在拖动进度条：此间不按播放状态移动滑块（S1）。
+    static DRAGGING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// 跨线程通知状态：主窗口句柄（整数形式）与“已投递未处理”标志（合并连续通知）。
@@ -312,7 +321,17 @@ fn create(title: &str) -> Option<Handles> {
                 0,
                 IDC_FORMAT,
             )?,
+            seek: child(
+                TRACKBAR_CLASSW,
+                w!(""),
+                WS_TABSTOP | WINDOW_STYLE(TBS_HORZ | TBS_NOTICKS),
+                0,
+                IDC_SEEK,
+            )?,
         };
+        SendMessageW(h.seek, TBM_SETRANGEMIN, Some(WPARAM(0)), Some(LPARAM(0)));
+        SendMessageW(h.seek, TBM_SETRANGEMAX, Some(WPARAM(1)), Some(LPARAM(1000)));
+        let _ = EnableWindow(h.seek, false);
         HANDLES.set(Some(h));
         SendMessageW(
             h.list,
@@ -494,7 +513,9 @@ fn layout(h: &Handles) {
             fmt_h,
             true,
         );
-        let top = fmt_y + fmt_h + s(2);
+        let (seek_y, seek_h) = (fmt_y + fmt_h, s(26));
+        let _ = MoveWindow(h.seek, s(2), seek_y, (rc.right - s(4)).max(0), seek_h, true);
+        let top = seek_y + seek_h + s(2);
         let free = (rc.bottom - top - status_h).max(0);
         let log_h = (free / 4).max(s(60)).min(free);
         let _ = MoveWindow(h.list, 0, top, rc.right, free - log_h, true);
@@ -604,6 +625,17 @@ fn exec(op: Op) {
                 }
             }
         }
+        Op::Seekbar(pos) => unsafe {
+            let _ = EnableWindow(h.seek, pos.is_some());
+            if !DRAGGING.get() {
+                SendMessageW(
+                    h.seek,
+                    TBM_SETPOS,
+                    Some(WPARAM(1)),
+                    Some(LPARAM(pos.unwrap_or(0) as isize)),
+                );
+            }
+        },
         Op::Log(text) => {
             let t = wide(&text);
             unsafe {
@@ -783,6 +815,44 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             dispatch(Input::Notify);
             LRESULT(0)
         }
+        // 进度条（S1）：拖动时只在状态栏预览时间，松开（TB_ENDTRACK，键盘与点击滑轨也以此结束）
+        // 时按滑块位置定位。
+        WM_HSCROLL => {
+            if let Some(h) = HANDLES.get()
+                && lparam.0 == h.seek.0 as isize
+            {
+                match u32::from(loword(wparam.0)) {
+                    TB_THUMBTRACK => {
+                        DRAGGING.set(true);
+                        let preview = APP.with(|a| {
+                            a.try_borrow()
+                                .ok()
+                                .and_then(|g| g.as_ref()?.seek_preview(u32::from(hiword(wparam.0))))
+                        });
+                        if let Some(t) = preview {
+                            let t = wide(&t);
+                            // SAFETY: 状态栏句柄有效；文本缓冲在调用期间有效。
+                            unsafe {
+                                SendMessageW(
+                                    h.status,
+                                    SB_SETTEXTW,
+                                    Some(WPARAM(0)),
+                                    Some(LPARAM(t.as_ptr() as isize)),
+                                );
+                            }
+                        }
+                    }
+                    TB_ENDTRACK => {
+                        DRAGGING.set(false);
+                        // SAFETY: 进度条句柄有效；只读查询。
+                        let pos = unsafe { SendMessageW(h.seek, TBM_GETPOS, None, None) };
+                        dispatch(Input::Seek(u32::try_from(pos.0).unwrap_or(0)));
+                    }
+                    _ => {}
+                }
+            }
+            LRESULT(0)
+        }
         WM_COMMAND => {
             let (id, code) = (loword(wparam.0), hiword(wparam.0));
             match id {
@@ -835,6 +905,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                                     }
                                 }
                                 v if v == VK_SPACE.0 => dispatch(Input::Command(ID_PLAY)),
+                                v if v == VK_LEFT.0 => dispatch(Input::SeekBy(-5)),
+                                v if v == VK_RIGHT.0 => dispatch(Input::SeekBy(5)),
                                 _ => {}
                             }
                         }

@@ -427,6 +427,89 @@ fn slow_reads_show_underruns() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 44.1 kHz 16 位双声道、各样本不同（不周期重复）的 WAV；返回 data 块。
+fn distinct_wav(path: &Path, frames: usize) -> Vec<u8> {
+    let data: Vec<u8> = (0..frames as u32 * 2)
+        .flat_map(|i| ((i.wrapping_mul(2_654_435_761) >> 16) as u16).to_le_bytes())
+        .collect();
+    let mut f = Vec::new();
+    f.extend_from_slice(b"RIFF");
+    f.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    f.extend_from_slice(b"WAVEfmt ");
+    f.extend_from_slice(&16u32.to_le_bytes());
+    f.extend_from_slice(&1u16.to_le_bytes());
+    f.extend_from_slice(&2u16.to_le_bytes());
+    f.extend_from_slice(&44_100u32.to_le_bytes());
+    f.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+    f.extend_from_slice(&4u16.to_le_bytes());
+    f.extend_from_slice(&16u16.to_le_bytes());
+    f.extend_from_slice(b"data");
+    f.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    f.extend_from_slice(&data);
+    if let Err(e) = std::fs::write(path, f) {
+        panic!("{e}");
+    }
+    data
+}
+
+/// S1：界面定位。按帧、按进度条千分比与按秒（←/→）定位：新的输出流从目标帧起与文件数据逐字节
+/// 一致，状态位置从目标帧算起，结束报告写明按操作定位；向前越过开头时从头开始。
+#[test]
+fn seek_from_ui_restarts_at_target() {
+    let dir = temp("seek");
+    let path = dir.join("distinct.wav");
+    let data = distinct_wav(&path, 44_100);
+    let b = clock_backend();
+    let outputs = b.clone();
+    let mut ui = ui_with(b);
+    ui.add_paths(vec![path]);
+    assert!(until(&mut ui, 10, all_probed));
+    type Act = fn(&mut Ui);
+    let cases: [(&str, Act, u64); 3] = [
+        ("帧", |u| u.seek(20_000), 20_000),
+        ("千分比", |u| u.seek_permille(500), 22_050),
+        ("向前越过开头", |u| u.seek_by(-10), 0),
+    ];
+    for (what, act, target) in cases {
+        let before = outputs.outputs().len();
+        ui.play_from(0);
+        let mut done = false;
+        let mut seen_after = 0u64;
+        assert!(until(&mut ui, 20, |u| {
+            if let Some((pos, total, rate)) = u.model.playing_position() {
+                assert_eq!((total, rate), (44_100, 44_100));
+                if !done && pos >= TENTH {
+                    act(u);
+                    done = true;
+                } else if done && pos >= target {
+                    seen_after = seen_after.max(pos);
+                }
+            }
+            u.model.playing.is_none()
+        }));
+        assert!(done, "{what}");
+        let Some(o) = ui.model.last.clone() else {
+            panic!("无结果")
+        };
+        assert!(
+            o.summary.contains("按操作定位 1 次"),
+            "{what}：{}",
+            o.summary
+        );
+        assert!(!o.software_intact, "{what}");
+        let outs = outputs.outputs();
+        assert_eq!(outs.len(), before + 2, "{what}");
+        let last = &outs[outs.len() - 1];
+        let valid = last.report.valid_frames as usize * 4;
+        assert!(
+            last.rendered[..valid] == data[target as usize * 4..],
+            "{what}：定位后输出 {valid} 字节"
+        );
+        assert!(seen_after >= target, "{what}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn text_helpers() {
     assert_eq!(text::khz(44_100), "44.1");

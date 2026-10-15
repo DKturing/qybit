@@ -1598,6 +1598,111 @@ mod tests {
 
     const TENTH: u64 = 4_410;
 
+    /// 不可定位的音源（如管道）：读取照常，定位失败。
+    struct Pipe<'a>(&'a [PathBuf]);
+
+    struct PipeReader(File);
+
+    impl Read for PipeReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    impl Seek for PipeReader {
+        fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
+            Err(io::Error::from(ErrorKind::Unsupported))
+        }
+    }
+
+    impl TrackSource for Pipe<'_> {
+        type Reader = PipeReader;
+
+        fn count(&self) -> u32 {
+            self.0.len() as u32
+        }
+
+        fn open(&mut self, track: u32) -> io::Result<PipeReader> {
+            File::open(&self.0[track as usize]).map(PipeReader)
+        }
+    }
+
+    /// 播放并在状态快照时调用 `on`；返回报告、输出、实时文字与状态快照。
+    fn run_source<S: TrackSource>(
+        backend: &mut FakeBackend,
+        source: &mut S,
+        mut on: impl FnMut(&Status, &std::sync::mpsc::Sender<Command>),
+    ) -> (
+        PlaybackReport<TestAttempt>,
+        Vec<FakeOutput>,
+        String,
+        Vec<Status>,
+    ) {
+        let Ok(mut res) = HostResources::new() else {
+            panic!("res");
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (mut seen, mut lines) = (Vec::new(), Vec::new());
+        let report = play_with(
+            backend,
+            &mut res,
+            source,
+            PlayControl {
+                on_line: &mut |l: &str| lines.push(l.to_string()),
+                stop: None,
+                commands: Some(&rx),
+                first: 0,
+                on_status: Some(&mut |s: &Status| {
+                    seen.push(*s);
+                    on(s, &tx);
+                }),
+            },
+        );
+        (report, backend.outputs(), lines.join("\n"), seen)
+    }
+
+    /// S1：播放中按命令定位。新的输出流从目标帧起与文件数据逐字节一致；状态位置从目标帧算起；
+    /// 报告写明按操作定位，播放不计为软件路径完整。音源不可定位时改为顺序解码，结果相同并报告。
+    #[test]
+    fn seek_command_restarts_at_target_frame() {
+        let dir = track_dir("seek");
+        let (path, data) = distinct_track(&dir, 9, 26_460);
+        let files = [path];
+        let target = 13_000u64;
+        for seekable in [true, false] {
+            let mut b = backend(&ALL, FakeDevice::Clock);
+            let mut sent = false;
+            let on = |s: &Status, tx: &std::sync::mpsc::Sender<Command>| {
+                if !sent && s.position_frames >= TENTH {
+                    sent = tx.send(Command::Seek(target)).is_ok();
+                }
+            };
+            let (r, outs, lines, seen) = if seekable {
+                run_source(&mut b, &mut Files(&files), on)
+            } else {
+                run_source(&mut b, &mut Pipe(&files), on)
+            };
+            assert!(sent);
+            assert!(r.finished && r.user_seeks == 1, "{}", r.summary());
+            assert!(!r.software_path_intact());
+            assert!(r.summary().contains("按操作定位 1 次"), "{}", r.summary());
+            assert_eq!(outs.len(), 2);
+            check_output(&outs[1], &data[target as usize * 4..]);
+            assert!(lines.contains("按操作定位"), "{lines}");
+            assert_eq!(r.sequential_seeks, if seekable { vec![] } else { vec![0] });
+            assert_eq!(lines.contains("不支持定位"), !seekable, "{lines}");
+            // 定位后的状态位置从目标帧算起。
+            let after: Vec<u64> = seen
+                .iter()
+                .skip_while(|s| s.position_frames < target)
+                .map(|s| s.position_frames)
+                .collect();
+            assert!(after.len() > 2, "{seen:?}");
+            assert!(after.windows(2).all(|w| w[0] <= w[1]), "{after:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 状态快照的源格式是正在播放的曲目的格式，不是已预读的下一首：严格路径下每个带设备格式的
     /// 快照，源与设备的采样率、声道数都相同（GUI T3 截图核对发现的错误：曾显示下一首的 96 kHz）。
     #[test]
