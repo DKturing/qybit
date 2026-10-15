@@ -53,7 +53,8 @@ fn run(
                 let Some(f) = dec.format() else {
                     panic!("有 PCM 却无格式");
                 };
-                let ch = usize::from(f.channels());
+                // 每帧的字数（F3：binary64 每个样本占两个字），`release` 按帧计。
+                let ch = f.words_per_frame();
                 let avail = dec.pcm().len() / ch;
                 assert!(avail > 0 && dec.pcm().len() % ch == 0);
                 let k = take(avail).clamp(1, avail);
