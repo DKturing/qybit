@@ -81,7 +81,9 @@ fn random_ops_match_byte_model() {
     let mut generation = 0u64;
     let (mut wraps_full, mut partial) = (0, 0);
     let mut out = vec![0u8; CAP];
-    for round in 0..200 {
+    // Miri 比原生执行慢两个数量级：轮数减少，检查的不变式相同（M2 T5）。
+    let rounds = if cfg!(miri) { 8 } else { 200 };
+    for round in 0..rounds {
         let k = rng.range(0, FORMATS.len() - 1);
         let (src, dev) = formats(k);
         let fb = usize::from(dev.block_align());
@@ -185,4 +187,36 @@ fn reconfigure_checks() {
     assert_eq!(FrameSource::available_frames(&ca), 0);
     assert_eq!(ca.pop_frames(&mut [0u8; 8]), Ok(0));
     assert_eq!(reconfigure(&mut pb, &mut cb, &dev, 0, 1), Ok(()));
+}
+
+static C: StaticFrameQueue<240> = StaticFrameQueue::new();
+
+/// M2 T5：经 `FrameSink` / `FrameSource` 接口（引擎与嵌入式宿主的用法）调用与固有方法一致；
+/// 容量、代次与帧宽访问器。
+#[test]
+fn trait_view_and_accessors() {
+    use crate::pack::ChannelMode;
+    use crate::queue::FrameSink;
+    assert_eq!(std::hint::black_box(&C).capacity(), 240);
+    let Some((mut p, mut c)) = C.split() else {
+        panic!("split");
+    };
+    let (src, dev) = formats(5);
+    let fb = usize::from(dev.block_align());
+    assert_eq!(reconfigure(&mut p, &mut c, &dev, 0, 9), Ok(()));
+    assert_eq!((p.generation(), c.generation()), (9, 9));
+    assert_eq!((p.frame_bytes(), FrameSource::frame_bytes(&c)), (fb, fb));
+    let s = samples(&src, 0, 3);
+    let Ok(pcm) = Pcm::exact(&s, src) else {
+        panic!("pcm");
+    };
+    let mut scratch = [0u8; 0];
+    assert_eq!(
+        FrameSink::push(&mut p, &pcm, &dev, ChannelMode::Exact, &mut scratch),
+        Ok(3)
+    );
+    assert_eq!((FrameSink::queued_frames(&p), p.queued_frames()), (3, 3));
+    let mut out = vec![0u8; 3 * fb];
+    assert_eq!(FrameSource::pop_frames(&mut c, &mut out), Ok(3));
+    assert_eq!(out, packed(&src, &dev, &s));
 }

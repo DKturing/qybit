@@ -729,3 +729,99 @@ fn confirm_with_reordered_layout() {
         Err(ConfirmError::Request(FormatError::UndefinedLayout))
     );
 }
+
+/// M2 T5：cargo-mutants 发现的缺口。
+mod mutation_gaps {
+    use super::*;
+    use std::format;
+    use std::vec::Vec;
+
+    #[test]
+    fn candidates_empty_when_no_format_carries_source() {
+        assert!(candidates(&src(48_000, 2, 24), &[AlsaFormat::S16Le]).is_empty());
+        assert!(!candidates(&src(48_000, 2, 24), &[AlsaFormat::S24Le]).is_empty());
+    }
+
+    /// 卡号、设备号只接受十进制数字（`str::parse` 本身会接受前导 `+`）。
+    #[test]
+    fn card_numbers_are_plain_digits() {
+        assert_eq!(
+            check_device_name("hw:+1,0").err(),
+            Some(DeviceNameError::Malformed)
+        );
+        assert_eq!(
+            check_device_name("hw:1,+0").err(),
+            Some(DeviceNameError::Malformed)
+        );
+        assert!(check_device_name("hw:1,0").is_ok());
+    }
+
+    #[test]
+    fn device_name_error_texts() {
+        for e in [
+            DeviceNameError::Empty,
+            DeviceNameError::Plug,
+            DeviceNameError::Default,
+            DeviceNameError::Dmix,
+            DeviceNameError::PipeWire,
+            DeviceNameError::Pulse,
+            DeviceNameError::NotHw,
+            DeviceNameError::Malformed,
+        ] {
+            assert!(format!("{e}").contains("hw"), "{e:?}");
+        }
+    }
+
+    /// 多项不一致：集合非空、按项查询、文字用“；”分隔每一项。
+    #[test]
+    fn multiple_mismatches_listed() {
+        let mut a = applied_ok();
+        a.channels = 1;
+        a.resample = true;
+        let m = mismatches(24, &a);
+        assert!(!m.is_empty());
+        assert_eq!(m.len(), 2);
+        assert!(m.contains(|x| matches!(x, ParamMismatch::Resample)));
+        assert!(!m.contains(|x| matches!(x, ParamMismatch::Rate { .. })));
+        let text = format!("{m}");
+        assert_eq!(text.matches('；').count(), 1, "{text}");
+        let mut one = applied_ok();
+        one.resample = true;
+        assert!(!format!("{}", mismatches(24, &one)).contains('；'));
+    }
+
+    /// 映射长度：空的、超过 18 个位置的都不合法；恰好 18 个（全部位置）合法。
+    #[test]
+    fn chmap_length_bounds() {
+        assert_eq!(layout_from_chmap(&[]), Err(ChmapError::Invalid));
+        let all: Vec<u32> = CHMAP_OF_SPEAKER.to_vec();
+        assert_eq!(layout_from_chmap(&all).map(|l| l.channels()), Ok(18));
+        let mut more = all.clone();
+        more.push(FL);
+        assert_eq!(layout_from_chmap(&more), Err(ChmapError::Invalid));
+    }
+
+    /// 多个位置集合相同的固定映射：优先与源顺序相同的那个（不需要置换）。
+    #[test]
+    fn fixed_map_prefers_source_order() {
+        let src = ChannelLayout::STEREO;
+        let swapped: &[u32] = &[FR, FL];
+        let same: &[u32] = &[FL, FR];
+        let plan = plan_chmap(
+            &src,
+            &[(ChmapType::Fixed, swapped), (ChmapType::Fixed, same)],
+        );
+        assert_eq!(plan, Ok(ChmapPlan::Fixed(src)));
+    }
+
+    /// 设备不报告映射时，只有默认布局本身（[FC]、[FL FR]）按默认使用；只占左声道位置的单声道
+    /// 无法确认，拒绝。
+    #[test]
+    fn unqueried_only_for_default_layouts() {
+        assert_eq!(
+            plan_chmap(&ChannelLayout::MONO, &[]),
+            Ok(ChmapPlan::Unqueried(ChannelLayout::MONO))
+        );
+        assert_eq!(plan_chmap(&layout(0x1), &[]), Err(ChmapError::Unavailable));
+    }
+}

@@ -358,6 +358,81 @@ mod tests {
         }
     }
 
+    /// M2 T5：经 `FrameSink` / `FrameSource` 接口（引擎与嵌入式宿主的用法）调用与固有方法一致；
+    /// 访问器与预填帧数；最宽帧（18 声道 C32，72 字节）仍可连续交出。
+    #[test]
+    fn trait_view_accessors_and_widest_frame() {
+        use crate::queue::{FrameSink, FrameSource};
+        use crate::{ChannelLayout, SourceFormat};
+        let f = fmt(8_000, 2, 16, 16);
+        assert_eq!(prefill_frames(&f), 4_000);
+        let (mut p, mut c) = frame_ring(24_000);
+        assert_eq!(reconfigure(&mut p, &mut c, &f, 7), Ok(()));
+        assert_eq!(
+            (
+                p.generation(),
+                p.frame_bytes(),
+                FrameSource::frame_bytes(&c)
+            ),
+            (7, 4, 4)
+        );
+        assert_eq!(p.free_frames(), 6_000);
+        let Ok(src) = SourceFormat::new(8_000, 2, 16) else {
+            panic!()
+        };
+        let samples = [1, 2, 3, 4, 5, 6];
+        let Ok(pcm) = Pcm::exact(&samples, src) else {
+            panic!()
+        };
+        let mut scratch = [0u8; 64];
+        assert_eq!(
+            FrameSink::push(&mut p, &pcm, &f, ChannelMode::Exact, &mut scratch),
+            Ok(3)
+        );
+        assert_eq!(
+            (FrameSink::queued_frames(&p), p.queued_frames_hint()),
+            (3, 3)
+        );
+        assert_eq!(p.free_frames(), 5_997);
+        assert_eq!(FrameSource::available_frames(&c), 3);
+        let mut out = [0u8; 4];
+        assert_eq!(FrameSource::pop_frames(&mut c, &mut out), Ok(1));
+        assert_eq!(out, [1, 0, 2, 0]);
+        let mut seen = Vec::new();
+        let r = FrameSource::consume_contiguous(&mut c, 8, |b| {
+            seen.extend_from_slice(b);
+            b.len() / 4
+        });
+        assert_eq!(r, Ok(2));
+        assert_eq!(seen, [3, 0, 4, 0, 5, 0, 6, 0]);
+        // 18 声道 C32：一帧 72 字节，恰为拼帧临时区的上限。
+        let Some(all) = ChannelLayout::from_mask((1 << 18) - 1) else {
+            panic!()
+        };
+        let Ok(wide) =
+            DeviceFormat::with_layout(8_000, all, 32, 32, Endian::Little, Placement::MsbAligned)
+        else {
+            panic!()
+        };
+        assert_eq!(
+            usize::from(wide.block_align()),
+            crate::queue::MAX_FRAME_BYTES
+        );
+        let (mut p, mut c) = frame_ring(300_000);
+        assert_eq!(reconfigure(&mut p, &mut c, &wide, 1), Ok(()));
+        let frame: Vec<u8> = (0..72u8).collect();
+        assert_eq!(p.push_frames(&frame), Ok(1));
+        let mut got = Vec::new();
+        assert_eq!(
+            c.consume_contiguous(1, |b| {
+                got.extend_from_slice(b);
+                1
+            }),
+            Ok(1)
+        );
+        assert_eq!(got, frame);
+    }
+
     /// 短写：部分提交保留余下帧；回绕切开帧时拼帧交出；字节序列与入队完全一致。
     #[test]
     fn consume_contiguous_partial_commit_and_split_frame() {

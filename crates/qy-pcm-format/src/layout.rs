@@ -262,6 +262,18 @@ mod tests {
     use super::*;
     use Speaker::*;
 
+    /// M2 T5：位置列表恰好 18 个（全部位置）合法，19 个不合法。
+    #[test]
+    fn position_list_length_bound() {
+        assert_eq!(
+            ChannelLayout::from_positions(&ALL).map(|l| l.channels()),
+            Some(18)
+        );
+        let mut more = [FrontLeft; MAX_LAYOUT_CHANNELS + 1];
+        more[..MAX_LAYOUT_CHANNELS].copy_from_slice(&ALL);
+        assert_eq!(ChannelLayout::from_positions(&more), None);
+    }
+
     #[test]
     fn masks_and_orders() {
         assert_eq!(ChannelLayout::MONO.positions(), &[FrontCenter]);

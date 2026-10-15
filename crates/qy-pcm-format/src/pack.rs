@@ -765,6 +765,15 @@ mod tests {
             pack(&pcm, &dev_side, &mut out),
             Err(PackError::FormatMismatch)
         );
+        // 负向越界同样拒绝（−2^(N−1) − 1）。
+        let low = [1, 2, 3, 4, 5, 6, 7, 8, -32_769, 10, 11, 12];
+        let Ok(pcm) = Pcm::exact(&low, src) else {
+            panic!("pcm");
+        };
+        assert_eq!(
+            pack(&pcm, &dev, &mut out),
+            Err(PackError::SampleOutOfRange { index: 8 })
+        );
         // 超范围样本报告的是源样本下标（第 2 帧的 FC = 下标 8）。
         let bad = [1, 2, 3, 4, 5, 6, 7, 8, 40_000, 10, 11, 12];
         let Ok(pcm) = Pcm::exact(&bad, src) else {

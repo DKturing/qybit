@@ -189,5 +189,28 @@ mod watermark_tests {
         let mut w = Watermark::for_stream(1000, 100);
         w.observe(4800);
         assert_eq!(w.min_ms(48_000), Some(100));
+        // 采样率为 0 时不折算（不除以 0）。
+        assert_eq!(w.min_ms(0), None);
+    }
+
+    /// 逐个观测：高于低水位线不计，低于低水位线（不低于临界线）计为低水位。
+    #[test]
+    fn single_observations() {
+        let mut w = Watermark::for_stream(1000, 100);
+        w.observe(800);
+        assert_eq!((w.low, w.critical), (0, 0));
+        w.observe(300);
+        assert_eq!((w.low, w.critical), (1, 0));
+        w.observe(100);
+        assert_eq!((w.low, w.critical), (1, 1));
+    }
+
+    /// 暂存区常量与队列预算：4096 帧双声道 C32；48 kHz 500 ms 双声道 C32 为 192 000 字节。
+    #[test]
+    fn scratch_and_queue_budget() {
+        assert_eq!(core::hint::black_box(super::PACK_SCRATCH_BYTES), 32_768);
+        assert_eq!(super::queue_bytes(48_000, 500, 2, 4), Some(192_000));
+        assert_eq!(super::queue_bytes(44_100, 1, 1, 2), Some(90));
+        assert_eq!(super::queue_bytes(48_000, 500, u16::MAX, usize::MAX), None);
     }
 }

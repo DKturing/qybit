@@ -267,6 +267,20 @@ impl WaveFormatExtensible {
 mod tests {
     use super::*;
 
+    /// M2 T5：默认声道掩码与声道数范围（1–18；0 与 19 不合法）。
+    #[test]
+    fn default_masks_and_channel_range() {
+        assert_eq!(channel_mask(1), Ok(SPEAKER_FRONT_CENTER));
+        assert_eq!(channel_mask(2), Ok(0x3));
+        assert_eq!(channel_mask(3), Err(FormatError::Channels));
+        assert!(derive(48_000, MAX_CHANNELS, 16, 16).is_ok());
+        assert_eq!(
+            derive(48_000, MAX_CHANNELS + 1, 16, 16),
+            Err(FormatError::Channels)
+        );
+        assert_eq!(derive(48_000, 0, 16, 16), Err(FormatError::Channels));
+    }
+
     const PCM_GUID_BYTES: [u8; 16] = [
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
         0x71,
