@@ -54,10 +54,16 @@ use windows::core::{PCWSTR, PWSTR, w};
 
 use super::app::{
     App, COLUMNS, ID_ABOUT, ID_ADD_FILES, ID_ADD_FOLDER, ID_CLEAR, ID_EXIT, ID_NEXT, ID_PLAY,
-    ID_PREV, ID_REMOVE, ID_STOP, IDC_DEVICE, IDC_LIST, IDC_LOG, IDC_MONO, IDC_STATUS, Input, Op,
-    about_text,
+    ID_PREV, ID_REMOVE, ID_STOP, IDC_DEVICE, IDC_FORMAT, IDC_LIST, IDC_LOG, IDC_MONO, IDC_STATUS,
+    Input, Op, about_text,
 };
 use super::sim::Sim;
+
+/// STATIC 控件样式（winuser.h：`SS_LEFT` 0x0、`SS_NOPREFIX` 0x80、`SS_ENDELLIPSIS` 0x4000）。
+/// windows crate 把它们放在 System_SystemServices 模块，为三个常量不引入该特性。
+const SS_LEFT: u32 = 0x0000;
+const SS_NOPREFIX: u32 = 0x0080;
+const SS_ENDELLIPSIS: u32 = 0x4000;
 
 /// 后台线程有新事件（`PostMessageW` 投递，跨线程安全）。
 const WM_QY_NOTIFY: u32 = WM_APP + 1;
@@ -73,12 +79,15 @@ struct Handles {
     list: HWND,
     log: HWND,
     status: HWND,
+    format: HWND,
 }
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
     static HANDLES: Cell<Option<Handles>> = const { Cell::new(None) };
     static FONT: Cell<HFONT> = const { Cell::new(HFONT(std::ptr::null_mut())) };
+    /// 状态栏是否分两栏（第二栏为保真状态；未播放时只有一栏，结论文字可用整行）。
+    static TWO_PARTS: Cell<bool> = const { Cell::new(false) };
 }
 
 /// 跨线程通知状态：主窗口句柄（整数形式）与“已投递未处理”标志（合并连续通知）。
@@ -296,6 +305,13 @@ fn create(title: &str) -> Option<Handles> {
                 IDC_LOG,
             )?,
             status: child(STATUSCLASSNAMEW, w!(""), WINDOW_STYLE(0), 0, IDC_STATUS)?,
+            format: child(
+                w!("STATIC"),
+                w!(""),
+                WINDOW_STYLE(SS_LEFT | SS_ENDELLIPSIS | SS_NOPREFIX),
+                0,
+                IDC_FORMAT,
+            )?,
         };
         HANDLES.set(Some(h));
         SendMessageW(
@@ -409,6 +425,7 @@ fn apply_dpi(h: &Handles) {
             h.list,
             h.log,
             h.status,
+            h.format,
         ];
         for c in all {
             SendMessageW(
@@ -445,13 +462,7 @@ fn layout(h: &Handles) {
         let mut src = RECT::default();
         let _ = GetClientRect(h.status, &mut src);
         let status_h = src.bottom - src.top;
-        let parts = [rc.right * 3 / 5, -1];
-        SendMessageW(
-            h.status,
-            SB_SETPARTS,
-            Some(WPARAM(parts.len())),
-            Some(LPARAM(parts.as_ptr() as isize)),
-        );
+        set_parts(h, TWO_PARTS.get());
         let (bar_y, bar_h) = (s(6), s(28));
         let mut x = s(6);
         for (b, w) in [
@@ -474,11 +485,36 @@ fn layout(h: &Handles) {
             bar_h,
             true,
         );
-        let top = bar_y + bar_h + s(6);
+        let (fmt_y, fmt_h) = (bar_y + bar_h + s(4), s(20));
+        let _ = MoveWindow(
+            h.format,
+            s(8),
+            fmt_y,
+            (rc.right - s(16)).max(0),
+            fmt_h,
+            true,
+        );
+        let top = fmt_y + fmt_h + s(2);
         let free = (rc.bottom - top - status_h).max(0);
         let log_h = (free / 4).max(s(60)).min(free);
         let _ = MoveWindow(h.list, 0, top, rc.right, free - log_h, true);
         let _ = MoveWindow(h.log, 0, top + free - log_h, rc.right, log_h, true);
+    }
+}
+
+/// 状态栏分栏：两栏时各占一半，一栏时占整行。
+fn set_parts(h: &Handles, two: bool) {
+    // SAFETY: 句柄有效；rc 与 parts 为本地变量，SB_SETPARTS 调用期间有效。
+    unsafe {
+        let mut rc = RECT::default();
+        let _ = GetClientRect(h.status, &mut rc);
+        let parts: &[i32] = if two { &[rc.right / 2, -1] } else { &[-1] };
+        SendMessageW(
+            h.status,
+            SB_SETPARTS,
+            Some(WPARAM(parts.len())),
+            Some(LPARAM(parts.as_ptr() as isize)),
+        );
     }
 }
 
@@ -543,8 +579,20 @@ fn exec(op: Op) {
         Op::Redraw => unsafe {
             let _ = InvalidateRect(Some(h.list), None, false);
         },
-        Op::Status(a, b) => {
-            for (part, text) in [(0usize, a), (1, b)] {
+        Op::Status {
+            status,
+            fidelity,
+            format,
+        } => {
+            let two = !fidelity.is_empty();
+            if TWO_PARTS.replace(two) != two {
+                set_parts(&h, two);
+            }
+            let t = wide(&format);
+            unsafe {
+                let _ = SetWindowTextW(h.format, PCWSTR(t.as_ptr()));
+            }
+            for (part, text) in [(0usize, status), (1, fidelity)] {
                 let t = wide(&text);
                 unsafe {
                     SendMessageW(

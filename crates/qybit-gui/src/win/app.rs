@@ -22,6 +22,7 @@ pub const IDC_DEVICE: u16 = 202;
 pub const IDC_MONO: u16 = 203;
 pub const IDC_LOG: u16 = 204;
 pub const IDC_STATUS: u16 = 205;
+pub const IDC_FORMAT: u16 = 206;
 
 /// 播放列表的列：标题与宽度（96 DPI 下的像素）。
 pub const COLUMNS: [(&str, i32); 5] = [
@@ -56,7 +57,12 @@ pub enum Op {
     Count(usize),
     /// 重绘播放列表（文字变化）。
     Redraw,
-    Status(String, String),
+    /// 状态栏（播放位置与计数、保真状态；后者为空时状态栏只有一栏）与格式行（源 → 设备）。
+    Status {
+        status: String,
+        fidelity: String,
+        format: String,
+    },
     Log(String),
     PlayLabel(&'static str),
     OpenFiles,
@@ -130,7 +136,11 @@ impl App {
             ops.push(Op::Redraw);
         }
         if c.status || c.session {
-            ops.push(Op::Status(text::status_line(m), text::fidelity_line(m)));
+            ops.push(Op::Status {
+                status: text::status_line(m),
+                fidelity: text::fidelity_line(m),
+                format: text::format_line(m),
+            });
             ops.push(Op::PlayLabel(self.play_label()));
         }
         if c.log {

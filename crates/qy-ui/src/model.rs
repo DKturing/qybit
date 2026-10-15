@@ -6,7 +6,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use qy_player::report::AttemptRecord;
+use qy_core::Fault;
+use qy_core::engine::EngineFault;
+use qy_player::report::{AttemptRecord, fault_text};
 use qy_player::{Backend, Command, PlaybackReport, Status};
 
 use crate::probe::{self, Probe, ProbeRequest};
@@ -39,6 +41,8 @@ pub struct Outcome {
     pub user_skips: u32,
     /// 播放前即失败的原因（如设备不可用）。
     pub error: Option<String>,
+    /// 播放因曲目失败而停止时的原因（如设备不支持该曲目的格式），含曲目编号。
+    pub stopped: Option<String>,
 }
 
 impl Outcome {
@@ -53,6 +57,15 @@ impl Outcome {
             underrun_events: r.underrun_events(),
             user_skips: r.user_skips,
             error: None,
+            stopped: r.fault.map(|(track, fault)| {
+                let n = u64::from(track) + 1;
+                match (fault, r.open_failures.last()) {
+                    (EngineFault::Core(Fault::Configure), Some(f)) => {
+                        format!("曲目 {n} 无法打开输出设备：{}", f.message)
+                    }
+                    _ => format!("曲目 {n} 失败：{}", fault_text(&fault)),
+                }
+            }),
         }
     }
 
@@ -67,6 +80,7 @@ impl Outcome {
             underrun_events: 0,
             user_skips: 0,
             error: Some(reason),
+            stopped: None,
         }
     }
 }

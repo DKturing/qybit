@@ -326,6 +326,10 @@ fn mono_to_stereo_option_reaches_sessions() {
     assert!(o.as_ref().is_some_and(|o| !o.finished), "{o:?}");
     assert!(log(&ui, "单声道复制到左右两路：关闭（严格路径"));
     assert!(log(&ui, "设备不接受单声道"));
+    assert_eq!(
+        text::status_line(&ui.model),
+        "播放已停止：曲目 1 无法打开输出设备：设备不接受单声道"
+    );
 
     let c = ui.set_mono_to_stereo(true);
     assert!(c.status && ui.model.mono_to_stereo);

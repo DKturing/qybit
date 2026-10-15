@@ -106,12 +106,6 @@ pub fn status_line(m: &Model) -> String {
             .map_or(String::new(), |t| format!(" / {t}"));
         out.push_str(&format!("  {pos}{total}"));
     }
-    if let Some(src) = &s.source {
-        out.push_str(&format!("  ·  源 {}", source_text(src)));
-    }
-    if let Some(d) = &s.device {
-        out.push_str(&format!(" → 设备 {}（独占）", device_text(d)));
-    }
     out.push_str(&format!("  ·  欠载 {}", s.underrun_events));
     if s.underrun_frames > 0 {
         out.push_str(&format!("（缺 {} 帧）", s.underrun_frames));
@@ -122,7 +116,23 @@ pub fn status_line(m: &Model) -> String {
     out
 }
 
-/// 保真状态（播放中按实时计数，结束后按报告）。
+/// 正在播放的曲目的源格式与设备流格式（独占协商结果）；未播放时为空。完整的请求、协商记录与
+/// 已应用参数在日志中。
+pub fn format_line(m: &Model) -> String {
+    let Some(s) = m.playing.as_ref().and_then(|p| p.status) else {
+        return String::new();
+    };
+    match (&s.source, &s.device) {
+        (Some(src), Some(d)) => {
+            format!("源 {} → 设备 {}（独占）", source_text(src), device_text(d))
+        }
+        (Some(src), None) => format!("源 {} → 设备未打开", source_text(src)),
+        (None, Some(d)) => format!("设备 {}（独占）", device_text(d)),
+        (None, None) => String::new(),
+    }
+}
+
+/// 保真状态（播放中按实时计数）；未播放时为空，结束结论见 [`status_line`]。
 pub fn fidelity_line(m: &Model) -> String {
     if let Some(p) = &m.playing {
         let underruns = p.status.map_or(0, |s| s.underrun_events);
@@ -141,10 +151,7 @@ pub fn fidelity_line(m: &Model) -> String {
         }
         return "软件路径：未改动样本、无欠载（不证明设备端 bit-perfect）".into();
     }
-    match &m.last {
-        Some(o) => outcome_line(o),
-        None => String::new(),
-    }
+    String::new()
 }
 
 /// 一次播放结束后的结论（一行）。
@@ -164,6 +171,8 @@ pub fn outcome_line(o: &Outcome) -> String {
         "已停止".into()
     } else if o.finished && o.user_skips > 0 {
         "播放完成（有曲目被切走，没有放完）".into()
+    } else if let Some(reason) = &o.stopped {
+        format!("播放已停止：{reason}")
     } else {
         "播放未完整完成，详见日志".into()
     }

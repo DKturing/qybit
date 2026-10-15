@@ -117,7 +117,7 @@ pub struct Status {
     pub track: u32,
     /// 该曲目已由设备取走的帧数（设备格式帧；最多含一个设备缓冲尚未发声）。
     pub position_frames: u64,
-    /// 正在解码的源格式（同格式连续曲目时可能已是下一首）。
+    /// 正在播放的曲目的源格式（不是正在预读的下一首）。
     pub source: Option<SourceFormat>,
     /// 当前设备流的格式。
     pub device: Option<DeviceFormat>,
@@ -168,7 +168,12 @@ struct Player<'a, B: Backend, S: TrackSource> {
     last_status: Option<(Status, Instant)>,
     /// 当前流已置 EOF、等待渲染线程播完（排空期间照常处理控制命令与状态）。
     draining: bool,
+    /// 最近解码过的曲目与其源格式（按解码顺序，至多 [`FORMAT_HISTORY`] 条）：解码可能已领先到
+    /// 下一首，状态显示按正在播放的曲目查找。
+    formats: std::collections::VecDeque<(u32, SourceFormat)>,
 }
+
+const FORMAT_HISTORY: usize = 8;
 
 /// 依次播放 `files`，直到完成、失败或设备出错。
 pub fn play<B: Backend>(
@@ -222,6 +227,7 @@ pub fn play_with<'a, B: Backend, S: TrackSource>(
         count,
         last_status: None,
         draining: false,
+        formats: std::collections::VecDeque::with_capacity(FORMAT_HISTORY),
     };
     p.run();
     p.status(true);
@@ -311,6 +317,21 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
         true
     }
 
+    /// 记录正在解码的曲目的源格式（文件头解析完成后才有）。
+    fn note_format(&mut self) {
+        let e = &self.res.engine;
+        let Some(f) = qy_core::Decoder::format(e.decoder()) else {
+            return;
+        };
+        let entry = (e.track(), f);
+        if self.formats.back() != Some(&entry) {
+            if self.formats.len() == FORMAT_HISTORY {
+                self.formats.pop_front();
+            }
+            self.formats.push_back(entry);
+        }
+    }
+
     /// 给出状态快照：`force` 或状态变化时立即给出，否则按 [`STATUS_INTERVAL`] 节流。
     fn status(&mut self, force: bool) {
         if self.ctl.on_status.is_none() {
@@ -335,7 +356,12 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
             paused: e.is_paused(),
             track,
             position_frames,
-            source: qy_core::Decoder::format(e.decoder()),
+            source: self
+                .formats
+                .iter()
+                .rev()
+                .find(|(t, _)| *t == track)
+                .map(|(_, f)| *f),
             device: self.active.as_ref().map(|a| a.format),
             underrun_events: ue,
             underrun_frames: uf,
@@ -373,6 +399,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 break;
             }
             let poll = self.res.engine.poll();
+            self.note_format();
             self.sync_pushed();
             self.status(false);
             match poll {
@@ -1520,6 +1547,29 @@ mod tests {
     }
 
     const TENTH: u64 = 4_410;
+
+    /// 状态快照的源格式是正在播放的曲目的格式，不是已预读的下一首：严格路径下每个带设备格式的
+    /// 快照，源与设备的采样率、声道数都相同（GUI T3 截图核对发现的错误：曾显示下一首的 96 kHz）。
+    #[test]
+    fn status_source_follows_playing_track() {
+        let dir = track_dir("fmt");
+        let (first, _) = distinct_track(&dir, 3, 22_050);
+        let hires = dir.join("hires.wav");
+        assert!(crate::signal::write_test_wav(&hires, 96_000, 2, 24, 48_000).is_ok());
+        let mut b = backend(&ALL, FakeDevice::Clock);
+        let (r, _, seen) = run_ctl(&mut b, &[first, hires], |_, _| {});
+        assert!(r.finished, "{}", r.summary());
+        let mut tracks = Vec::new();
+        for s in &seen {
+            if let (Some(src), Some(dev)) = (s.source, s.device) {
+                assert_eq!(src.sample_rate(), dev.sample_rate(), "{s:?}");
+                assert_eq!(src.channels(), dev.channels(), "{s:?}");
+                tracks.push(s.track);
+            }
+        }
+        assert!(tracks.contains(&0) && tracks.contains(&1), "{tracks:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// O1 命令：设备不接受单声道。严格路径下打开失败、播放停止；另一次播放在第 1 首（立体声）
     /// 播放中开启单声道复制并跳到第 2 首（单声道），按 [FL FR] 播放，设备字节为每样本两份
