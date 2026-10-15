@@ -123,6 +123,7 @@ fn scenario(seed: u64, device: DeviceModel, tracks: Vec<TrackSpec>) -> Scenario 
         on_error: ErrorPolicy::Skip,
         controls: Vec::new(),
         device_layouts: None,
+        float_formats: Vec::new(),
     }
 }
 

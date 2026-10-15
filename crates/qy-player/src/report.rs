@@ -12,8 +12,8 @@
 
 use std::fmt::{Debug, Write as _};
 
-use qy_core::engine::EngineFault;
-use qy_core::{DeviceFormat, SourceFormat};
+use qy_core::engine::{EngineFault, FloatReport};
+use qy_core::{DeviceFormat, SampleEncoding, SourceFormat};
 
 use crate::render::{RenderEnd, RenderReport};
 
@@ -23,6 +23,18 @@ pub fn fault_text(fault: &EngineFault) -> String {
         EngineFault::Core(f) => format!("{f:?}"),
         EngineFault::Capability(e) => format!("能力不足：{e}"),
         EngineFault::Output => "输出队列错误".into(),
+        EngineFault::NonFinite { frame } => {
+            format!("第 {frame} 帧有 NaN 或无穷样本，无法转换为整数（不猜测数值），该曲目在此停止")
+        }
+    }
+}
+
+/// 浮点编码的文字（报告用）。
+pub fn encoding_text(e: SampleEncoding) -> &'static str {
+    match e {
+        SampleEncoding::Int => "整数",
+        SampleEncoding::Float32 => "32 位浮点",
+        SampleEncoding::Float64 => "64 位浮点",
     }
 }
 
@@ -229,6 +241,10 @@ pub struct PlaybackReport<A> {
     pub repairs: Vec<(u32, qy_core::engine::Repair)>,
     /// 按明确开启的选项把单声道复制到左右两路的曲目（O1：声道布局已改变，样本值未改变）。
     pub channels_altered: Vec<u32>,
+    /// 按明确开启的选项把浮点转为整数的曲目与位数（F3：样本已改变）。
+    pub samples_altered: Vec<(u32, u8)>,
+    /// 浮点曲目的统计（F3；同一曲目定位后的多段已累加）。
+    pub float_stats: Vec<(u32, FloatReport)>,
     /// I/O 错误等附加说明。
     pub messages: Vec<String>,
     pub finished: bool,
@@ -254,6 +270,8 @@ impl<A> Default for PlaybackReport<A> {
             skipped: Vec::new(),
             repairs: Vec::new(),
             channels_altered: Vec::new(),
+            samples_altered: Vec::new(),
+            float_stats: Vec::new(),
             messages: Vec::new(),
             finished: false,
             device_error: false,
@@ -267,6 +285,20 @@ impl<A> Default for PlaybackReport<A> {
 }
 
 impl<A> PlaybackReport<A> {
+    /// 记录一首浮点曲目的统计（同一曲目按段累加）。
+    pub fn add_float_stats(&mut self, track: u32, r: FloatReport) {
+        match self.float_stats.iter_mut().find(|(t, _)| *t == track) {
+            Some((_, acc)) => {
+                acc.nonfinite += r.nonfinite;
+                acc.convert.add(&r.convert);
+                if r.converted_to.is_some() {
+                    acc.converted_to = r.converted_to;
+                }
+            }
+            None => self.float_stats.push((track, r)),
+        }
+    }
+
     pub fn underrun_events(&self) -> u64 {
         self.streams
             .iter()
@@ -292,9 +324,11 @@ impl<A> PlaybackReport<A> {
     }
 
     /// 严格路径完整：[`software_path_intact`](Self::software_path_intact)，且没有曲目按明确开启的
-    /// 选项改变声道布局（O1）。
+    /// 选项改变声道布局（O1）或样本（F3 浮点转整数）。
     pub fn strict_path_intact(&self) -> bool {
-        self.software_path_intact() && self.channels_altered.is_empty()
+        self.software_path_intact()
+            && self.channels_altered.is_empty()
+            && self.samples_altered.is_empty()
     }
 
     /// 进程退出码：0 完整，2 完成但有欠载，1 失败或设备错误。
@@ -561,6 +595,41 @@ impl<A: AttemptRecord> PlaybackReport<A> {
                 track + 1
             );
         }
+        for (track, r) in &self.float_stats {
+            match r.converted_to {
+                Some(bits) => {
+                    let _ = write!(
+                        o,
+                        "曲目 {} 样本已改变：{}转为 {bits} 位整数（明确开启；不加抖动，round-half-even）。",
+                        track + 1,
+                        encoding_text(r.encoding)
+                    );
+                    if r.convert.inexact == 0 {
+                        let _ = writeln!(
+                            o,
+                            "共 {} 个样本，每个都能被 {bits} 位整数精确表示（例如由整数 PCM 生成的浮点文件），转换未损失数值，但表示已改变。",
+                            r.convert.samples
+                        );
+                    } else {
+                        let _ = writeln!(
+                            o,
+                            "共 {} 个样本，其中 {} 个不能精确表示（舍入），{} 个超出 ±1.0 被限幅。",
+                            r.convert.samples, r.convert.inexact, r.convert.clipped
+                        );
+                    }
+                }
+                None if r.nonfinite > 0 => {
+                    let _ = writeln!(
+                        o,
+                        "曲目 {} 含 {} 个 NaN 或无穷样本（{}），已按位原样送到设备。",
+                        track + 1,
+                        r.nonfinite,
+                        encoding_text(r.encoding)
+                    );
+                }
+                None => {}
+            }
+        }
         if let Some((track, fault)) = self.fault {
             let _ = writeln!(o, "曲目 {} 失败：{}", track + 1, fault_text(&fault));
         }
@@ -591,7 +660,11 @@ impl<A: AttemptRecord> PlaybackReport<A> {
                 track + 1
             );
         }
-        if self.software_path_intact() && !self.channels_altered.is_empty() {
+        if self.software_path_intact() && !self.samples_altered.is_empty() {
+            o.push_str(
+                "结论：全部曲目已播放，无欠载、无错误；部分曲目的浮点样本已按明确开启的选项转换为整数（样本已改变），不是严格路径。\n",
+            );
+        } else if self.software_path_intact() && !self.channels_altered.is_empty() {
             o.push_str(
                 "结论：全部曲目已播放，无欠载、无错误；样本值未改变，但部分曲目的声道布局已按明确开启的选项改变（单声道复制到左右两路），不是严格路径。\n",
             );
@@ -610,7 +683,7 @@ impl<A: AttemptRecord> PlaybackReport<A> {
         }
         if self.software_path_intact() && !self.repairs.is_empty() {
             // 声道已改变时不能再说“软件路径无损”，只说结构修正没有改动样本。
-            o.push_str(if self.channels_altered.is_empty() {
+            o.push_str(if self.channels_altered.is_empty() && self.samples_altered.is_empty() {
                 "部分曲目的文件结构不规范，已按规则修正后播放：软件路径无损，但这不说明文件本身完好。\n"
             } else {
                 "部分曲目的文件结构不规范，已按规则修正后播放：修正没有改动样本，但这不说明文件本身完好。\n"

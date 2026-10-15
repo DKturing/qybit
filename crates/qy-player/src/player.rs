@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use qy_core::engine::{ChannelPolicy, HostAction, HostEvent, Poll, Wait};
+use qy_core::engine::{ChannelPolicy, FloatPolicy, HostAction, HostEvent, Poll, Wait};
 use qy_core::{DeviceFormat, Generation, SourceFormat};
 
 use crate::HostResources;
@@ -109,6 +109,9 @@ pub enum Command {
     /// 单声道复制到左右两路（O1，非严格选项）开启或关闭：对之后开始解码的曲目生效，正在播放与
     /// 已预读的曲目不变；之后跳曲（含跳回当前曲目）一定按新设置。
     MonoToStereo(bool),
+    /// 浮点转整数（tasks/F3.md，明确开启的非严格选项）：开启后，设备不接受源的浮点格式时转为整数
+    /// （样本已改变）。对之后配置的曲目生效。
+    FloatToInt(bool),
 }
 
 /// 播放状态快照（界面显示用；生产端线程生成，不涉及渲染线程的实时路径）。
@@ -135,6 +138,9 @@ pub struct Status {
     pub channels_altered: u32,
     /// 本次播放因解码或文件错误跳过的曲目数（与报告的 `skipped` 一致）。
     pub skipped_tracks: u32,
+    /// 本次播放累计按明确开启的选项把浮点转为整数的曲目数（F3，样本已改变），与报告的
+    /// `samples_altered` 一致。
+    pub samples_altered: u32,
     /// 本次播放已执行的按操作定位次数（与报告的 `user_seeks` 一致）。界面据此判断状态快照是否已
     /// 反映最近一次定位（S1）。
     pub user_seeks: u32,
@@ -291,6 +297,11 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 } else {
                     ChannelPolicy::Strict
                 }),
+                Command::FloatToInt(on) => e.set_float_policy(if on {
+                    FloatPolicy::ToInt
+                } else {
+                    FloatPolicy::Strict
+                }),
             }
             match cmd {
                 Command::Next | Command::Prev | Command::Goto(_) => {
@@ -328,6 +339,12 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 ),
                 Command::MonoToStereo(false) => {
                     self.line("单声道复制到左右两路：已关闭，重新播放或切换曲目后按严格路径（已预读的下一首按原设置）")
+                }
+                Command::FloatToInt(true) => self.line(
+                    "浮点转整数：已开启，之后配置的浮点曲目在设备不接受浮点时转为整数（样本已改变，不是严格路径）",
+                ),
+                Command::FloatToInt(false) => {
+                    self.line("浮点转整数：已关闭，之后配置的浮点曲目按严格路径（设备不接受浮点时拒绝）")
                 }
                 Command::Stop => {}
             }
@@ -393,6 +410,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
             paused_frames: pf,
             channels_altered: u32::try_from(self.report.channels_altered.len()).unwrap_or(u32::MAX),
             skipped_tracks: u32::try_from(self.report.skipped.len()).unwrap_or(u32::MAX),
+            samples_altered: u32::try_from(self.report.samples_altered.len()).unwrap_or(u32::MAX),
             user_seeks: self.report.user_seeks,
         };
         let changed = self.last_status.is_none_or(|(prev, at)| {
@@ -406,6 +424,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                     s.underrun_events,
                     s.channels_altered,
                     s.skipped_tracks,
+                    s.samples_altered,
                     s.user_seeks,
                 )
             };
@@ -597,6 +616,14 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 ));
                 self.report.repairs.push((track, repair));
             }
+            HostAction::FloatConverted { track, bits } => {
+                self.line(&format!(
+                    "  曲目 {} 样本已改变：浮点转为 {bits} 位整数（明确开启；设备不接受该浮点格式）",
+                    u64::from(track) + 1
+                ));
+                self.report.samples_altered.push((track, bits));
+            }
+            HostAction::FloatStats { track, report } => self.report.add_float_stats(track, report),
             HostAction::ChannelsDuplicated { track } => {
                 self.line(&format!(
                     "  曲目 {} 声道已改变：单声道 [FC] 复制为 [FL FR]（明确开启；样本值未改变，不混音）",

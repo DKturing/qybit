@@ -23,13 +23,16 @@
 //! 要目标帧的字节位置（[`Decoder::seek`]）并发出 `Seek`，宿主移动读取位置后继续读取；解码器
 //! 只输出目标帧及之后的样本。解码器不支持定位或宿主回报 `SeekFailed` 时，核心重新打开该曲目，
 //! 顺序解码并丢弃目标帧之前的样本——结果同样精确，只是更慢。
+//!
+//! 浮点源（F3）：解码输出按位存放（binary64 每样本两个 `i32`），帧数一律按
+//! [`SourceFormat::words_per_frame`] 计算。
 #![no_std]
 
 pub mod engine;
 
 pub use qy_pcm_format::pack::{Exact, Pcm};
 pub use qy_pcm_format::{
-    ChannelLayout, DeviceFormat, MAX_CHANNELS, SampleEncoding, SourceFormat, Speaker,
+    ChannelLayout, DeviceFormat, Endian, MAX_CHANNELS, SampleEncoding, SourceFormat, Speaker,
 };
 
 /// M0 默认输入窗口字节数。
@@ -590,7 +593,7 @@ impl<D: Decoder> Core<D> {
         };
         if self.discard > 0 {
             // 顺序定位：丢弃目标帧之前的样本（不配置输出、不送出）。
-            let frames = (self.decoder.pcm().len() / usize::from(format.channels())) as u64;
+            let frames = (self.decoder.pcm().len() / format.words_per_frame()) as u64;
             let n = self.discard.min(frames);
             self.decoder
                 .release(usize::try_from(n).unwrap_or(usize::MAX));
@@ -604,7 +607,7 @@ impl<D: Decoder> Core<D> {
             self.state = State::Configure(format);
             return None;
         }
-        let frames = self.decoder.pcm().len() / usize::from(format.channels());
+        let frames = self.decoder.pcm().len() / format.words_per_frame();
         self.state = State::Output { frames };
         Some(Action::Output {
             generation: self.generation,

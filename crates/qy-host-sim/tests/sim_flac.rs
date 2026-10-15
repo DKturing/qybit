@@ -382,6 +382,7 @@ fn build_case(seed: u64, fixtures: &[Fixture]) -> Case {
         on_error: ErrorPolicy::Stop,
         controls: Vec::new(),
         device_layouts: None,
+        float_formats: Vec::new(),
     };
     Case {
         tracks,

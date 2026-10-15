@@ -421,6 +421,7 @@ pub fn build_case_with(seed: u64, mut rng: Rng) -> Case {
         on_error: ErrorPolicy::Stop,
         controls,
         device_layouts: None,
+        float_formats: Vec::new(),
     };
     Case {
         tracks,

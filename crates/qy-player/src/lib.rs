@@ -91,13 +91,18 @@ impl HostResources {
             reuse: ReusePolicy::Accepts,
             on_error: ErrorPolicy::Stop,
         };
+        let mut engine = Engine::new(
+            core,
+            producer,
+            leak_zeroed::<u8>(PACK_SCRATCH_BYTES),
+            config,
+        );
+        // F3：浮点转整数工作区（明确开启时使用；配置档不提供时开启也按资源不足拒绝）。
+        if profile.convert_samples > 0 {
+            engine.set_convert_workspace(leak_zeroed::<i32>(profile.convert_samples));
+        }
         Ok(Self {
-            engine: Engine::new(
-                core,
-                producer,
-                leak_zeroed::<u8>(PACK_SCRATCH_BYTES),
-                config,
-            ),
+            engine,
             consumer: Some(consumer),
             profile,
             ring_generation: 0,

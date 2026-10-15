@@ -50,7 +50,7 @@ pub struct SimHost {
     pub engine: Engine<AutoDecoder, FrameProducer>,
     pub consumer: FrameConsumer,
     ring_generation: u64,
-    regions: [(usize, usize); 5],
+    regions: [(usize, usize); 6],
 }
 
 /// 切片占用的地址区间 `[起始, 结束)`，仅用于检查实例间工作区不重叠。
@@ -72,6 +72,7 @@ impl SimHost {
             true,
             SIM_CAPABILITIES,
             SIM_CAPABILITIES.queue_bytes,
+            PCM_WORK_SAMPLES,
         )
     }
 
@@ -83,6 +84,7 @@ impl SimHost {
             profile.aiff_enabled(),
             profile.caps,
             profile.queue_storage_bytes(),
+            profile.convert_samples,
         )
     }
 
@@ -91,6 +93,7 @@ impl SimHost {
         aiff: bool,
         caps: Capabilities,
         queue_bytes: usize,
+        convert_samples: usize,
     ) -> Result<Self, HostError> {
         let wav_pcm = leak_zeroed::<i32>(PCM_WORK_SAMPLES);
         let workspace = leak_zeroed::<i64>(cap.map_or(0, |c| c.workspace_len()));
@@ -98,12 +101,14 @@ impl SimHost {
         let window = cap.map_or(0, |c| c.input_window).max(INPUT_WINDOW_BYTES);
         let input = leak_zeroed::<u8>(window);
         let pack_scratch = leak_zeroed::<u8>(PACK_SCRATCH_BYTES);
+        let convert = leak_zeroed::<i32>(convert_samples);
         let regions = [
             region(wav_pcm),
             region(workspace),
             region(flac_pcm),
             region(input),
             region(pack_scratch),
+            region(convert),
         ];
         let decoder = AutoDecoder::empty()
             .with_wav(wav_pcm)
@@ -128,8 +133,13 @@ impl SimHost {
             reuse: ReusePolicy::Identical,
             on_error: ErrorPolicy::Stop,
         };
+        let mut engine = Engine::new(core, producer, pack_scratch, config);
+        // F3：浮点转整数工作区（配置档不提供时为空，开启转换时按资源不足拒绝）。
+        if !convert.is_empty() {
+            engine.set_convert_workspace(convert);
+        }
         Ok(Self {
-            engine: Engine::new(core, producer, pack_scratch, config),
+            engine,
             consumer,
             ring_generation: 0,
             regions,
@@ -138,7 +148,7 @@ impl SimHost {
 
     /// 启动时分配的大型缓冲地址区间（WAV PCM、FLAC 工作区、FLAC PCM、输入窗口、pack
     /// 暂存区），用于并发测试核对各实例互不重叠。
-    pub fn buffer_regions(&self) -> [(usize, usize); 5] {
+    pub fn buffer_regions(&self) -> [(usize, usize); 6] {
         self.regions
     }
 

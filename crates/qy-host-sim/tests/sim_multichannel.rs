@@ -127,6 +127,7 @@ fn scenario(
         on_error,
         controls: Vec::new(),
         device_layouts,
+        float_formats: Vec::new(),
     }
 }
 

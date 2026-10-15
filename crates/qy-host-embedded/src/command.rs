@@ -13,6 +13,7 @@
 //! | `status` | 状态与计数 |
 //! | `scan` | 重新扫描存储（换卡后；只在停止时有效） |
 //! | `mono-to-stereo on\|off` | 单声道 `[FC]` 复制到左右两路（非严格选项，默认关闭；对之后开始的曲目生效，见 tasks/O1.md） |
+//! | `float-to-int on\|off` | 浮点转整数（非严格选项，默认关闭；I²S 只输出整数，浮点文件只在开启时播放，样本已改变；见 tasks/F3.md） |
 //!
 //! 回应为一行或多行 `key=value` 文本（见 [`crate::player::Player::command`]），便于脚本解析。
 
@@ -30,6 +31,8 @@ pub enum Command {
     Scan,
     /// 开启（`true`）或关闭单声道复制到左右两路（O1）。
     MonoToStereo(bool),
+    /// 开启（`true`）或关闭浮点转整数（F3）。
+    FloatToInt(bool),
     /// 在正在播放的曲目内定位到第 n 毫秒（S1）。
     Seek(u32),
 }
@@ -95,6 +98,13 @@ pub fn parse(line: &[u8]) -> Result<Command, ParseError> {
         return match arg {
             Some(a) if eq_ignore_case(a, b"on") => Ok(Command::MonoToStereo(true)),
             Some(a) if eq_ignore_case(a, b"off") => Ok(Command::MonoToStereo(false)),
+            _ => Err(ParseError::BadArgument),
+        };
+    }
+    if eq_ignore_case(cmd, b"float-to-int") {
+        return match arg {
+            Some(a) if eq_ignore_case(a, b"on") => Ok(Command::FloatToInt(true)),
+            Some(a) if eq_ignore_case(a, b"off") => Ok(Command::FloatToInt(false)),
             _ => Err(ParseError::BadArgument),
         };
     }
@@ -206,6 +216,10 @@ mod tests {
         assert_eq!(parse(b"mono-to-stereo"), Err(ParseError::BadArgument));
         assert_eq!(parse(b"mono-to-stereo 1"), Err(ParseError::BadArgument));
         assert_eq!(parse(b"mono-to-stereo on x"), Err(ParseError::BadArgument));
+        assert_eq!(parse(b"float-to-int on"), Ok(Command::FloatToInt(true)));
+        assert_eq!(parse(b"FLOAT-TO-INT Off"), Ok(Command::FloatToInt(false)));
+        assert_eq!(parse(b"float-to-int"), Err(ParseError::BadArgument));
+        assert_eq!(parse(b"float-to-int yes"), Err(ParseError::BadArgument));
     }
 
     #[test]

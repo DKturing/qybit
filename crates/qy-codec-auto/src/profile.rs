@@ -46,6 +46,8 @@ pub struct Profile {
     /// FLAC 容量；`None` 表示不启用 FLAC。
     #[cfg(feature = "flac")]
     pub flac: Option<Capacity>,
+    /// 浮点转整数的工作区样本数（F3，明确开启的选项）；0 表示不提供，开启时按资源不足拒绝。
+    pub convert_samples: usize,
 }
 
 /// 各缓冲字节数与合计。
@@ -57,6 +59,8 @@ pub struct Budget {
     pub flac_workspace: usize,
     pub flac_pcm: usize,
     pub pack_scratch: usize,
+    /// 浮点转整数的工作区字节数（F3）。
+    pub convert: usize,
     /// 队列存储字节数（含静态队列余量）。
     pub queue: usize,
     pub total: usize,
@@ -99,7 +103,15 @@ impl Profile {
             aiff: true,
             #[cfg(feature = "flac")]
             flac: None,
+            convert_samples: 0,
         }
+    }
+
+    /// 提供浮点转整数的工作区（样本数，F3）。一次转换的帧数受它限制，大小与流式 PCM 工作区相同
+    /// 即可一次转完一批解码输出。
+    pub const fn with_convert(mut self, samples: usize) -> Self {
+        self.convert_samples = samples;
+        self
     }
 
     /// 提高能力声明中的最大声道数，不改变队列预算（字节数仍按构造时的参考声道数计算；
@@ -177,29 +189,34 @@ impl Profile {
             QueueKind::Static => 0,
         };
         let queue = self.queue_storage_bytes();
+        let convert = self.convert_samples * 4;
         Budget {
             input_window: window,
             wav_pcm,
             flac_workspace: ws,
             flac_pcm: pcm,
             pack_scratch,
+            convert,
             queue,
-            total: window + wav_pcm + ws + pcm + pack_scratch + queue,
+            total: window + wav_pcm + ws + pcm + pack_scratch + convert + queue,
         }
     }
 }
 
 /// 桌面：不设采样率上限；队列按 768 kHz / 双声道 / C32 / 500 ms 分配（3 072 000 字节，
 /// 等于 192 kHz / 8 声道 / C32 / 500 ms），最多 18 声道（布局可描述的上限，F1），FLAC 桌面
-/// 多声道容量（块 65 535、8 声道、32 位），`rtrb` 队列。
+/// 多声道容量（块 65 535、8 声道、32 位），`rtrb` 队列；浮点转整数工作区与流式 PCM 工作区同大
+/// （F3）。
 #[cfg(feature = "flac")]
 pub const DESKTOP: Profile =
     Profile::new("Desktop", u32::MAX, 768_000, 2, 32, 4, 500, QueueKind::Ring)
         .with_flac(Capacity::DESKTOP_MULTICHANNEL)
-        .with_max_channels(qy_core::MAX_CHANNELS);
+        .with_max_channels(qy_core::MAX_CHANNELS)
+        .with_convert(PCM_WORK_SAMPLES);
 
 /// 嵌入式完整版：WAV + AIFF + FLAC，≤ 96 kHz、双声道、≤ 24 位（I²S 32 位槽位），
-/// FLAC 块 ≤ 4608（[`Capacity::MCU`]），预填 250 ms（暂定），静态队列。
+/// FLAC 块 ≤ 4608（[`Capacity::MCU`]），预填 250 ms（暂定），静态队列；提供浮点转整数工作区
+/// （F3：I²S 只输出整数，浮点文件只在明确开启转换时播放）。
 #[cfg(feature = "flac")]
 pub const EMBEDDED_FULL: Profile = Profile::new(
     "Embedded Full",
@@ -211,10 +228,12 @@ pub const EMBEDDED_FULL: Profile = Profile::new(
     250,
     QueueKind::Static,
 )
-.with_flac(Capacity::MCU);
+.with_flac(Capacity::MCU)
+.with_convert(PCM_WORK_SAMPLES);
 
 /// 嵌入式精简版：WAV + AIFF（共用流式工作区，不链接 FLAC），≤ 48 kHz、双声道、16 位，预填 250 ms
-/// （暂定），静态队列。只开 `wav`（或再加 `aiff`）特性即可构建。
+/// （暂定），静态队列。只开 `wav`（或再加 `aiff`）特性即可构建。不提供浮点转整数工作区（F3：
+/// 开启转换时按资源不足拒绝浮点文件）。
 pub const EMBEDDED_LITE: Profile = Profile::new(
     "Embedded Lite",
     48_000,
@@ -242,9 +261,10 @@ mod tests {
         assert_eq!(d.flac_workspace, 65_535 * 8 * 8);
         assert_eq!(d.flac_pcm, 65_535 * 8 * 4);
         assert_eq!(d.pack_scratch, 4096 * 8);
+        assert_eq!(d.convert, 4096 * 2 * 4);
         assert_eq!(
             d.total,
-            3_072_000 + 2_097_146 + 32_768 + 4_194_240 + 2_097_120 + 32_768
+            3_072_000 + 2_097_146 + 32_768 + 4_194_240 + 2_097_120 + 32_768 + 32_768
         );
         assert_eq!(DESKTOP.caps.max_channels, 18);
         assert_eq!(DESKTOP.caps.max_rate, u32::MAX);
@@ -256,13 +276,20 @@ mod tests {
         assert_eq!(f.flac_workspace, 4_608 * 2 * 8);
         assert_eq!(f.flac_pcm, 4_608 * 2 * 4);
         assert_eq!(f.pack_scratch, 0);
-        assert_eq!(f.total, 192_016 + 28_244 + 32_768 + 73_728 + 36_864);
+        assert_eq!(f.convert, 32_768);
+        assert_eq!(
+            f.total,
+            192_016 + 28_244 + 32_768 + 73_728 + 36_864 + 32_768
+        );
 
         let l = EMBEDDED_LITE.budget();
         // 48000 × 0.25 = 12000 帧 × 4 字节 + 2 帧余量；无 FLAC，输入窗口为核心最小窗口。
         assert_eq!(l.queue, 12_000 * 4 + 8);
         assert_eq!(l.input_window, 8_192);
-        assert_eq!((l.flac_workspace, l.flac_pcm, l.pack_scratch), (0, 0, 0));
+        assert_eq!(
+            (l.flac_workspace, l.flac_pcm, l.pack_scratch, l.convert),
+            (0, 0, 0, 0)
+        );
         assert_eq!(l.total, 48_008 + 8_192 + 32_768);
     }
 

@@ -211,6 +211,14 @@ impl SourceFormat {
         self.channels as usize * self.encoding.words()
     }
 
+    /// 同采样率、同编码与位数，声道布局换成 `layout`（O1 单声道复制时的设备侧声道）。
+    pub const fn relayout(&self, layout: ChannelLayout) -> Result<Self, FormatError> {
+        match self.encoding {
+            SampleEncoding::Int => Self::with_layout(self.sample_rate, layout, self.bits),
+            _ => Self::float(self.sample_rate, layout, self.encoding),
+        }
+    }
+
     /// 同采样率、同布局、编码与位数换成 `encoding` / `bits` 的格式（整数时 `bits` 为 N）。
     pub const fn with_encoding(
         &self,

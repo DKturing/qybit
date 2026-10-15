@@ -108,6 +108,7 @@ fn tagged_tracks_play_bit_exact() {
                 on_error: ErrorPolicy::Stop,
                 controls: Vec::new(),
                 device_layouts: None,
+                float_formats: Vec::new(),
             };
             let r = run(&mut h, &s);
             let what = format!("种子 {seed} {device:?}");

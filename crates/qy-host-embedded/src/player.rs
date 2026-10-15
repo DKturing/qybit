@@ -17,8 +17,8 @@
 use core::fmt;
 
 use qy_core::engine::{
-    ChannelPolicy, Engine, EngineFault, EngineStats, ErrorPolicy, HostAction, HostEvent,
-    PlaybackPlan, Poll, Repair, Resources, Wait,
+    ChannelPolicy, Engine, EngineFault, EngineStats, ErrorPolicy, FloatPolicy, FloatReport,
+    HostAction, HostEvent, PlaybackPlan, Poll, Repair, Resources, Wait,
 };
 use qy_core::{Decoder, DeviceFormat, Fault};
 use qy_pcm_format::frames_for_millis;
@@ -59,6 +59,10 @@ pub enum Notice {
     ChannelsDuplicated { track: u32 },
     /// 曲目的定位改为顺序解码到目标位置（S1：存储不支持定位或位置越界；结果相同，只是更慢）。
     SeekSequential { track: u32 },
+    /// 曲目的浮点样本按明确开启的选项转换为 `bits` 位整数（F3：样本已改变）。
+    FloatConverted { track: u32, bits: u8 },
+    /// 浮点曲目的统计（F3）。
+    FloatStats { track: u32, report: FloatReport },
     /// 播放列表结束。
     Finished,
     /// 播放失败并停止。
@@ -86,6 +90,8 @@ pub struct Counters {
     pub repairs: u32,
     /// 单声道复制到左右两路的曲目数（O1：明确开启，声道布局已改变）。
     pub duplicated: u32,
+    /// 浮点转为整数的曲目数（F3：明确开启，样本已改变）。
+    pub converted: u32,
 }
 
 /// 状态快照。
@@ -201,6 +207,19 @@ where
     /// 对之后开始的曲目生效。
     pub fn set_channel_policy(&mut self, policy: ChannelPolicy) {
         self.engine.set_channel_policy(policy);
+    }
+
+    /// 浮点策略（默认严格）。[`FloatPolicy::ToInt`] 是明确开启的非严格选项（F3）：I²S 只输出整数，
+    /// 浮点文件只在开启时转换播放（样本已改变），每首都发出 [`Notice::FloatConverted`]；需要
+    /// 板级经 [`Player::set_convert_workspace`] 提供工作区（Embedded Lite 不提供，开启时按资源不足
+    /// 拒绝）。板级可在启动时按配置设置，也可用串口命令 `float-to-int`。对之后开始的曲目生效。
+    pub fn set_float_policy(&mut self, policy: FloatPolicy) {
+        self.engine.set_float_policy(policy);
+    }
+
+    /// 浮点转整数的工作区（板级启动时提供，静态区）。
+    pub fn set_convert_workspace(&mut self, ws: &'static mut [i32]) {
+        self.engine.set_convert_workspace(ws);
     }
 
     fn notice(&mut self, n: Notice) {
@@ -361,9 +380,8 @@ where
     fn count_fault(&mut self, fault: EngineFault) {
         let c = &mut self.counters;
         match fault {
-            EngineFault::Core(Fault::Decode(_) | Fault::InputWindow) => {
-                c.decode_errors = c.decode_errors.saturating_add(1)
-            }
+            EngineFault::Core(Fault::Decode(_) | Fault::InputWindow)
+            | EngineFault::NonFinite { .. } => c.decode_errors = c.decode_errors.saturating_add(1),
             EngineFault::Core(Fault::Configure) | EngineFault::Capability(_) => {
                 c.unsupported = c.unsupported.saturating_add(1)
             }
@@ -457,6 +475,13 @@ where
             HostAction::ChannelsDuplicated { track } => {
                 self.counters.duplicated = self.counters.duplicated.saturating_add(1);
                 self.notice(Notice::ChannelsDuplicated { track });
+            }
+            HostAction::FloatConverted { track, bits } => {
+                self.counters.converted = self.counters.converted.saturating_add(1);
+                self.notice(Notice::FloatConverted { track, bits });
+            }
+            HostAction::FloatStats { track, report } => {
+                self.notice(Notice::FloatStats { track, report });
             }
             HostAction::Finished => {
                 self.notice(Notice::Finished);
@@ -649,6 +674,21 @@ where
                     writeln!(w, "OK mono-to-stereo=off strict applies-to=next-tracks")
                 }
             }
+            Command::FloatToInt(on) => {
+                self.set_float_policy(if on {
+                    FloatPolicy::ToInt
+                } else {
+                    FloatPolicy::Strict
+                });
+                if on {
+                    writeln!(
+                        w,
+                        "OK float-to-int=on altered samples-changed applies-to=next-tracks"
+                    )
+                } else {
+                    writeln!(w, "OK float-to-int=off strict applies-to=next-tracks")
+                }
+            }
             Command::Scan => {
                 if self.engine.is_active() {
                     return writeln!(w, "ERR scan busy");
@@ -747,6 +787,21 @@ pub fn write_notice(w: &mut impl fmt::Write, n: &Notice) -> fmt::Result {
         Notice::SeekSequential { track } => {
             writeln!(w, "EVENT seek-sequential track={track} decoded-to-target")
         }
+        Notice::FloatConverted { track, bits } => writeln!(
+            w,
+            "EVENT samples-altered track={track} float->int{bits} explicit"
+        ),
+        Notice::FloatStats { track, report } => writeln!(
+            w,
+            "EVENT float-stats track={track} encoding={:?} converted={} samples={} clipped={} \
+             inexact={} nonfinite={}",
+            report.encoding,
+            report.converted_to.unwrap_or(0),
+            report.convert.samples,
+            report.convert.clipped,
+            report.convert.inexact,
+            report.nonfinite
+        ),
         Notice::Finished => writeln!(w, "EVENT finished"),
         Notice::Failed { track, fault } => {
             writeln!(w, "EVENT failed track={track} fault={fault:?}")

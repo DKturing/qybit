@@ -15,7 +15,7 @@
 //! 写入输入窗口，交给核心拒绝并计数。
 
 use qy_core::engine::{EngineFault, ErrorPolicy, HostAction, HostEvent, Poll};
-use qy_core::{ChannelLayout, DeviceFormat, Generation};
+use qy_core::{ChannelLayout, DeviceFormat, Generation, SampleEncoding};
 
 use crate::SimHost;
 
@@ -142,6 +142,9 @@ pub struct Scenario {
     /// 设备支持的声道布局（设备上的样本顺序，F1）。`None`：设备按源布局输出（WASAPI 掩码顺序）；
     /// `Some`：只支持列出的布局，位置集合与源相同而顺序不同时由 pack 纯置换，否则设备不支持。
     pub device_layouts: Option<Vec<ChannelLayout>>,
+    /// 设备接受的浮点编码（F3，小端，WASAPI 布局）。浮点源只送到同一浮点编码的设备格式；不在
+    /// 此列时按引擎的浮点策略拒绝或改请求整数。
+    pub float_formats: Vec<SampleEncoding>,
 }
 
 /// 播放控制。
@@ -194,6 +197,10 @@ pub struct Report {
     pub duplicated: Vec<u32>,
     /// 定位改为顺序解码的曲目（S1：解码器不支持定位或音源不可定位）。
     pub sequential_seeks: Vec<u32>,
+    /// 浮点按明确开启的选项转为整数的曲目与位数（F3：样本已改变）。
+    pub float_converted: Vec<(u32, u8)>,
+    /// 浮点曲目的统计（F3）。
+    pub float_stats: Vec<(u32, qy_core::engine::FloatReport)>,
     /// 执行过的 `Seek`：(曲目, 字节位置)。
     pub seeks: Vec<(usize, u64)>,
     /// 暂停期间设备输出的静音帧（不计欠载）。
@@ -315,6 +322,9 @@ pub fn choose_device_format_with(
 }
 
 fn choose_wave_order(src: &qy_core::SourceFormat, supported: &[(u8, u8)]) -> Option<DeviceFormat> {
+    if src.encoding().is_float() {
+        return None;
+    }
     let min_v = supported
         .iter()
         .filter(|(_, v)| *v >= src.bits())
@@ -323,6 +333,31 @@ fn choose_wave_order(src: &qy_core::SourceFormat, supported: &[(u8, u8)]) -> Opt
     let (c, v) = supported.iter().find(|(_, v)| *v == min_v)?;
     // 设备布局与源布局相同（WASAPI 语义：掩码顺序），F1。
     DeviceFormat::wasapi_layout(src.sample_rate(), src.layout(), *c, *v).ok()
+}
+
+/// 浮点设备格式（F3）：设备接受源的浮点编码时按源布局（或 `layouts` 中位置集合相同的一个）输出。
+pub fn choose_float(
+    src: &qy_core::SourceFormat,
+    floats: &[SampleEncoding],
+    layouts: Option<&[ChannelLayout]>,
+) -> Option<DeviceFormat> {
+    if !floats.contains(&src.encoding()) {
+        return None;
+    }
+    let layout = match layouts {
+        None => src.layout(),
+        Some(list) => list
+            .iter()
+            .copied()
+            .find(|l| l.same_positions(&src.layout()))?,
+    };
+    DeviceFormat::float_layout(
+        src.sample_rate(),
+        layout,
+        src.encoding(),
+        qy_core::Endian::Little,
+    )
+    .ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -612,11 +647,20 @@ impl Sim<'_> {
             }
             HostAction::Close { .. } => self.open_track = None,
             HostAction::SelectDevice { source } => {
-                match choose_device_format_with(
-                    &source,
-                    &self.sc.supported,
-                    self.sc.device_layouts.as_deref(),
-                ) {
+                let chosen = if source.encoding().is_float() {
+                    choose_float(
+                        &source,
+                        &self.sc.float_formats,
+                        self.sc.device_layouts.as_deref(),
+                    )
+                } else {
+                    choose_device_format_with(
+                        &source,
+                        &self.sc.supported,
+                        self.sc.device_layouts.as_deref(),
+                    )
+                };
+                match chosen {
                     Some(format) => self.handle(HostEvent::DeviceSelected { format }),
                     None => self.handle(HostEvent::DeviceUnsupported),
                 }
@@ -661,6 +705,12 @@ impl Sim<'_> {
             HostAction::TrackSkipped { track, fault } => self.report.skipped.push((track, fault)),
             HostAction::Repaired { track, repair } => self.report.repairs.push((track, repair)),
             HostAction::ChannelsDuplicated { track } => self.report.duplicated.push(track),
+            HostAction::FloatConverted { track, bits } => {
+                self.report.float_converted.push((track, bits));
+            }
+            HostAction::FloatStats { track, report } => {
+                self.report.float_stats.push((track, report));
+            }
             HostAction::SeekSequential { track } => self.report.sequential_seeks.push(track),
             HostAction::Finished => {
                 self.report.finished = true;
