@@ -169,7 +169,7 @@ fn session_controls_follow_engine_rules() {
         let Some(s) = u.model.playing.as_ref().and_then(|p| p.status) else {
             return u.model.playing.is_none();
         };
-        saw_paused |= s.paused && text::status_line(&u.model).starts_with('⏸');
+        saw_paused |= s.paused && text::status_line(&u.model).starts_with('‖');
         match stage {
             0 if s.track == 0 && s.position_frames >= TENTH => {
                 u.pause();

@@ -92,7 +92,7 @@ pub fn status_line(m: &Model) -> String {
             "正在打开…".into()
         };
     };
-    let mark = if s.paused { "⏸" } else { "▶" };
+    let mark = if s.paused { "‖" } else { "▶" };
     let n = p.entries.len();
     let mut out = format!("{mark} {}/{n}", u64::from(s.track) + 1);
     if let Some(d) = &s.device {

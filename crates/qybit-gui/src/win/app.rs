@@ -181,7 +181,7 @@ impl App {
         };
         match col {
             0 if m.playing_entry() == Some(e.id) => {
-                if m.is_paused() { "⏸" } else { "▶" }.to_string()
+                if m.is_paused() { "‖" } else { "▶" }.to_string()
             }
             0 => String::new(),
             1 => (row + 1).to_string(),

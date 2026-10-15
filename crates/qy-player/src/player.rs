@@ -295,7 +295,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                     };
                     self.line(&format!("⏭ 按操作切换：丢弃已入队的音频，{what}"));
                 }
-                Command::Pause => self.line("⏸ 暂停（设备输出静音，不算欠载）"),
+                Command::Pause => self.line("‖ 暂停（设备输出静音，不算欠载）"),
                 Command::Resume => self.line("▶ 继续"),
                 Command::MonoToStereo(true) => self.line(
                     "单声道复制到左右两路：已开启，重新播放或切换曲目后生效（已预读的下一首按原设置）；\
