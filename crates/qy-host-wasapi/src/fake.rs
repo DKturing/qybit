@@ -2,13 +2,14 @@
 //! 同形的协商记录（独占 `IsFormatSupported`/`Initialize` 的 HRESULT、描述类型），渲染仍走
 //! 真实整包循环与假平台 API。
 
-use qy_core::{DeviceFormat, SourceFormat};
+use qy_core::{DeviceFormat, SampleEncoding, SourceFormat};
 use qy_player::PhysicalSpeakers;
 use qy_player::testing::{FakeBackend, Negotiator};
 
 pub use crate::attempt::AUDCLNT_E_UNSUPPORTED_FORMAT;
 use crate::attempt::{
-    Attempt, Descriptor, Negotiation, OpenFailure, attempts, failure_message, probe_rates,
+    Attempt, Descriptor, Negotiation, OpenFailure, attempts, device_format, failure_message,
+    probe_rates,
 };
 
 /// 按设备支持列表逐项协商。
@@ -24,12 +25,19 @@ pub struct WasapiNegotiator {
     pub rates: Option<&'static [u32]>,
     /// 模拟拒绝一切单声道格式的端点。
     pub mono_rejected: bool,
+    /// 端点接受的浮点编码（F3）。
+    pub floats: &'static [SampleEncoding],
 }
 
 impl WasapiNegotiator {
     fn accepts(&self, supported: &[(u8, u8)], f: &DeviceFormat, d: Descriptor) -> bool {
         let cv = (f.container_bits(), f.valid_bits());
-        supported.contains(&cv)
+        let format_ok = if f.encoding().is_float() {
+            self.floats.contains(&f.encoding())
+        } else {
+            supported.contains(&cv)
+        };
+        format_ok
             && self.rates.is_none_or(|r| r.contains(&f.sample_rate()))
             && !(self.mono_rejected && f.channels() == 1)
             && !(self.extensible_16_rejected && cv == (16, 16) && d == Descriptor::Extensible)
@@ -51,10 +59,8 @@ impl Negotiator for WasapiNegotiator {
             Some(_) => Vec::new(),
             None => attempts(source, None),
         };
-        for ((c, v), descriptor) in list {
-            let Ok(format) =
-                DeviceFormat::wasapi_layout(source.sample_rate(), source.layout(), c, v)
-            else {
+        for (cv, descriptor) in list {
+            let Ok(format) = device_format(source, cv) else {
                 continue;
             };
             let ok = self.accepts(supported, &format, descriptor);

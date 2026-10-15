@@ -42,6 +42,8 @@ fn to_alsa(f: AlsaFormat) -> Format {
         AlsaFormat::S24_3Le => Format::S243LE,
         AlsaFormat::S24Le => Format::S24LE,
         AlsaFormat::S32Le => Format::S32LE,
+        AlsaFormat::FloatLe => Format::FloatLE,
+        AlsaFormat::Float64Le => Format::Float64LE,
     }
 }
 
@@ -137,7 +139,7 @@ impl Pcm for RealPcm {
         let hwp = HwParams::any(&self.pcm).map_err(|x| e("snd_pcm_hw_params_any", x))?;
         hwp.set_access(A::RWInterleaved)
             .map_err(|x| e("snd_pcm_hw_params_set_access", x))?;
-        Ok(AlsaFormat::ALL
+        Ok(AlsaFormat::QUERY
             .into_iter()
             .filter(|&f| hwp.test_format(to_alsa(f)).is_ok())
             .collect())

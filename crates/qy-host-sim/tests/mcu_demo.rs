@@ -9,7 +9,10 @@
 //! 未给出时测试标记为未运行并通过；设置 `QY_MCU_DEMO_REQUIRED` 时（CI 的 mcu-demo 作业）必须运行。
 //! 核对内容：
 //! - 每个设备段的格式、帧数与 FNV-1a 64 校验和等于由独立参考（FLAC：libFLAC `.s32le`；
-//!   WAV：ffmpeg `.ffmpeg.s32le`）按公式 `s << (C − N)` 放置后的字节；
+//!   WAV：ffmpeg `.ffmpeg.s32le`；浮点 WAV：ffmpeg 原样输出的位模式按定义独立换算为 N 位整数）
+//!   按公式 `s << (C − N)` 放置后的字节；
+//! - 浮点曲目（F3）：Full 开启 `float-to-int` 后转为 24 位并报告“样本已改变”及统计，Lite 严格
+//!   路径按设备不接受浮点跳过；
 //! - 跳过的曲目及原因、无欠载、暂停静音单独计数；
 //! - ELF 各段大小（`.text`/`.rodata`/`.data`/`.bss`）；Lite 版不含任何 `qy_codec_flac` 符号；
 //! - 栈高水位：运行结束后经 QEMU 监视器导出 RAM，统计复位时涂上的 0xCCCCCCCC 剩余量。
@@ -42,8 +45,23 @@ fn read_i32(path: &Path) -> Vec<i32> {
 }
 
 /// 源样本（右对齐，N 位）：FLAC 取 libFLAC 参考，WAV 取 ffmpeg 左对齐 s32 右移 32 − N 位。
+/// 浮点 WAV（`float/…`，F3 转换）：取 ffmpeg 原样输出的 binary32 位模式，按定义独立换算为 N 位
+/// 整数：x·2^(N−1) 就近取偶、限幅到 N 位范围（f32 → f64 与乘 2 的幂都是精确的）。
 fn samples(name: &str, bits: u32) -> Vec<i32> {
-    if let Some(stem) = name.strip_suffix(".flac") {
+    if let Some(stem) = name
+        .strip_prefix("float/")
+        .and_then(|n| n.strip_suffix(".wav"))
+    {
+        let full = f64::from(1u32 << (bits - 1));
+        read_i32(&fixtures("qy-codec-wav").join(format!("float/{stem}.ffmpeg.raw")))
+            .into_iter()
+            .map(|w| {
+                let x = f64::from(f32::from_bits(w as u32));
+                assert!(x.is_finite(), "{name}: 参考含非有限值");
+                (x * full).round_ties_even().clamp(-full, full - 1.0) as i32
+            })
+            .collect()
+    } else if let Some(stem) = name.strip_suffix(".flac") {
         read_i32(&fixtures("qy-codec-flac").join(format!("{stem}.s32le")))
     } else if let Some(stem) = name.strip_suffix(".wav") {
         read_i32(&fixtures("qy-codec-wav").join(format!("{stem}.ffmpeg.s32le")))
@@ -87,6 +105,8 @@ struct Expect {
     skipped: &'static [(u32, &'static str)],
     pause_periods: u32,
     has_flac: bool,
+    /// F3 浮点曲目的回应与通知行（按出现顺序）。
+    float: &'static [&'static str],
 }
 
 const FULL: Expect = Expect {
@@ -100,6 +120,7 @@ const FULL: Expect = Expect {
         ("T07.FLA", "cli_24_mono_96k_lpc12.flac"),
         ("T08.FLA", "fixed_orders_and_lpc32.flac"),
         ("T09.WAV", "pcm24_mono_48k_odd_list.wav"),
+        ("T10.WAV", "float/f32_stereo_44k_tag3.wav"),
     ],
     segments: &[
         // WAV 16 → FLAC 16 → CRC 错误前已校验的 512 帧：同格式共用一个设备段。
@@ -126,6 +147,15 @@ const FULL: Expect = Expect {
                 ("pcm24_mono_48k_odd_list.wav", 24, 0),
             ],
         ),
+        // F3：脚本在播放前开启 `float-to-int`。I²S 不接受浮点，32 位整数超出 Embedded Full 的
+        // 24 位上限，转为 24 位整数放在 32/24 槽位（样本已改变）。
+        (
+            44_100,
+            2,
+            32,
+            24,
+            &[("float/f32_stereo_44k_tag3.wav", 24, 0)],
+        ),
     ],
     skipped: &[
         (2, "Core(Decode(Malformed))"),
@@ -137,6 +167,13 @@ const FULL: Expect = Expect {
     ],
     pause_periods: 50,
     has_flac: true,
+    float: &[
+        "OK float-to-int=on altered samples-changed applies-to=next-tracks",
+        // 先按源格式请求浮点，设备不接受，再按转换回退。
+        "QYBIT-UNSUPPORTED Float",
+        "QYBIT-ALTERED track=9 float->int24",
+        "QYBIT-FLOAT track=9 samples=600 clipped=0 inexact=133 nonfinite=0",
+    ],
 };
 
 const LITE: Expect = Expect {
@@ -146,7 +183,8 @@ const LITE: Expect = Expect {
         ("T03.WAV", "ext16_6ch_51_side.wav"),
         ("T04.WAV", "pcm24_mono_48k_odd_list.wav"),
         ("T05.WAV", "pcm32_stereo_96k.wav"),
-        ("T06.WAV", "pcm16_mono_8k_fmt18.wav"),
+        ("T06.WAV", "float/f32_mono_48k_ext.wav"),
+        ("T07.WAV", "pcm16_mono_8k_fmt18.wav"),
     ],
     segments: &[
         (
@@ -164,11 +202,14 @@ const LITE: Expect = Expect {
         (2, "Capability(Channels { channels: 6, max: 2 })"),
         (3, "Capability(Bits { bits: 24, max: 16 })"),
         (4, "Capability(Rate { rate: 96000, max: 48000 })"),
+        // F3：严格路径（未开启 `float-to-int`），I²S 不接受浮点：设备格式选择失败，跳过。
+        (5, "Core(Configure)"),
     ],
     // S1：第一首定位到第 220 帧后只剩 80 帧，脚本在第 2 个周期暂停时设备正在换曲（暂停静音只在设备
     // 运行时计数），暂停静音由 2 个周期变为 1 个。
     pause_periods: 1,
     has_flac: false,
+    float: &["QYBIT-UNSUPPORTED Float"],
 };
 
 fn expected_seg_lines(e: &Expect) -> Vec<String> {
@@ -455,6 +496,17 @@ fn check(tag: &str, elf: &Path, e: &Expect, report: &mut String) {
         assert!(stat.contains(&format!(" {want}")), "{tag}: {stat}");
     }
     assert!(!lines.iter().any(|l| l.starts_with("QYBIT-FAIL")));
+    let float: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|l| {
+            l.starts_with("OK float-to-int")
+                || l.starts_with("QYBIT-UNSUPPORTED")
+                || l.starts_with("QYBIT-ALTERED")
+                || l.starts_with("QYBIT-FLOAT")
+        })
+        .collect();
+    assert_eq!(float, e.float, "{tag}: 浮点曲目");
 
     let s = &info.sections;
     let get = |k: &str| s.get(k).copied().unwrap_or(0);

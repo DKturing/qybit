@@ -1086,3 +1086,98 @@ fn mono_to_stereo_command_on_stereo_only_board() {
     assert_eq!(s.output.errors, 0);
     check_segments(&w, &[(48_000, 2, 16, 16, [a, b].concat())], "播放中关闭");
 }
+
+/// F3：浮点 WAV 在嵌入式宿主上。I²S 槽位只承载整数：默认（严格）按“不接受浮点”拒绝；串口
+/// `float-to-int on` 后按 32 → 24 → 16 位依次协商（Embedded Full 只到 24 位，32 位一档按能力跳过），
+/// 转为 24 位放入 32/24 槽位，与按定义独立计算的字节一致；通知、计数与状态行写明“样本已改变”。
+#[test]
+fn float_wav_strict_rejected_or_converted() {
+    let name = "f32_stereo_44k_tag3";
+    let dir = fixtures("qy-codec-wav").join("float");
+    let bytes = std::fs::read(dir.join(format!("{name}.wav"))).unwrap_or_default();
+    let text = std::fs::read_to_string(dir.join(format!("{name}.expect"))).unwrap_or_default();
+    let bits: Vec<u32> = text
+        .lines()
+        .skip(5)
+        .flat_map(|l| {
+            l.split(' ')
+                .filter(|x| !x.is_empty())
+                .map(|h| u32::from_str_radix(h, 16).unwrap_or(0))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    // 独立定义：round_half_even(x × 2^23)，限幅到 24 位，左对齐放入 32 位容器。
+    let want: Vec<u8> = bits
+        .iter()
+        .flat_map(|&b| {
+            let y = (f64::from(f32::from_bits(b)) * 8_388_608.0).round_ties_even();
+            let s = y.clamp(-8_388_608.0, 8_388_607.0) as i64;
+            (((s << 8) as u32).to_le_bytes()).to_vec()
+        })
+        .collect();
+    let track = Track {
+        name: "F.WAV".into(),
+        bytes,
+        rate: 44_100,
+        channels: 2,
+        bits: 24,
+        samples: Vec::new(),
+    };
+    let tracks = vec![track];
+
+    // 严格：拒绝，原因是浮点。
+    let Ok((mut p, w, _)) = setup(disk(image(&tracks)), caps(), TIMING, ErrorPolicy::Skip) else {
+        panic!("时序");
+    };
+    assert!(p.play(0));
+    let mut notices = Vec::new();
+    run(&mut p, &w, 30_000_000, &mut notices, |_, _, _| {});
+    assert!(
+        notices.contains(&Notice::Unsupported {
+            error: SelectError::Float
+        }),
+        "{notices:?}"
+    );
+    assert_eq!(p.status().counters.converted, 0);
+    check_segments(&w, &[], "严格");
+
+    // 串口开启：转为 24 位。
+    let Ok((mut p, w, _)) = setup(disk(image(&tracks)), caps(), TIMING, ErrorPolicy::Skip) else {
+        panic!("时序");
+    };
+    let mut lb = LineBuffer::<32>::new();
+    let out = send(&mut p, &mut lb, b"float-to-int on\r\n");
+    assert!(
+        out.starts_with("OK float-to-int=on altered samples-changed"),
+        "{out}"
+    );
+    assert!(p.play(0));
+    let mut notices = Vec::new();
+    run(&mut p, &w, 30_000_000, &mut notices, |_, _, _| {});
+    let s = p.status();
+    assert_eq!(notices.last(), Some(&Notice::Finished), "{notices:?}");
+    assert_eq!((s.output.underruns, s.counters.converted), (0, 1));
+    assert!(notices.contains(&Notice::FloatConverted { track: 0, bits: 24 }));
+    let stats = notices.iter().find_map(|n| match n {
+        Notice::FloatStats { track: 0, report } => Some(*report),
+        _ => None,
+    });
+    let Some(stats) = stats else {
+        panic!("{notices:?}")
+    };
+    assert_eq!(
+        (
+            stats.converted_to,
+            stats.convert.samples,
+            stats.convert.clipped
+        ),
+        (Some(24), bits.len() as u64, 0)
+    );
+    let mut line = String::new();
+    let _ = qy_host_embedded::player::write_status(&mut line, &s);
+    assert!(line.contains(" converted=1 float_to_int=on"), "{line}");
+    let mut ev = String::new();
+    let _ = write_notice(&mut ev, &Notice::FloatConverted { track: 0, bits: 24 });
+    assert_eq!(ev, "EVENT samples-altered track=0 float->int24 explicit\n");
+    check_segments(&w, &[(44_100, 2, 32, 24, want)], "浮点转 24 位");
+}

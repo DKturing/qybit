@@ -59,10 +59,12 @@ const MAX_TRACKS: usize = 16;
 
 /// 串口命令脚本：（时钟周期，命令行）。时钟为 DMA 缓冲周期（含设备空闲时的等待）。
 /// `seek 5`（S1）：播放开始时定位到第一首的 5 ms 处（44.1 kHz 第 220 帧），宿主据此核对第一段
-/// 从该帧起与参考一致。
+/// 从该帧起与参考一致。Full 在播放前开启 `float-to-int`（F3：I²S 只输出整数，浮点曲目转换为
+/// 24 位，样本已改变）；Lite 保持严格路径，浮点曲目被拒绝。
 #[cfg(feature = "full")]
-const SCRIPT: [(u32, &[u8]); 5] = [
+const SCRIPT: [(u32, &[u8]); 6] = [
     (0, b"ls\r\n"),
+    (0, b"float-to-int on\r\n"),
     (0, b"play\r\n"),
     (0, b"seek 5\r\n"),
     (100, b"pause\r\n"),
@@ -91,6 +93,9 @@ mod flac_buffers {
     pub const PCM: usize = BUDGET.flac_pcm / 4;
     pub static WORKSPACE: ConstStaticCell<[i64; WS]> = ConstStaticCell::new([0; WS]);
     pub static PCM_BUF: ConstStaticCell<[i32; PCM]> = ConstStaticCell::new([0; PCM]);
+    /// 浮点转整数工作区（F3，Embedded Full）。
+    pub const CONVERT: usize = BUDGET.convert / 4;
+    pub static CONVERT_BUF: ConstStaticCell<[i32; CONVERT]> = ConstStaticCell::new([0; CONVERT]);
 }
 
 /// “SD 卡”镜像（构建时生成，见 `build.rs`）。
@@ -397,7 +402,8 @@ fn setup() -> Result<DemoPlayer, SetupError> {
         NoClock,
     );
     let (loads, n) = loads();
-    Player::new(
+    #[allow(unused_mut)]
+    let mut player = Player::new(
         engine,
         storage,
         DemoOut,
@@ -405,7 +411,14 @@ fn setup() -> Result<DemoPlayer, SetupError> {
         READ_CHUNK,
         &loads[..n],
     )
-    .map_err(SetupError::Budget)
+    .map_err(SetupError::Budget)?;
+    #[cfg(feature = "full")]
+    player.set_convert_workspace(
+        flac_buffers::CONVERT_BUF
+            .try_take()
+            .ok_or(SetupError::Buffers)?,
+    );
+    Ok(player)
 }
 
 struct Run {
@@ -457,6 +470,18 @@ fn run(p: &mut DemoPlayer, dma: &mut [u8]) -> Run {
                     r.failed = true;
                     hprintln!("QYBIT-FAIL track={} fault={:?}", track, fault)
                 }
+                Notice::Unsupported { error } => hprintln!("QYBIT-UNSUPPORTED {:?}", error),
+                Notice::FloatConverted { track, bits } => {
+                    hprintln!("QYBIT-ALTERED track={} float->int{}", track, bits)
+                }
+                Notice::FloatStats { track, report } => hprintln!(
+                    "QYBIT-FLOAT track={} samples={} clipped={} inexact={} nonfinite={}",
+                    track,
+                    report.convert.samples,
+                    report.convert.clipped,
+                    report.convert.inexact,
+                    report.nonfinite
+                ),
                 Notice::Finished => r.finished = true,
                 Notice::OutputError => r.host_errors += 1,
                 _ => {}
@@ -516,13 +541,14 @@ fn report(p: &DemoPlayer, r: &Run) -> u8 {
     );
     let b = BUDGET;
     hprintln!(
-        "QYBIT-BUDGET queue={} input={} wav_pcm={} flac_ws={} flac_pcm={} pack={} total={}",
+        "QYBIT-BUDGET queue={} input={} wav_pcm={} flac_ws={} flac_pcm={} pack={} convert={} total={}",
         b.queue,
         b.input_window,
         b.wav_pcm,
         b.flac_workspace,
         b.flac_pcm,
         b.pack_scratch,
+        b.convert,
         b.total
     );
     let m = p.margins();

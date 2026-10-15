@@ -50,6 +50,8 @@ pub enum SelectError {
     Layout,
     /// 没有能无损承载该位深的槽位格式（N > V）。
     Bits(u8),
+    /// 源为浮点（F3）：I²S 槽位只承载整数 PCM；明确开启浮点转整数时引擎会改请求整数格式。
+    Float,
 }
 
 impl fmt::Display for SelectError {
@@ -58,6 +60,9 @@ impl fmt::Display for SelectError {
             Self::Rate(r) => write!(f, "本板时钟不能精确产生 {r} Hz"),
             Self::Channels(c) => write!(f, "本板不支持 {c} 声道输出"),
             Self::Layout => f.write_str("声道布局与本板输出不同"),
+            Self::Float => {
+                f.write_str("本板 I²S 输出只承载整数 PCM，不接受浮点（可明确开启浮点转整数）")
+            }
             Self::Bits(b) => write!(f, "本板没有能无损承载 {b} 位的槽位格式"),
         }
     }
@@ -66,6 +71,9 @@ impl fmt::Display for SelectError {
 impl OutputCaps {
     /// 为源选择设备格式：采样率与声道精确相同、布局相同，取第一个能无损承载源（N ≤ V）的槽位。
     pub fn select(&self, src: &SourceFormat) -> Result<DeviceFormat, SelectError> {
+        if src.encoding().is_float() {
+            return Err(SelectError::Float);
+        }
         if !self.rates.contains(&src.sample_rate()) {
             return Err(SelectError::Rate(src.sample_rate()));
         }

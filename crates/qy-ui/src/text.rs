@@ -36,16 +36,24 @@ pub fn duration(frames: u64, rate: u32) -> String {
 
 /// 源格式：`44.1 kHz 16 位 2 声道`。
 pub fn source_text(f: &SourceFormat) -> String {
-    format!(
-        "{} kHz {} 位 {} 声道",
-        khz(f.sample_rate()),
-        f.bits(),
-        f.channels()
-    )
+    let bits = if f.encoding().is_float() {
+        format!("{} 位浮点", f.bits())
+    } else {
+        format!("{} 位", f.bits())
+    };
+    format!("{} kHz {bits} {} 声道", khz(f.sample_rate()), f.channels())
 }
 
 /// 设备格式：`44.1 kHz 2 声道 容器 32 位 / 有效 24 位`。
 pub fn device_text(f: &DeviceFormat) -> String {
+    if f.encoding().is_float() {
+        return format!(
+            "{} kHz {} 声道 {} 位浮点",
+            khz(f.sample_rate()),
+            f.channels(),
+            f.container_bits()
+        );
+    }
     format!(
         "{} kHz {} 声道 容器 {} 位 / 有效 {} 位",
         khz(f.sample_rate()),
@@ -143,6 +151,12 @@ pub fn fidelity_line(m: &Model) -> String {
         if skipped > 0 {
             return format!("有 {skipped} 首因错误跳过：本次播放未完整完成");
         }
+        let samples = p.status.map_or(0, |s| s.samples_altered);
+        if samples > 0 {
+            return format!(
+                "样本已改变：本次播放有 {samples} 首浮点转为整数（明确开启的选项），不是严格路径"
+            );
+        }
         let altered = p.status.map_or(0, |s| s.channels_altered);
         if altered > 0 {
             return format!(
@@ -162,7 +176,8 @@ pub fn outcome_line(o: &Outcome) -> String {
     if o.strict_intact {
         "播放完成：严格路径，无欠载、无错误（不证明设备端 bit-perfect）".into()
     } else if o.software_intact {
-        "播放完成：无欠载、无错误；部分曲目的声道布局已按选项改变，不是严格路径".into()
+        "播放完成：无欠载、无错误；部分曲目已按明确开启的选项改变（声道布局或样本），不是严格路径"
+            .into()
     } else if o.device_error {
         "输出设备错误：播放已停止".into()
     } else if o.finished && o.underrun_events > 0 {

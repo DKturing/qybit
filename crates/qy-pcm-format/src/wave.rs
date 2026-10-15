@@ -53,6 +53,14 @@ pub const KSDATAFORMAT_SUBTYPE_PCM: Guid = Guid {
     data4: [0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71],
 };
 
+/// `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT` = {00000003-0000-0010-8000-00AA00389B71}（F3）。
+pub const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: Guid = Guid {
+    data1: 0x0000_0003,
+    data2: 0x0000,
+    data3: 0x0010,
+    data4: [0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71],
+};
+
 /// 单声道 FrontCenter，双声道 FrontLeft|FrontRight；其他声道数不定义布局。
 pub const fn channel_mask(channels: u16) -> Result<u32, FormatError> {
     match channels {
@@ -133,12 +141,16 @@ impl WaveFormatEx {
         }
     }
 
-    /// 由设备格式构造；只接受 C16/V16、小端，且声道布局为标准单声道 `[FC]` 或立体声 `[FL FR]`。
+    /// 由设备格式构造；只接受整数 C16/V16、小端，且声道布局为标准单声道 `[FC]` 或立体声 `[FL FR]`。
+    /// 浮点设备格式只用 EXTENSIBLE 描述（[`WaveFormatExtensible::from_device`]），这里拒绝。
     ///
     /// 依据：Microsoft Learn `WAVEFORMATEX`：`nChannels` 为 1 是单声道、2 是立体声，没有声道
     /// 掩码；`WAVE_FORMAT_PCM` 的 `wBitsPerSample` 为 8 或 16。其他布局（如只占左声道位置的
     /// 单声道）无法用它表示，返回 [`FormatError::UndefinedLayout`]，以免丢失声道位置。
     pub const fn from_device(f: &DeviceFormat) -> Result<Self, FormatError> {
+        if f.encoding().is_float() {
+            return Err(FormatError::Encoding);
+        }
         if !matches!(f.endian(), Endian::Little) {
             return Err(FormatError::Layout);
         }
@@ -222,11 +234,58 @@ impl WaveFormatExtensible {
         })
     }
 
-    /// 由设备格式构造；要求小端、有效位高位对齐（WASAPI 语义）。
+    /// 浮点描述（F3）：`wBitsPerSample` 与 `wValidBitsPerSample` 都为浮点位宽（32 / 64），子格式
+    /// `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`，布局必须是掩码顺序。
+    pub const fn float_layout(
+        sample_rate: u32,
+        layout: ChannelLayout,
+        bits: u16,
+    ) -> Result<Self, FormatError> {
+        if !layout.is_wave_order() {
+            return Err(FormatError::LayoutOrder);
+        }
+        if !matches!(bits, 32 | 64) {
+            return Err(FormatError::ContainerBits);
+        }
+        if sample_rate == 0 {
+            return Err(FormatError::SampleRate);
+        }
+        let channels = layout.channels();
+        if channels == 0 || channels > MAX_CHANNELS {
+            return Err(FormatError::Channels);
+        }
+        let block_align = match channels.checked_mul(bits / 8) {
+            Some(v) => v,
+            None => return Err(FormatError::Overflow),
+        };
+        let avg_bytes_per_sec = match sample_rate.checked_mul(block_align as u32) {
+            Some(v) => v,
+            None => return Err(FormatError::Overflow),
+        };
+        Ok(Self {
+            format: WaveFormatEx {
+                format_tag: WAVE_FORMAT_EXTENSIBLE,
+                channels,
+                samples_per_sec: sample_rate,
+                avg_bytes_per_sec,
+                block_align,
+                bits_per_sample: bits,
+                cb_size: EXTENSIBLE_CB_SIZE,
+            },
+            valid_bits_per_sample: bits,
+            channel_mask: layout.mask(),
+            sub_format: KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
+        })
+    }
+
+    /// 由设备格式构造；要求小端、有效位高位对齐（WASAPI 语义）。浮点设备格式用 IEEE_FLOAT 子格式。
     pub const fn from_device(f: &DeviceFormat) -> Result<Self, FormatError> {
         if !matches!(f.endian(), Endian::Little) || !matches!(f.placement(), Placement::MsbAligned)
         {
             return Err(FormatError::Layout);
+        }
+        if let Some(bits) = f.encoding().float_bits() {
+            return Self::float_layout(f.sample_rate(), f.layout(), bits as u16);
         }
         Self::pcm_layout(
             f.sample_rate(),
@@ -548,5 +607,44 @@ mod tests {
             };
             assert_eq!(WaveFormatEx::from_device(&d), want, "{mask:#x}");
         }
+    }
+    /// F3：浮点 EXTENSIBLE 描述的字段与字节（子格式 IEEE_FLOAT，有效位等于容器）。
+    #[test]
+    fn float_extensible_fields() {
+        use crate::SampleEncoding;
+        let Ok(d) =
+            DeviceFormat::wasapi_float(96_000, ChannelLayout::STEREO, SampleEncoding::Float64)
+        else {
+            panic!()
+        };
+        let Ok(w) = WaveFormatExtensible::from_device(&d) else {
+            panic!()
+        };
+        assert_eq!(
+            (
+                w.format.format_tag,
+                w.format.bits_per_sample,
+                w.valid_bits_per_sample
+            ),
+            (WAVE_FORMAT_EXTENSIBLE, 64, 64)
+        );
+        assert_eq!(
+            (w.format.block_align, w.format.avg_bytes_per_sec),
+            (16, 1_536_000)
+        );
+        assert_eq!(w.channel_mask, 0x3);
+        let b = w.to_bytes();
+        // 子格式 {00000003-0000-0010-8000-00AA00389B71} 的内存字节。
+        assert_eq!(
+            &b[24..],
+            &[
+                3, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xAA, 0, 0x38, 0x9B, 0x71
+            ]
+        );
+        assert_eq!(WaveFormatEx::from_device(&d), Err(FormatError::Encoding));
+        assert_eq!(
+            WaveFormatExtensible::float_layout(48_000, ChannelLayout::MONO, 24),
+            Err(FormatError::ContainerBits)
+        );
     }
 }

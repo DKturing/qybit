@@ -1,7 +1,8 @@
 //! 诊断子命令（与平台无关）：用来区分“解码 / pack 出错”与“设备输出出错”。
 //!
 //! - `decode`：用自有解码器解码，经 pack（与播放时同一条表示转换路径）写成标准 WAV
-//!   （WAVE_FORMAT_EXTENSIBLE，容器 = 有效位：N ≤ 16 → 16，N ≤ 24 → 24，否则 32）。
+//!   （WAVE_FORMAT_EXTENSIBLE，容器 = 有效位：N ≤ 16 → 16，N ≤ 24 → 24，否则 32）。浮点源（F3）
+//!   按位原样写成同一浮点格式的 WAV（IEEE_FLOAT 子格式，带 fact 块）。
 //!   这个文件在任何普通播放器里听起来正常，就说明解码与 pack 正确，问题在设备输出一侧。
 //! - `tone`：写一个正弦测试音 WAV。正弦比方波更容易听出失真，可用来比较不同采样率的输出。
 //!
@@ -22,17 +23,30 @@ fn leak<T: Copy + Default>(len: usize) -> &'static mut [T] {
     Box::leak(vec![T::default(); len].into_boxed_slice())
 }
 
-/// WAV 文件头（fmt 为 40 字节的 EXTENSIBLE）。
+/// WAV 文件头（fmt 为 40 字节的 EXTENSIBLE）。浮点格式另写 fact 块（RIFF 规范：非 PCM 格式须有，
+/// 内容为样本帧数）。
 fn wav_header(format: &DeviceFormat, data_len: u32) -> Result<Vec<u8>, String> {
     let fmt = WaveFormatExtensible::from_device(format)
         .map_err(|e| format!("无法描述格式：{e:?}"))?
         .to_bytes();
-    let mut h = Vec::with_capacity(68);
+    let fact = format.encoding().is_float();
+    let fact_len = if fact { 12 } else { 0 };
+    let mut h = Vec::with_capacity(80);
     h.extend_from_slice(b"RIFF");
-    h.extend_from_slice(&(4 + 8 + 40 + 8u32).saturating_add(data_len).to_le_bytes());
+    h.extend_from_slice(
+        &(4 + 8 + 40 + 8u32 + fact_len)
+            .saturating_add(data_len)
+            .to_le_bytes(),
+    );
     h.extend_from_slice(b"WAVEfmt ");
     h.extend_from_slice(&40u32.to_le_bytes());
     h.extend_from_slice(&fmt);
+    if fact {
+        let frames = data_len / u32::from(format.block_align().max(1));
+        h.extend_from_slice(b"fact");
+        h.extend_from_slice(&4u32.to_le_bytes());
+        h.extend_from_slice(&frames.to_le_bytes());
+    }
     h.extend_from_slice(b"data");
     h.extend_from_slice(&data_len.to_le_bytes());
     Ok(h)
@@ -85,14 +99,22 @@ pub fn decode(input: &Path, out: &Path) -> Result<String, String> {
                             17..=24 => 24,
                             _ => 32,
                         };
-                        let f = DeviceFormat::wasapi_layout(src.sample_rate(), src.layout(), c, c)
-                            .map_err(|e| format!("输出格式：{e:?}"))?;
+                        let f = if src.encoding().is_float() {
+                            DeviceFormat::wasapi_float(
+                                src.sample_rate(),
+                                src.layout(),
+                                src.encoding(),
+                            )
+                        } else {
+                            DeviceFormat::wasapi_layout(src.sample_rate(), src.layout(), c, c)
+                        }
+                        .map_err(|e| format!("输出格式：{e:?}"))?;
                         device = Some(f);
                         f
                     }
                 };
-                let ch = usize::from(src.channels());
-                let pcm = Pcm::exact(&d.pcm()[..n * ch], src).map_err(|e| format!("{e:?}"))?;
+                let words = src.words_per_frame();
+                let pcm = Pcm::exact(&d.pcm()[..n * words], src).map_err(|e| format!("{e:?}"))?;
                 let k = pack(&pcm, &dev, &mut scratch).map_err(|e| format!("pack：{e:?}"))?;
                 pcm_bytes.extend_from_slice(&scratch[..k * usize::from(dev.block_align())]);
                 frames += k as u64;
@@ -116,10 +138,10 @@ pub fn decode(input: &Path, out: &Path) -> Result<String, String> {
     let mut msg = String::new();
     if let Some(s) = src {
         msg.push_str(&format!(
-            "源：{} Hz / {} 声道 / {} 位；",
+            "源：{} Hz / {} 声道 / {}；",
             s.sample_rate(),
             s.channels(),
-            s.bits()
+            qy_player::source_bits_text(&s)
         ));
     }
     msg.push_str(&format!(

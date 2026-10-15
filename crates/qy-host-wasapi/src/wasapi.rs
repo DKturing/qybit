@@ -286,9 +286,8 @@ fn negotiate(
     };
     // O1 §2：端点物理扬声器只作提示，读不到记为“未报告”，不影响协商。
     negotiation.speakers = crate::endpoints::physical_speakers(&device);
-    for &((c, v), descriptor) in list {
-        let Ok(format) = DeviceFormat::wasapi_layout(source.sample_rate(), source.layout(), c, v)
-        else {
+    for &(cv, descriptor) in list {
+        let Ok(format) = crate::attempt::device_format(source, cv) else {
             continue;
         };
         let mut attempt = Attempt {

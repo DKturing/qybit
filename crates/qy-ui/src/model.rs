@@ -116,6 +116,8 @@ pub struct Model {
     pub device: Option<String>,
     /// 单声道复制到左右两路（tasks/O1.md；明确开启，默认关闭，报告标为“已改变”）。
     pub mono_to_stereo: bool,
+    /// 浮点转整数（tasks/F3.md；明确开启，默认关闭，报告标为“样本已改变”）。
+    pub float_to_int: bool,
     /// 故障注入（只供模拟设备核对与测试，默认 `None`）：播放线程读取音频文件的速率上限（字节/秒），
     /// 低于曲目码率时产生真实的欠载。
     pub read_limit: Option<u64>,
@@ -337,6 +339,7 @@ impl Ui {
             first: u32::try_from(index).unwrap_or(u32::MAX),
             device: self.model.device.clone(),
             mono_to_stereo: self.model.mono_to_stereo,
+            float_to_int: self.model.float_to_int,
             read_limit: self.model.read_limit,
         };
         if let Some(tx) = &self.play_tx
@@ -379,6 +382,24 @@ impl Ui {
                 Changes::default()
             }
             _ => self.play_from(selected.unwrap_or(0)),
+        }
+    }
+
+    /// 浮点转整数（F3，非严格选项）。记为之后新会话的设置；有会话在进行时同时发给该会话，对之后
+    /// 配置的曲目生效。
+    pub fn set_float_to_int(&mut self, on: bool) -> Changes {
+        if self.model.float_to_int == on {
+            return Changes::default();
+        }
+        self.model.float_to_int = on;
+        if let Some(p) = self.model.playing.as_mut()
+            && !p.stopping
+        {
+            send(p, Command::FloatToInt(on));
+        }
+        Changes {
+            status: true,
+            ..Default::default()
         }
     }
 

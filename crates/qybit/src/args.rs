@@ -5,7 +5,7 @@ use std::path::PathBuf;
 pub const USAGE: &str = "\
 用法:
   qybit list-devices                         列出可用输出设备（Windows：端点 ID 与名称；Linux：hw 设备名）
-  qybit --device <设备> [--container 16|24|32] [--mono-to-stereo] <文件>...
+  qybit --device <设备> [--container 16|24|32] [--mono-to-stereo] [--float-to-int] <文件>...
                                              按顺序播放 WAV/FLAC/AIFF（按文件头识别）；Ctrl+C 停止并输出报告
   qybit matrix --device <设备> [--out <目录>]
                                              运行设备格式矩阵，写出 JSON/CSV 报告
@@ -26,6 +26,11 @@ PowerShell 会把未加引号的 {…} 当成脚本块，端点 ID 要加单引�
 原样复制到左右两路（不混音、不改增益、样本值不变）。用于只接受立体声的设备；报告标为“声道已改变”，
 不再记为严格路径。
 
+--float-to-int：非严格选项，默认关闭。浮点 WAV 先按原样（同一浮点格式）请求设备；设备不接受浮点时，
+依次按 32、24、16 位整数请求，把样本按 round(x × 2^(V−1)) 转为设备有效位 V 的整数（不加抖动，
+超出 ±1.0 的样本限幅）。报告标为“样本已改变”，并给出不精确与限幅的样本数；遇到 NaN 或无穷时该曲目
+在该处停止。
+
 退出码：0 完整播放；2 播放完成但有欠载；1 失败（含设备不支持、打开失败、设备错误、中断）。";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +42,8 @@ pub enum Command {
         container: Option<u8>,
         /// 明确开启的单声道复制到左右两路（tasks/O1.md）。
         mono_to_stereo: bool,
+        /// 明确开启的浮点转整数（tasks/F3.md）。
+        float_to_int: bool,
     },
     Matrix {
         device: String,
@@ -140,9 +147,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             let mut files = Vec::new();
             let mut container = None;
             let mut mono_to_stereo = false;
+            let mut float_to_int = false;
             while let Some(a) = it.next() {
                 if a == "--mono-to-stereo" {
                     mono_to_stereo = true;
+                } else if a == "--float-to-int" {
+                    float_to_int = true;
                 } else if a == "--container" {
                     container = Some(match value(&mut it, "--container")?.as_str() {
                         "16" => 16,
@@ -164,6 +174,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 files,
                 container,
                 mono_to_stereo,
+                float_to_int,
             })
         }
         Some(x) if !x.starts_with('-') => Err(format!(
@@ -218,6 +229,7 @@ mod tests {
                 files: vec!["a.wav".into(), "b.wav".into()],
                 container: None,
                 mono_to_stereo: false,
+                float_to_int: false,
             })
         );
         assert_eq!(
@@ -227,6 +239,7 @@ mod tests {
                 files: vec!["a.wav".into(), "b.flac".into()],
                 container: Some(32),
                 mono_to_stereo: false,
+                float_to_int: false,
             })
         );
         assert_eq!(
@@ -236,6 +249,17 @@ mod tests {
                 files: vec!["m.wav".into()],
                 container: None,
                 mono_to_stereo: true,
+                float_to_int: false,
+            })
+        );
+        assert_eq!(
+            p(&["--device", "id", "f.wav", "--float-to-int"]),
+            Ok(Command::Play {
+                device: "id".into(),
+                files: vec!["f.wav".into()],
+                container: None,
+                mono_to_stereo: false,
+                float_to_int: true,
             })
         );
         assert!(p(&["--device", "id", "--container", "20", "a.wav"]).is_err());

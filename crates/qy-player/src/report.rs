@@ -348,6 +348,14 @@ impl<A> PlaybackReport<A> {
 }
 
 fn format_text(f: &DeviceFormat) -> String {
+    if f.encoding().is_float() {
+        return format!(
+            "{} Hz / {} 声道 / {}（IEEE_FLOAT）",
+            f.sample_rate(),
+            f.channels(),
+            encoding_text(f.encoding())
+        );
+    }
     format!(
         "{} Hz / {} 声道 / 容器 {} 位 / 有效 {} 位",
         f.sample_rate(),
@@ -355,6 +363,15 @@ fn format_text(f: &DeviceFormat) -> String {
         f.container_bits(),
         f.valid_bits()
     )
+}
+
+/// 源样本的位数文字：整数为“N 位有效”，浮点为“32 / 64 位浮点”（F3）。
+pub fn source_bits_text(s: &SourceFormat) -> String {
+    if s.encoding().is_float() {
+        encoding_text(s.encoding()).to_string()
+    } else {
+        format!("{} 位有效", s.bits())
+    }
 }
 
 fn applied_text(out: &mut String, a: Option<AppliedParams>) {
@@ -386,9 +403,9 @@ pub(crate) fn negotiation_text<A: AttemptRecord>(out: &mut String, n: &Negotiati
     let channels = if n.duplicated_mono { 1 } else { s.channels() };
     let _ = write!(
         out,
-        "  源格式：{} Hz / {channels} 声道 / {} 位有效",
+        "  源格式：{} Hz / {channels} 声道 / {}",
         s.sample_rate(),
-        s.bits()
+        source_bits_text(s)
     );
     if n.duplicated_mono {
         let _ = write!(

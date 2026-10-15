@@ -60,8 +60,8 @@ use windows::core::{PCWSTR, PWSTR, w};
 
 use super::app::{
     App, COLUMNS, ID_ABOUT, ID_ADD_FILES, ID_ADD_FOLDER, ID_CLEAR, ID_EXIT, ID_NEXT, ID_PLAY,
-    ID_PREV, ID_REMOVE, ID_STOP, IDC_DEVICE, IDC_FORMAT, IDC_LIST, IDC_LOG, IDC_MONO, IDC_SEEK,
-    IDC_STATUS, IDC_VOLUME, IDC_VOLUME_LABEL, Input, Op, VolumeView, about_text,
+    ID_PREV, ID_REMOVE, ID_STOP, IDC_DEVICE, IDC_FLOAT, IDC_FORMAT, IDC_LIST, IDC_LOG, IDC_MONO,
+    IDC_SEEK, IDC_STATUS, IDC_VOLUME, IDC_VOLUME_LABEL, Input, Op, VolumeView, about_text,
 };
 use super::sim::Sim;
 use qy_host_wasapi::volume::EndpointVolume;
@@ -87,6 +87,7 @@ struct Handles {
     buttons: [HWND; 4],
     device: HWND,
     mono: HWND,
+    float: HWND,
     list: HWND,
     log: HWND,
     status: HWND,
@@ -440,6 +441,13 @@ fn create(title: &str) -> Option<Handles> {
                 0,
                 IDC_MONO,
             )?,
+            float: child(
+                w!("BUTTON"),
+                w!("浮点转整数（会改变样本）"),
+                WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
+                0,
+                IDC_FLOAT,
+            )?,
             list: child(
                 WC_LISTVIEWW,
                 w!(""),
@@ -606,6 +614,7 @@ fn apply_dpi(h: &Handles) {
             h.buttons[3],
             h.device,
             h.mono,
+            h.float,
             h.list,
             h.log,
             h.status,
@@ -662,8 +671,10 @@ fn layout(h: &Handles) {
         }
         let _ = MoveWindow(h.device, x + s(6), bar_y + s(2), s(260), s(300), true);
         x += s(272);
+        let _ = MoveWindow(h.mono, x + s(6), bar_y, s(250), bar_h, true);
+        x += s(256);
         let _ = MoveWindow(
-            h.mono,
+            h.float,
             x + s(6),
             bar_y,
             (rc.right - x - s(12)).max(0),
@@ -1086,6 +1097,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                             dispatch(Input::Device(i.0 as usize));
                             open_volume();
                         }
+                    }
+                }
+                IDC_FLOAT if code == 0 => {
+                    if let Some(h) = HANDLES.get() {
+                        // SAFETY: 复选框句柄有效；只读查询。
+                        let r = unsafe { SendMessageW(h.float, BM_GETCHECK, None, None) };
+                        dispatch(Input::Float(r.0 as u32 == BST_CHECKED.0));
                     }
                 }
                 IDC_MONO if code == 0 => {

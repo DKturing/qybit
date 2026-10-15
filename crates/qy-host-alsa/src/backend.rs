@@ -168,7 +168,12 @@ impl<O: Opener, P: ThreadPriority + Clone + Send + 'static> Backend for AlsaBack
             }
         };
         let list: Vec<AlsaFormat> = match self.forced {
-            Some(f) if f.valid_bits() >= source.bits() => vec![f],
+            Some(f)
+                if f.encoding() == source.encoding()
+                    && (f.encoding().is_float() || f.valid_bits() >= source.bits()) =>
+            {
+                vec![f]
+            }
             Some(_) => Vec::new(),
             None => candidates(source, &supported).as_slice().collect(),
         };
@@ -282,11 +287,11 @@ impl<O: Opener, P: ThreadPriority + Clone + Send + 'static> Backend for AlsaBack
             source,
             attempts,
             format!(
-                "设备 {} 不能以不改变样本的格式打开（源 {} Hz / {} 声道 / {} 位；设备接受 {}）",
+                "设备 {} 不能以不改变样本的格式打开（源 {} Hz / {} 声道 / {}；设备接受 {}）",
                 self.device,
                 source.sample_rate(),
                 source.channels(),
-                source.bits(),
+                qy_player::source_bits_text(source).replace("有效", ""),
                 if names.is_empty() {
                     "无".to_string()
                 } else {

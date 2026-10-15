@@ -27,7 +27,8 @@ pub use player::{
 };
 pub use report::{
     AppliedParams, AttemptRecord, Evidence, Negotiation, OpenFailure, PhysicalSpeakers,
-    PlaybackReport, RateProbe, StreamReport, Submission, fault_text,
+    PlaybackReport, RateProbe, StreamReport, Submission, encoding_text, fault_text,
+    source_bits_text,
 };
 
 use qy_codec_auto::profile::{DESKTOP, Profile};

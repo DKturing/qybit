@@ -8,7 +8,8 @@
 //!   `lost`（第 1 个输出流约 2 秒后设备失效）。
 //! - `QY_GUI_SIM_FILES`：逗号分隔的测试曲目，生成在临时目录并按顺序加入播放列表：`mono48`
 //!   （48 kHz 16 位单声道 5 秒）、`stereo44`（44.1 kHz 16 位双声道 10 秒）、`hires96`（96 kHz 24 位
-//!   双声道 10 秒）、`short`（44.1 kHz 16 位双声道 1 秒）。
+//!   双声道 10 秒）、`short`（44.1 kHz 16 位双声道 1 秒）、`float44`（44.1 kHz 32 位浮点双声道 10 秒；
+//!   模拟设备只接受整数，用于核对浮点的严格拒绝与明确开启的浮点转整数，F3）。
 //!
 //! 未启用 `sim` 特性时 [`Sim`] 是不可构造的空类型，`from_env` 恒为 `None`。
 
@@ -52,7 +53,7 @@ mod enabled {
     use std::path::PathBuf;
 
     use qy_host_wasapi::endpoints::EndpointInfo;
-    use qy_player::signal::write_test_wav;
+    use qy_player::signal::{write_test_wav, write_test_wav_float};
     use qy_player::testing::{FakeBackend, FakeDevice, NoMonoNegotiator};
     use qy_ui::Ui;
     use qy_ui::session::Notify;
@@ -72,6 +73,11 @@ mod enabled {
             let files = names
                 .split(',')
                 .filter_map(|n| {
+                    if n.trim() == "float44" {
+                        let path = dir.join("sim-float44.wav");
+                        write_test_wav_float(&path, 44_100, 2, 441_000).ok()?;
+                        return Some(path);
+                    }
                     let (rate, channels, bits, seconds) = match n.trim() {
                         "mono48" => (48_000, 1, 16, 5),
                         "stereo44" => (44_100, 2, 16, 10),

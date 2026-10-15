@@ -1429,6 +1429,22 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
                 {
                     self.float_stage += 1;
                 }
+                // 浮点源本身超出本机能力（如按浮点宽度估计的队列放不下），而已明确开启转换：
+                // 转换后的整数可能放得下，从第一档整数起试；没有转换工作区时按资源不足拒绝。
+                Err(_)
+                    if self.float_stage == 0
+                        && laid.encoding().is_float()
+                        && self.floats == FloatPolicy::ToInt =>
+                {
+                    if self.convert_ws.is_none() {
+                        self.reject =
+                            Some(EngineFault::Capability(CapabilityError::ConvertWorkspace));
+                        self.core_handle(Event::ConfigureFailed { generation });
+                        return;
+                    }
+                    self.rejected_float = Some(laid);
+                    self.float_stage = 1;
+                }
                 Err(e) => {
                     self.reject = Some(EngineFault::Capability(e));
                     self.core_handle(Event::ConfigureFailed { generation });

@@ -314,6 +314,12 @@ jobs:
             if ($f -lt 286650 -or $f -gt 374850) { Write-Output "点击处约 75%，实际定位到第 $f 帧"; exit 1 }
             Write-Output "点击滑轨定位到第 $f 帧（约 $([int]($f * 100 / 441000))%）"
           }
+          # F3：模拟设备只接受整数。浮点文件在严格路径被拒；勾选“浮点转整数”（210）后转为整数播放。
+          $p = Gui $sim "ok" "float44" $null
+          Cmd $p 101; Start-Sleep -Seconds 2; Shot $p "14-浮点严格路径被拒"
+          [void][W]::SendInt([W]::GetDlgItem($p.MainWindowHandle, 210), 0x00F5, [IntPtr]0, [IntPtr]0)
+          Cmd $p 101; Start-Sleep -Seconds 2; Shot $p "15-浮点转整数"
+          Close $p
           $p = Gui $rel $null $null @("`"$((Resolve-Path crates/qy-codec-wav/tests/fixtures/pcm16_stereo_44k.wav).Path)`"")
           Cmd $p 101; Start-Sleep -Seconds 3; Shot $p "11-真实WASAPI"
           Close $p
@@ -371,7 +377,7 @@ jobs:
       matrix:
         include:
           - target: wav_decode
-            fixtures: crates/qy-codec-wav/tests/fixtures/*.wav
+            fixtures: crates/qy-codec-wav/tests/fixtures/*.wav crates/qy-codec-wav/tests/fixtures/float/*.wav
             max_len: 65536
           - target: flac_decode
             fixtures: crates/qy-codec-flac/tests/fixtures/*.flac
@@ -380,10 +386,15 @@ jobs:
             fixtures: crates/qy-codec-aiff/tests/fixtures/*.aiff
             max_len: 65536
           - target: auto_decode
-            fixtures: crates/qy-codec-wav/tests/fixtures/*.wav crates/qy-codec-flac/tests/fixtures/*.flac crates/qy-codec-aiff/tests/fixtures/*.aiff
+            fixtures: crates/qy-codec-wav/tests/fixtures/*.wav crates/qy-codec-wav/tests/fixtures/float/*.wav crates/qy-codec-flac/tests/fixtures/*.flac crates/qy-codec-aiff/tests/fixtures/*.aiff
             max_len: 1048576
           - target: fat_storage
             fixtures: ""
+            max_len: 4096
+          # F3：浮点转整数。首字节选择位数 V 与编码，其余为样本位模式；初始语料为 ffmpeg 原样输出的
+          # 浮点样本（前缀 0x00：binary32、V = 1；0x87：binary32、V = 8）。
+          - target: float_convert
+            fixtures: crates/qy-codec-wav/tests/fixtures/float/*.ffmpeg.raw
             max_len: 4096
           # M2 T5：场景 fuzz（输入的前 8 字节为种子，其余字节决定场景中的每个选择）。
           # 初始语料只有 8 字节种子：`-len_control=0` 让变异立即使用到最大长度，场景的选择由输入决定。

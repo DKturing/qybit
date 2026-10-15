@@ -27,6 +27,8 @@ fn to_alsa(f: AlsaFormat) -> Format {
         AlsaFormat::S24_3Le => Format::S243LE,
         AlsaFormat::S24Le => Format::S24LE,
         AlsaFormat::S32Le => Format::S32LE,
+        AlsaFormat::FloatLe => Format::FloatLE,
+        AlsaFormat::Float64Le => Format::Float64LE,
     }
 }
 

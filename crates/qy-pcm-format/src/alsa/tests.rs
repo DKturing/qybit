@@ -82,14 +82,34 @@ fn mapping_fields_codes_and_names() {
         assert_eq!(d.block_align(), u16::from(c / 8) * 2);
         assert_eq!(AlsaFormat::from_device(&d), Ok(f));
     }
-    // 不支持：大端、浮点、无符号、其他。
+    // F3（tasks/F3.md §3）：小端浮点 FLOAT_LE = 14、FLOAT64_LE = 16 支持（alsa-lib pcm.h）。
+    assert_eq!(AlsaFormat::from_code(14), Ok(AlsaFormat::FloatLe));
+    assert_eq!(AlsaFormat::from_code(16), Ok(AlsaFormat::Float64Le));
+    assert_eq!(AlsaFormat::from_name("FLOAT_LE"), Ok(AlsaFormat::FloatLe));
+    assert_eq!(
+        AlsaFormat::from_name("FLOAT64_LE"),
+        Ok(AlsaFormat::Float64Le)
+    );
+    for f in [AlsaFormat::FloatLe, AlsaFormat::Float64Le] {
+        assert_eq!(AlsaFormat::from_code(f.code()), Ok(f));
+        let Ok(d) = f.device_format(48_000, 2) else {
+            panic!("{f}")
+        };
+        assert_eq!(d.encoding(), f.encoding());
+        assert_eq!(
+            (d.container_bits(), d.valid_bits()),
+            (f.container_bits(), f.valid_bits())
+        );
+        assert_eq!(AlsaFormat::from_device(&d), Ok(f));
+    }
+    // 不支持：大端（含大端浮点）、无符号、其他。
     for (code, why) in [
         (3, FormatRejection::BigEndian),  // S16_BE
         (7, FormatRejection::BigEndian),  // S24_BE
         (11, FormatRejection::BigEndian), // S32_BE
         (33, FormatRejection::BigEndian), // S24_3BE
-        (14, FormatRejection::Float),     // FLOAT_LE
-        (16, FormatRejection::Float),     // FLOAT64_LE
+        (15, FormatRejection::BigEndian), // FLOAT_BE
+        (17, FormatRejection::BigEndian), // FLOAT64_BE
         (4, FormatRejection::Unsigned),   // U16_LE
         (34, FormatRejection::Unsigned),  // U24_3LE
         (0, FormatRejection::Other),      // S8
@@ -102,8 +122,8 @@ fn mapping_fields_codes_and_names() {
     for (name, why) in [
         ("S16_BE", FormatRejection::BigEndian),
         ("S24_3BE", FormatRejection::BigEndian),
-        ("FLOAT_LE", FormatRejection::Float),
-        ("FLOAT64_BE", FormatRejection::Float),
+        ("FLOAT64_BE", FormatRejection::BigEndian),
+        ("FLOAT", FormatRejection::Float),
         ("U32_LE", FormatRejection::Unsigned),
         ("S20_LE", FormatRejection::Other),
         ("s16_le", FormatRejection::Other),

@@ -39,12 +39,16 @@ pub fn probe_rates(
         stereo_accepted: None,
     };
     let mut accepts = |rate: u32, layout: qy_core::ChannelLayout| -> bool {
-        let Ok(at) = SourceFormat::with_layout(rate, layout, src.bits()) else {
+        let at = match src.encoding() {
+            qy_core::SampleEncoding::Int => SourceFormat::with_layout(rate, layout, src.bits()),
+            e => SourceFormat::float(rate, layout, e),
+        };
+        let Ok(at) = at else {
             return false;
         };
-        attempts(&at, container).into_iter().any(|((c, v), d)| {
-            DeviceFormat::wasapi_layout(rate, layout, c, v).is_ok_and(|f| supported(&f, d))
-        })
+        attempts(&at, container)
+            .into_iter()
+            .any(|(cv, d)| device_format(&at, cv).is_ok_and(|f| supported(&f, d)))
     };
     for rate in PROBE_RATES {
         if rate == src.sample_rate() {
@@ -91,13 +95,34 @@ pub fn failure_message(n: &Negotiation) -> String {
                 format!("端点在独占模式下不接受单声道 [FC]，也不支持 {rate} Hz（本程序不重采样）")
             }
         }
+        _ if n.source.encoding().is_float() => format!(
+            "端点在独占模式下不接受 {} 位浮点（IEEE_FLOAT）；严格路径不转换（可明确开启浮点转整数，样本会改变）",
+            n.source.bits()
+        ),
         _ => "设备不支持任何可无损承载该源格式的独占格式".into(),
     }
 }
 
+/// 候选 (C, V) 对应的设备格式：整数源为 WASAPI PCM（小端、高位对齐），浮点源为同一浮点编码的
+/// IEEE_FLOAT（F3）。
+pub fn device_format(
+    src: &SourceFormat,
+    (c, v): (u8, u8),
+) -> Result<DeviceFormat, qy_pcm_format::FormatError> {
+    if src.encoding().is_float() {
+        DeviceFormat::wasapi_float(src.sample_rate(), src.layout(), src.encoding())
+    } else {
+        DeviceFormat::wasapi_layout(src.sample_rate(), src.layout(), c, v)
+    }
+}
+
 /// 设备格式候选 (C, V)：V ≥ N 中 V 最小者优先，同 V 先小容器。
-/// 只列出不改变样本值的表示（pack 只做 N ≤ V 的放置）。
+/// 只列出不改变样本值的表示（pack 只做 N ≤ V 的放置）。浮点源（F3）只有同一浮点编码一项
+/// （C = V = 浮点位宽）。
 pub fn candidates(src: &SourceFormat) -> Vec<(u8, u8)> {
+    if src.encoding().is_float() {
+        return vec![(src.bits(), src.bits())];
+    }
     [(16u8, 16u8), (24, 24), (32, 24), (32, 32)]
         .into_iter()
         .filter(|&(_, v)| v >= src.bits())
@@ -250,6 +275,42 @@ mod tests {
     }
 
     /// 尝试顺序：16/16 的 EXTENSIBLE 之后紧跟 WAVEFORMATEX，仅限标准立体声。
+    /// F3：浮点源只请求同一浮点编码的 EXTENSIBLE IEEE_FLOAT；端点不接受时说明原因（严格路径
+    /// 不转换），不请求整数格式。
+    #[test]
+    fn float_source_requests_ieee_float_only() {
+        use qy_core::SampleEncoding;
+        let name = "float/f32_stereo_44k_tag3.wav";
+        let files = [fixture_path(name)];
+        let accept = WasapiNegotiator {
+            floats: &[SampleEncoding::Float32],
+            ..WasapiNegotiator::default()
+        };
+        let Ok(mut res) = HostResources::new() else {
+            panic!("res");
+        };
+        let mut b = fake_backend_with(&ALL, accept);
+        let r = play(&mut b, &mut res, &files);
+        assert!(r.strict_path_intact(), "{}", r.summary());
+        let n = &r.streams[0].negotiation;
+        assert_eq!(n.attempts.len(), 1);
+        let a = &n.attempts[0];
+        assert_eq!(a.format.encoding(), SampleEncoding::Float32);
+        assert_eq!(a.descriptor, Descriptor::Extensible);
+        let mut b = fake_backend(&ALL);
+        let r = play(&mut b, &mut res, &files);
+        assert!(r.streams.is_empty(), "{}", r.summary());
+        let f = &r.open_failures[0];
+        assert!(
+            f.negotiation
+                .attempts
+                .iter()
+                .all(|a| a.format.encoding() == SampleEncoding::Float32),
+            "{f:?}"
+        );
+        assert!(f.message.contains("不接受 32 位浮点"), "{}", f.message);
+    }
+
     #[test]
     fn attempts_add_waveformatex_for_standard_stereo_16_only() {
         use Descriptor::{Extensible as X, WaveFormatEx as W};

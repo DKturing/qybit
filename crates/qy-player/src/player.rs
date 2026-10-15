@@ -870,7 +870,7 @@ mod tests {
         flac_fixture_path, flac_reference, place,
     };
     use qy_core::engine::EngineFault;
-    use qy_core::{DecodeError, Fault};
+    use qy_core::{DecodeError, Fault, SampleEncoding};
 
     const ALL: [(u8, u8); 4] = [(16, 16), (24, 24), (32, 24), (32, 32)];
     /// 整包设备与两个种子的短写设备：同一组断言对两种提交语义都必须成立。
@@ -1196,6 +1196,79 @@ mod tests {
     /// O1：开启单声道复制后，[FC] 曲目按 [FL FR] 打开设备，每个样本原样写入左右两路（设备字节等于
     /// 独立参考：data 块每 2 字节重复一次）；实时输出与报告写明“声道已改变”，结论不再是严格路径；
     /// 默认关闭时同一文件按 [FC] 严格播放。
+    /// F3：浮点 WAV。设备接受 32 位浮点时按位输出（严格路径）；只接受整数时严格路径拒绝并说明，
+    /// 明确开启转换后转为设备有效位最大的整数，报告“样本已改变”与统计。
+    #[test]
+    fn float_strict_or_converted() {
+        use crate::testing::FAKE_FLOAT32;
+        let name = "float/f32_stereo_44k_tag3.wav";
+        let raw = data_chunk(&fixture(name));
+        let files = [fixture_path(name)];
+        for device in DEVICES {
+            // 设备接受浮点：按位输出。
+            let mut b = backend(&[(16, 16), FAKE_FLOAT32], device);
+            let (r, outs) = run(&mut b, &[name]);
+            assert!(
+                r.strict_path_intact() && r.samples_altered.is_empty(),
+                "{}",
+                r.summary()
+            );
+            assert_eq!(outs[0].format.encoding(), SampleEncoding::Float32);
+            check_output(&outs[0], &raw);
+            assert!(
+                r.summary().contains("32 位浮点（IEEE_FLOAT）"),
+                "{}",
+                r.summary()
+            );
+            // 只接受整数、严格路径：拒绝。
+            let mut b = backend(&ALL, device);
+            let (r, outs) = run(&mut b, &[name]);
+            assert!(outs.is_empty() && r.fault.is_some(), "{}", r.summary());
+            // 明确开启转换：转为 32/32（设备有效位最大）。
+            let mut b = backend(&ALL, device);
+            let Ok(mut res) = HostResources::new() else {
+                panic!("res");
+            };
+            res.engine.set_float_policy(FloatPolicy::ToInt);
+            let mut lines = Vec::new();
+            let r = play_with(
+                &mut b,
+                &mut res,
+                &mut Files(&files),
+                PlayControl {
+                    on_line: &mut |l: &str| lines.push(l.to_string()),
+                    stop: None,
+                    commands: None,
+                    first: 0,
+                    on_status: None,
+                },
+            );
+            let all = lines.join("\n");
+            assert!(r.software_path_intact() && !r.strict_path_intact(), "{all}");
+            assert_eq!(r.samples_altered, vec![(0, 32)], "{all}");
+            assert!(
+                all.contains("曲目 1 样本已改变：浮点转为 32 位整数"),
+                "{all}"
+            );
+            let text = r.summary();
+            assert!(
+                text.contains("曲目 1 样本已改变：32 位浮点转为 32 位整数")
+                    && text.contains("不是严格路径"),
+                "{text}"
+            );
+            assert!(!text.contains("软件路径无损"), "{text}");
+            let outs = b.outputs();
+            assert_eq!(
+                (outs[0].format.container_bits(), outs[0].format.valid_bits()),
+                (32, 32)
+            );
+            // 设备字节等于按定义转换（[−1, 1) 内的值；与 ffmpeg 的 32 位参考相同）。
+            let want = std::fs::read(fixture_path("float/f32_stereo_44k_tag3.ffmpeg32.s32le"))
+                .unwrap_or_default();
+            check_output(&outs[0], &want);
+        }
+    }
+
     #[test]
     fn mono_to_stereo_duplicates_and_reports_altered() {
         let raw = data_chunk(&fixture("pcm16_mono_8k_fmt18.wav"));

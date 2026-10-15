@@ -108,6 +108,8 @@ pub struct Status {
     pub engine: EngineStats,
     /// 单声道复制到左右两路是否开启（O1，非严格选项）。
     pub mono_to_stereo: bool,
+    /// 浮点转整数是否开启（F3，非严格选项）。
+    pub float_to_int: bool,
 }
 
 const NOTICES: usize = 8;
@@ -260,6 +262,7 @@ where
             output,
             engine: self.engine.stats(),
             mono_to_stereo: self.engine.channel_policy() == ChannelPolicy::DuplicateMono,
+            float_to_int: self.engine.float_policy() == FloatPolicy::ToInt,
         }
     }
 
@@ -732,7 +735,7 @@ pub fn write_status(w: &mut impl fmt::Write, s: &Status) -> fmt::Result {
         "queued={} underruns={} underrun_frames={} paused_fills={} data_frames={} \
          open_errors={} read_errors={} decode_errors={} unsupported={} skipped={} \
          output_errors={} feeder_errors={} protocol_errors={} stale={} notices_dropped={} \
-         repairs={} duplicated={} mono_to_stereo={}",
+         repairs={} duplicated={} mono_to_stereo={} converted={} float_to_int={}",
         s.queued_frames,
         o.underruns,
         o.underrun_frames,
@@ -750,7 +753,9 @@ pub fn write_status(w: &mut impl fmt::Write, s: &Status) -> fmt::Result {
         c.notices_dropped,
         c.repairs,
         c.duplicated,
-        if s.mono_to_stereo { "on" } else { "off" }
+        if s.mono_to_stereo { "on" } else { "off" },
+        c.converted,
+        if s.float_to_int { "on" } else { "off" }
     )?;
     // R1 水位：当前设备流的最低队列帧数（及毫秒）、低水位与临界次数。
     let m = &o.watermark;

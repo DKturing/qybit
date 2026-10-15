@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::{env, fs};
 
 /// “SD 卡”上的文件：（FAT 文件名，夹具目录，夹具文件）。Embedded Full 与 Lite 各一份。
-const FULL: [(&str, &str, &str); 9] = [
+const FULL: [(&str, &str, &str); 10] = [
     ("T01.WAV", "qy-codec-wav", "pcm16_stereo_44k.wav"),
     ("T02.FLA", "qy-codec-flac", "cli_16_stereo_44k_default.flac"),
     ("T03.FLA", "qy-codec-flac", "err_frame_crc.flac"),
@@ -14,14 +14,16 @@ const FULL: [(&str, &str, &str); 9] = [
     ("T07.FLA", "qy-codec-flac", "cli_24_mono_96k_lpc12.flac"),
     ("T08.FLA", "qy-codec-flac", "fixed_orders_and_lpc32.flac"),
     ("T09.WAV", "qy-codec-wav", "pcm24_mono_48k_odd_list.wav"),
+    ("T10.WAV", "qy-codec-wav", "float/f32_stereo_44k_tag3.wav"),
 ];
-const LITE: [(&str, &str, &str); 6] = [
+const LITE: [(&str, &str, &str); 7] = [
     ("T01.WAV", "qy-codec-wav", "pcm16_stereo_44k.wav"),
     ("T02.FLA", "qy-codec-flac", "cli_16_stereo_44k_default.flac"),
     ("T03.WAV", "qy-codec-wav", "ext16_6ch_51_side.wav"),
     ("T04.WAV", "qy-codec-wav", "pcm24_mono_48k_odd_list.wav"),
     ("T05.WAV", "qy-codec-wav", "pcm32_stereo_96k.wav"),
-    ("T06.WAV", "qy-codec-wav", "pcm16_mono_8k_fmt18.wav"),
+    ("T06.WAV", "qy-codec-wav", "float/f32_mono_48k_ext.wav"),
+    ("T07.WAV", "qy-codec-wav", "pcm16_mono_8k_fmt18.wav"),
 ];
 
 fn main() {

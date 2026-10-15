@@ -67,3 +67,45 @@ pub fn write_test_wav_layout(
     std::fs::write(path, w)?;
     Ok(frames)
 }
+
+/// 32 位浮点测试 WAV（F3）：格式码 3（`WAVE_FORMAT_IEEE_FLOAT`）、带 fact 块；与
+/// [`write_test_wav`] 同样的方波，幅度 ±1/32（由 16 位整数生成，转为任何 V ≥ 16 位的整数都精确）。
+pub fn write_test_wav_float(
+    path: &Path,
+    rate: u32,
+    channels: u16,
+    frames: u64,
+) -> std::io::Result<u64> {
+    let amp = 1024.0f32 / 32_768.0;
+    let mut data = Vec::with_capacity(frames as usize * usize::from(channels) * 4);
+    for i in 0..frames {
+        let s = if (i / 48) % 2 == 0 { amp } else { -amp };
+        for _ in 0..channels {
+            data.extend_from_slice(&s.to_bits().to_le_bytes());
+        }
+    }
+    let align = channels * 4;
+    let mut fmt = Vec::with_capacity(18);
+    fmt.extend_from_slice(&3u16.to_le_bytes());
+    fmt.extend_from_slice(&channels.to_le_bytes());
+    fmt.extend_from_slice(&rate.to_le_bytes());
+    fmt.extend_from_slice(&(rate * u32::from(align)).to_le_bytes());
+    fmt.extend_from_slice(&align.to_le_bytes());
+    fmt.extend_from_slice(&32u16.to_le_bytes());
+    fmt.extend_from_slice(&0u16.to_le_bytes());
+    let frames32 = u32::try_from(frames).unwrap_or(u32::MAX);
+    let mut w = Vec::with_capacity(data.len() + 80);
+    w.extend_from_slice(b"RIFF");
+    w.extend_from_slice(&(4 + 8 + 18 + 12 + 8 + data.len() as u32).to_le_bytes());
+    w.extend_from_slice(b"WAVEfmt ");
+    w.extend_from_slice(&18u32.to_le_bytes());
+    w.extend_from_slice(&fmt);
+    w.extend_from_slice(b"fact");
+    w.extend_from_slice(&4u32.to_le_bytes());
+    w.extend_from_slice(&frames32.to_le_bytes());
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    w.extend_from_slice(&data);
+    std::fs::write(path, w)?;
+    Ok(frames)
+}

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
-use qy_core::engine::ChannelPolicy;
+use qy_core::engine::{ChannelPolicy, FloatPolicy};
 use qy_player::{Backend, Command, HostResources, PlayControl, Status, TrackSource, play_with};
 
 use crate::model::Outcome;
@@ -63,6 +63,8 @@ pub(crate) struct PlayRequest {
     /// 输出设备（平台端点标识）；`None` 时由后端选择默认设备。
     pub device: Option<String>,
     pub mono_to_stereo: bool,
+    /// 浮点转整数（F3，明确开启的非严格选项）。
+    pub float_to_int: bool,
     /// 故障注入：读取速率上限（字节/秒），见 [`crate::Model::read_limit`]。
     pub read_limit: Option<u64>,
 }
@@ -165,6 +167,11 @@ pub(crate) fn run<B, F>(
         } else {
             ChannelPolicy::Strict
         });
+        res.engine.set_float_policy(if req.float_to_int {
+            FloatPolicy::ToInt
+        } else {
+            FloatPolicy::Strict
+        });
         let mut backend = match make_backend(req.device.as_deref()) {
             Ok(b) => b,
             Err(e) => {
@@ -190,6 +197,14 @@ pub(crate) fn run<B, F>(
                     .into()
             } else {
                 "单声道复制到左右两路：关闭（严格路径；设备不接受单声道时该曲目无法播放）".into()
+            },
+        });
+        send(UiEvent::Line {
+            session,
+            text: if req.float_to_int {
+                "浮点转整数：开启（设备不接受浮点格式时转为整数，样本已改变，不是严格路径）".into()
+            } else {
+                "浮点转整数：关闭（严格路径；设备不接受浮点格式时该曲目无法播放）".into()
             },
         });
         let report = play_with(

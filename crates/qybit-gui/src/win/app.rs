@@ -20,6 +20,8 @@ pub const ID_ABOUT: u16 = 110;
 pub const IDC_LIST: u16 = 201;
 pub const IDC_DEVICE: u16 = 202;
 pub const IDC_MONO: u16 = 203;
+/// 浮点转整数（F3，明确开启的非严格选项）。
+pub const IDC_FLOAT: u16 = 210;
 pub const IDC_LOG: u16 = 204;
 pub const IDC_STATUS: u16 = 205;
 pub const IDC_FORMAT: u16 = 206;
@@ -49,6 +51,8 @@ pub enum Input {
     /// 设备下拉框的选择（0 为默认设备）。
     Device(usize),
     Mono(bool),
+    /// 浮点转整数复选框（F3）。
+    Float(bool),
     /// 拖放或对话框选中的文件与文件夹。
     Paths(Vec<PathBuf>),
     /// 进度条松开：按千分比定位（S1）。
@@ -138,6 +142,7 @@ impl App {
                 Changes::default()
             }
             Input::Mono(on) => self.ui.set_mono_to_stereo(on),
+            Input::Float(on) => self.ui.set_float_to_int(on),
             Input::Paths(paths) => self.ui.add_paths(paths),
             Input::Seek(permille) => {
                 self.ui.seek_permille(permille);

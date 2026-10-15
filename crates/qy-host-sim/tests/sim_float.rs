@@ -8,13 +8,15 @@
 //!   相同；报告“样本已改变”及限幅、不精确计数；
 //! - 转换遇到 NaN：该曲目在第一个非有限样本所在帧停止，此前的帧照常播放；
 //! - 配置档不提供转换工作区时按资源不足拒绝；
+//! - 浮点源按浮点宽度估计超出队列容量、而转换后的整数放得下：开启转换时照常转换播放，严格路径按
+//!   队列不足拒绝；
 //! - 浮点与整数曲目混排。
 //!
 //! 种子 1–4 × 两种设备模型（WASAPI 整包 / 短写），读取含零长度读、短读与慢读。
 
 use std::path::PathBuf;
 
-use qy_codec_auto::profile::{DESKTOP, EMBEDDED_LITE};
+use qy_codec_auto::profile::{DESKTOP, EMBEDDED_FULL, EMBEDDED_LITE};
 use qy_core::engine::{CapabilityError, EngineFault, ErrorPolicy, FloatPolicy};
 use qy_core::{Fault, SampleEncoding};
 use qy_host_sim::SimHost;
@@ -487,4 +489,78 @@ fn mixed_float_and_integer_playlist() {
             assert_eq!(r.float_converted, vec![(0, 16), (2, 16)], "{what}");
         }
     }
+}
+
+/// 浮点源本身超出本机能力（Embedded Full：f64 双声道 96 kHz 预填 250 ms 需 384 000 字节队列，只有
+/// 192 016 字节），转换后的 24 位整数放得下：开启转换时从第一档整数起协商（32 位超出 24 位上限，
+/// 跳到 24 位），字节等于独立参考；严格路径按队列不足拒绝；没有转换工作区时按资源不足拒绝。
+#[test]
+fn float_over_capacity_converts_when_enabled() {
+    let f = fx("f64_stereo_96k_tag3");
+    let want = int_bytes(&f, 32, 24);
+    for policy in [FloatPolicy::ToInt, FloatPolicy::Strict] {
+        let mut h = match SimHost::with_profile(&EMBEDDED_FULL) {
+            Ok(h) => h,
+            Err(e) => panic!("{e:?}"),
+        };
+        h.engine.set_float_policy(policy);
+        for seed in SEEDS {
+            for device in DEVICES {
+                let what = format!("{policy:?} 种子 {seed} {device:?}");
+                let r = run(
+                    &mut h,
+                    &scenario(
+                        seed,
+                        device,
+                        vec![spec(&f.data)],
+                        &[(16, 16), (32, 24)],
+                        &FLOATS,
+                        ErrorPolicy::Stop,
+                    ),
+                );
+                if policy == FloatPolicy::ToInt {
+                    clean(&r, &what);
+                    assert!(all_bytes(&r) == want, "{what}: 设备字节");
+                    assert_eq!(r.float_converted, vec![(0, 24)], "{what}");
+                } else {
+                    assert!(
+                        matches!(
+                            r.fault,
+                            Some((0, EngineFault::Capability(CapabilityError::Queue { .. })))
+                        ),
+                        "{what}: {:?}",
+                        r.fault
+                    );
+                    assert!(r.segments.is_empty(), "{what}");
+                }
+            }
+        }
+    }
+    // Embedded Lite：f32 双声道 44.1 kHz 按浮点宽度超出队列；开启转换但没有工作区。
+    let mut h = match SimHost::with_profile(&EMBEDDED_LITE) {
+        Ok(h) => h,
+        Err(e) => panic!("{e:?}"),
+    };
+    h.engine.set_float_policy(FloatPolicy::ToInt);
+    let f = fx("f32_stereo_44k_tag3");
+    let r = run(
+        &mut h,
+        &scenario(
+            1,
+            DeviceModel::Wasapi,
+            vec![spec(&f.data)],
+            &[(16, 16)],
+            &[],
+            ErrorPolicy::Stop,
+        ),
+    );
+    assert_eq!(
+        r.fault,
+        Some((
+            0,
+            EngineFault::Capability(CapabilityError::ConvertWorkspace)
+        )),
+        "{:?}",
+        r.fault
+    );
 }

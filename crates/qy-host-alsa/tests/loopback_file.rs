@@ -303,6 +303,124 @@ fn multichannel_extra(dir: &Path, res: &mut HostResources) -> Vec<(String, bool,
     out
 }
 
+/// 32 / 64 位浮点 WAV（格式码 3，带 fact 块）。`bits` 为样本位模式（binary32 用低 32 位）。
+fn write_float_wav(path: &Path, rate: u32, ch: u16, width: u16, bits: &[u64]) {
+    let bytes = usize::from(width / 8);
+    let data: Vec<u8> = bits
+        .iter()
+        .flat_map(|b| b.to_le_bytes()[..bytes].to_vec())
+        .collect();
+    let align = ch * width / 8;
+    let mut w = b"RIFF".to_vec();
+    w.extend_from_slice(&(4 + 26 + 12 + 8 + data.len() as u32).to_le_bytes());
+    w.extend_from_slice(b"WAVEfmt ");
+    w.extend_from_slice(&18u32.to_le_bytes());
+    w.extend_from_slice(&3u16.to_le_bytes());
+    w.extend_from_slice(&ch.to_le_bytes());
+    w.extend_from_slice(&rate.to_le_bytes());
+    w.extend_from_slice(&(rate * u32::from(align)).to_le_bytes());
+    w.extend_from_slice(&align.to_le_bytes());
+    w.extend_from_slice(&width.to_le_bytes());
+    w.extend_from_slice(&0u16.to_le_bytes());
+    w.extend_from_slice(b"fact");
+    w.extend_from_slice(&4u32.to_le_bytes());
+    w.extend_from_slice(&((bits.len() / usize::from(ch)) as u32).to_le_bytes());
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    w.extend_from_slice(&data);
+    if let Err(e) = std::fs::write(path, w) {
+        panic!("{e}");
+    }
+}
+
+/// F3：浮点经 `FLOAT_LE` / `FLOAT64_LE` 按位提交；设备只接受 `S16_LE` 时，明确开启浮点转整数后
+/// 转为 16 位提交（与独立定义一致），未开启时拒绝。样本由 16 位整数生成（s / 2^15），转换精确。
+fn float_extra(dir: &Path, res: &mut HostResources) -> Vec<(String, bool, String)> {
+    let mut out = Vec::new();
+    let sync = sync_samples(16, 2, 21);
+    let test = test_samples(16, 2, 1500, 22);
+    let to_bits = |v: &[i32], width: u16| -> Vec<u64> {
+        v.iter()
+            .map(|&s| {
+                let x = f64::from(s) / 32_768.0;
+                if width == 32 {
+                    u64::from((x as f32).to_bits())
+                } else {
+                    x.to_bits()
+                }
+            })
+            .collect()
+    };
+    for (width, format) in [(32u16, AlsaFormat::FloatLe), (64, AlsaFormat::Float64Le)] {
+        let sp = dir.join(format!("f{width}-sync.wav"));
+        let tp = dir.join(format!("f{width}-test.wav"));
+        let (sb, tb) = (to_bits(&sync, width), to_bits(&test, width));
+        write_float_wav(&sp, 48_000, 2, width, &sb);
+        write_float_wav(&tp, 48_000, 2, width, &tb);
+        let le = |b: &[u64]| -> Vec<u8> {
+            b.iter()
+                .flat_map(|x| x.to_le_bytes()[..usize::from(width / 8)].to_vec())
+                .collect()
+        };
+        let mut b = backend(dir, Some(format));
+        let r = play(&mut b, res, &[sp.clone(), tp.clone()]);
+        let captured = started_files(&b, &r).pop().unwrap_or_default();
+        let (_, v) = align_and_compare(&captured, &le(&sb), &le(&tb));
+        let ok = r.strict_path_intact() && r.streams.len() == 1 && v == Verdict::Match;
+        out.push((
+            format!("{width} 位浮点按位提交（48 kHz/2ch/{format}，严格路径）"),
+            ok,
+            format!("{v:?}，流数 {}", r.streams.len()),
+        ));
+        // 设备只接受 S16_LE：严格路径拒绝；开启转换后转为 16 位。
+        let mut b = backend(dir, Some(AlsaFormat::S16Le));
+        let r = play(&mut b, res, &[sp.clone(), tp.clone()]);
+        let rejected = r.streams.is_empty() && !r.open_failures.is_empty();
+        out.push((
+            format!("{width} 位浮点、设备只接受 S16_LE、严格路径：明确拒绝"),
+            rejected,
+            r.open_failures
+                .first()
+                .map(|f| f.message.clone())
+                .unwrap_or_else(|| r.summary()),
+        ));
+        res.engine
+            .set_float_policy(qy_core::engine::FloatPolicy::ToInt);
+        let mut b = backend(dir, Some(AlsaFormat::S16Le));
+        let r = play(&mut b, res, &[sp, tp]);
+        res.engine
+            .set_float_policy(qy_core::engine::FloatPolicy::Strict);
+        let captured = started_files(&b, &r).pop().unwrap_or_default();
+        let (_, v) = align_and_compare(
+            &captured,
+            &device_bytes(&sync, 16, AlsaFormat::S16Le),
+            &device_bytes(&test, 16, AlsaFormat::S16Le),
+        );
+        let ok = r.software_path_intact()
+            && !r.strict_path_intact()
+            && r.samples_altered.iter().all(|&(_, bits)| bits == 16)
+            && r.samples_altered.len() == 2
+            && r.float_stats.iter().all(|(_, s)| s.convert.inexact == 0)
+            && v == Verdict::Match;
+        out.push((
+            format!(
+                "{width} 位浮点、设备只接受 S16_LE、明确开启浮点转整数：转为 16 位（样本已改变）"
+            ),
+            ok,
+            format!(
+                "{v:?}，流数 {}；{}",
+                r.streams.len(),
+                r.summary()
+                    .lines()
+                    .filter(|l| l.contains("样本已改变"))
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            ),
+        ));
+    }
+    out
+}
+
 #[test]
 fn file_plugin_loopback_matrix() {
     if !alsa_null_available() {
@@ -455,6 +573,7 @@ fn file_plugin_loopback_matrix() {
     }
 
     extra.extend(multichannel_extra(&dir, &mut res));
+    extra.extend(float_extra(&dir, &mut res));
 
     let report = LoopReport {
         layer: Layer::File,

@@ -481,7 +481,7 @@ pub fn setup_with<S: Storage>(
         },
     );
     let storage = make(&world);
-    let player = Player::new(
+    let mut player = Player::new(
         engine,
         storage,
         SimOut(world.clone()),
@@ -489,6 +489,10 @@ pub fn setup_with<S: Storage>(
         512,
         &loads(timing),
     )?;
+    // F3：配置档提供的浮点转整数工作区（Embedded Full）。
+    if PROFILE.convert_samples > 0 {
+        player.set_convert_workspace(leak(PROFILE.convert_samples));
+    }
     Ok((player, world))
 }
 

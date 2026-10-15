@@ -83,6 +83,7 @@ fn run(cmd: Command) -> ExitCode {
             files,
             container,
             mono_to_stereo,
+            float_to_int,
         } => {
             let info = match endpoint_info(&device) {
                 Ok(i) => i,
@@ -104,6 +105,7 @@ fn run(cmd: Command) -> ExitCode {
                 }
             };
             apply_channel_policy(&mut res, mono_to_stereo);
+            apply_float_policy(&mut res, float_to_int);
             let mut backend = qy_host_wasapi::wasapi::WasapiBackend::new(device);
             backend.container = container;
             if let Some(c) = container {
@@ -182,6 +184,7 @@ fn run(cmd: Command) -> ExitCode {
             files,
             container,
             mono_to_stereo,
+            float_to_int,
         } => {
             if container.is_some() {
                 eprintln!("错误：--container 目前只用于 Windows WASAPI");
@@ -200,6 +203,7 @@ fn run(cmd: Command) -> ExitCode {
                 }
             };
             apply_channel_policy(&mut res, mono_to_stereo);
+            apply_float_policy(&mut res, float_to_int);
             let mut backend = AlsaBackend::new(device, RealOpener, RtPriority::default());
             let stop = interrupt_flag(qy_host_alsa::linux::interrupt::install());
             let report = play_live(&mut backend, &mut res, &files, stop);
@@ -275,6 +279,19 @@ fn apply_channel_policy(res: &mut qy_player::HostResources, mono_to_stereo: bool
         println!(
             "已开启 --mono-to-stereo：单声道 [FC] 文件按 [FL FR] 播放，样本原样复制到左右两路\
              （非严格选项，样本值不变，报告标为“声道已改变”）"
+        );
+    }
+}
+
+/// `--float-to-int`：引擎的浮点策略改为设备不接受浮点时转为整数（非严格，报告标为“样本已改变”）。
+#[cfg(any(windows, target_os = "linux"))]
+fn apply_float_policy(res: &mut qy_player::HostResources, float_to_int: bool) {
+    if float_to_int {
+        res.engine
+            .set_float_policy(qy_core::engine::FloatPolicy::ToInt);
+        println!(
+            "已开启 --float-to-int：设备不接受浮点格式时，浮点样本转为设备支持的整数\
+             （非严格选项，样本已改变，报告给出不精确与限幅的样本数）"
         );
     }
 }

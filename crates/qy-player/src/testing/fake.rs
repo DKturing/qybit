@@ -555,8 +555,16 @@ impl AttemptRecord for TestAttempt {
     }
 }
 
-/// 设备格式候选 (C, V)：V ≥ N 中 V 最小者优先，同 V 先小容器。
+/// 假设备支持列表中表示“接受 32 / 64 位浮点”（F3）的项：有效位记为 0，与整数 (C, V) 区分。
+pub const FAKE_FLOAT32: (u8, u8) = (32, 0);
+pub const FAKE_FLOAT64: (u8, u8) = (64, 0);
+
+/// 设备格式候选 (C, V)：V ≥ N 中 V 最小者优先，同 V 先小容器。浮点源只有同一浮点编码一项
+/// （[`FAKE_FLOAT32`] / [`FAKE_FLOAT64`]）。
 pub fn test_candidates(source: &SourceFormat) -> Vec<(u8, u8)> {
+    if source.encoding().is_float() {
+        return vec![(source.bits(), 0)];
+    }
     [(16u8, 16u8), (24, 24), (32, 24), (32, 32)]
         .into_iter()
         .filter(|&(_, v)| v >= source.bits())
@@ -577,9 +585,12 @@ impl Negotiator for SimpleNegotiator {
     ) -> Result<(DeviceFormat, Negotiation<TestAttempt>), OpenFailure<TestAttempt>> {
         let mut n = Negotiation::new(*source);
         for (c, v) in test_candidates(source) {
-            let Ok(format) =
+            let format = if source.encoding().is_float() {
+                DeviceFormat::wasapi_float(source.sample_rate(), source.layout(), source.encoding())
+            } else {
                 DeviceFormat::wasapi_layout(source.sample_rate(), source.layout(), c, v)
-            else {
+            };
+            let Ok(format) = format else {
                 continue;
             };
             let accepted = supported.contains(&(c, v));

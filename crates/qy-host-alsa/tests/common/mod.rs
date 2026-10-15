@@ -151,6 +151,10 @@ pub fn device_bytes(samples: &[i32], n: u8, format: AlsaFormat) -> Vec<u8> {
             }
             AlsaFormat::S24Le => out.extend_from_slice(&((s << (24 - n)) as i32).to_le_bytes()),
             AlsaFormat::S32Le => out.extend_from_slice(&((s << (32 - n)) as u32).to_le_bytes()),
+            // 浮点样本按位复制，另见 [`float_bytes`]；整数样本不放入浮点格式。
+            AlsaFormat::FloatLe | AlsaFormat::Float64Le => {
+                panic!("整数样本不放入浮点格式 {format}")
+            }
         }
     }
     out

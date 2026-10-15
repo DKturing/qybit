@@ -6,7 +6,9 @@
 //! 出处（alsa-lib `include/pcm.h`，取自 alsa-project/alsa-lib master）：
 //! - `snd_pcm_format_t`：`SND_PCM_FORMAT_S16_LE` = 2；`SND_PCM_FORMAT_S24_LE` = 6（“Signed
 //!   24 bit Little Endian using low three bytes in 32-bit word”）；`SND_PCM_FORMAT_S32_LE` = 10；
-//!   `SND_PCM_FORMAT_S24_3LE` = 32（“Signed 24bit Little Endian in 3bytes format”）。
+//!   `SND_PCM_FORMAT_S24_3LE` = 32（“Signed 24bit Little Endian in 3bytes format”）；
+//!   `SND_PCM_FORMAT_FLOAT_LE` = 14、`FLOAT_BE` = 15、`FLOAT64_LE` = 16、`FLOAT64_BE` = 17
+//!   （“Float 32/64 bit Little/Big Endian, Range -1.0 to 1.0”，F3）。
 //! - `SND_PCM_ACCESS_RW_INTERLEAVED`；`snd_pcm_hw_params_set_rate_resample` /
 //!   `snd_pcm_hw_params_get_rate_resample`；`snd_pcm_hw_params_current`；
 //!   `snd_pcm_hw_params_get_rate_numden`（精确有理数采样率）；`snd_pcm_hw_params_get_sbits`
@@ -18,11 +20,11 @@
 use core::fmt;
 
 use crate::{
-    ChannelLayout, DeviceFormat, Endian, FormatError, MAX_LAYOUT_CHANNELS, Placement, SourceFormat,
-    Speaker,
+    ChannelLayout, DeviceFormat, Endian, FormatError, MAX_LAYOUT_CHANNELS, Placement,
+    SampleEncoding, SourceFormat, Speaker,
 };
 
-/// 本阶段支持的 ALSA 样本格式（小端有符号整数）。
+/// 支持的 ALSA 样本格式（小端有符号整数；F3 起另有小端 IEEE 754 浮点）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlsaFormat {
     /// `S16_LE`：C16 / V16。
@@ -33,6 +35,10 @@ pub enum AlsaFormat {
     S24Le,
     /// `S32_LE`：C32 / V32。
     S32Le,
+    /// `FLOAT_LE`：binary32（F3）。
+    FloatLe,
+    /// `FLOAT64_LE`：binary64（F3）。
+    Float64Le,
 }
 
 /// 不支持的 ALSA 格式类别。
@@ -51,8 +57,27 @@ pub enum FormatRejection {
 }
 
 impl AlsaFormat {
-    /// 全部支持的格式。
+    /// 全部支持的整数格式（设备格式矩阵按这些格式测试）。
     pub const ALL: [AlsaFormat; 4] = [Self::S16Le, Self::S24_3Le, Self::S24Le, Self::S32Le];
+
+    /// 查询设备时测试的全部格式：整数与浮点（F3）。
+    pub const QUERY: [AlsaFormat; 6] = [
+        Self::S16Le,
+        Self::S24_3Le,
+        Self::S24Le,
+        Self::S32Le,
+        Self::FloatLe,
+        Self::Float64Le,
+    ];
+
+    /// 样本编码。
+    pub const fn encoding(self) -> SampleEncoding {
+        match self {
+            Self::FloatLe => SampleEncoding::Float32,
+            Self::Float64Le => SampleEncoding::Float64,
+            _ => SampleEncoding::Int,
+        }
+    }
 
     /// alsa-lib 中的格式名。
     pub const fn name(self) -> &'static str {
@@ -61,6 +86,8 @@ impl AlsaFormat {
             Self::S24_3Le => "S24_3LE",
             Self::S24Le => "S24_LE",
             Self::S32Le => "S32_LE",
+            Self::FloatLe => "FLOAT_LE",
+            Self::Float64Le => "FLOAT64_LE",
         }
     }
 
@@ -71,6 +98,8 @@ impl AlsaFormat {
             Self::S24Le => 6,
             Self::S32Le => 10,
             Self::S24_3Le => 32,
+            Self::FloatLe => 14,
+            Self::Float64Le => 16,
         }
     }
 
@@ -79,7 +108,8 @@ impl AlsaFormat {
         match self {
             Self::S16Le => 16,
             Self::S24_3Le => 24,
-            Self::S24Le | Self::S32Le => 32,
+            Self::S24Le | Self::S32Le | Self::FloatLe => 32,
+            Self::Float64Le => 64,
         }
     }
 
@@ -88,7 +118,8 @@ impl AlsaFormat {
         match self {
             Self::S16Le => 16,
             Self::S24_3Le | Self::S24Le => 24,
-            Self::S32Le => 32,
+            Self::S32Le | Self::FloatLe => 32,
+            Self::Float64Le => 64,
         }
     }
 
@@ -106,6 +137,14 @@ impl AlsaFormat {
         sample_rate: u32,
         layout: ChannelLayout,
     ) -> Result<DeviceFormat, FormatError> {
+        if self.encoding().is_float() {
+            return DeviceFormat::float_layout(
+                sample_rate,
+                layout,
+                self.encoding(),
+                Endian::Little,
+            );
+        }
         DeviceFormat::with_layout(
             sample_rate,
             layout,
@@ -122,6 +161,12 @@ impl AlsaFormat {
         sample_rate: u32,
         channels: u16,
     ) -> Result<DeviceFormat, FormatError> {
+        if self.encoding().is_float() {
+            return match ChannelLayout::default_for(channels) {
+                Some(l) => self.device_format_layout(sample_rate, l),
+                None => Err(FormatError::UndefinedLayout),
+            };
+        }
         DeviceFormat::new(
             sample_rate,
             channels,
@@ -139,10 +184,10 @@ impl AlsaFormat {
             6 => Ok(Self::S24Le),
             10 => Ok(Self::S32Le),
             32 => Ok(Self::S24_3Le),
-            // S16_BE S24_BE S32_BE S20_BE S24_3BE S20_3BE S18_3BE
-            3 | 7 | 11 | 26 | 33 | 37 | 41 => Err(FormatRejection::BigEndian),
-            // FLOAT_LE/BE FLOAT64_LE/BE
-            14..=17 => Err(FormatRejection::Float),
+            14 => Ok(Self::FloatLe),
+            16 => Ok(Self::Float64Le),
+            // S16_BE S24_BE S32_BE S20_BE S24_3BE S20_3BE S18_3BE FLOAT_BE FLOAT64_BE
+            3 | 7 | 11 | 15 | 17 | 26 | 33 | 37 | 41 => Err(FormatRejection::BigEndian),
             // U8 U16 U24 U32 U20 U24_3 U20_3 U18_3
             1 | 4 | 5 | 8 | 9 | 12 | 13 | 27 | 28 | 34 | 35 | 38 | 39 | 42 | 43 => {
                 Err(FormatRejection::Unsigned)
@@ -158,6 +203,9 @@ impl AlsaFormat {
             "S24_3LE" => Ok(Self::S24_3Le),
             "S24_LE" => Ok(Self::S24Le),
             "S32_LE" => Ok(Self::S32Le),
+            "FLOAT_LE" => Ok(Self::FloatLe),
+            "FLOAT64_LE" => Ok(Self::Float64Le),
+            n if n.starts_with("FLOAT") && n.ends_with("BE") => Err(FormatRejection::BigEndian),
             n if n.starts_with("FLOAT") => Err(FormatRejection::Float),
             n if n.ends_with("BE") => Err(FormatRejection::BigEndian),
             n if n.starts_with('U') => Err(FormatRejection::Unsigned),
@@ -170,6 +218,11 @@ impl AlsaFormat {
     pub const fn from_device(f: &DeviceFormat) -> Result<Self, FormatRejection> {
         if !matches!(f.endian(), Endian::Little) {
             return Err(FormatRejection::BigEndian);
+        }
+        match f.encoding() {
+            SampleEncoding::Float32 => return Ok(Self::FloatLe),
+            SampleEncoding::Float64 => return Ok(Self::Float64Le),
+            SampleEncoding::Int => {}
         }
         match (f.container_bits(), f.valid_bits(), f.placement()) {
             (16, 16, _) => Ok(Self::S16Le),
@@ -208,17 +261,30 @@ impl Candidates {
     }
 }
 
-/// 候选格式：只取 V ≥ N（不改变样本）的格式；按 V 升序，V 相同时按 `preference` 中的
-/// 先后（设备偏好）排序。`preference` 中未列出的格式不作为候选；重复项只计一次。
+/// 候选格式：只取 V ≥ N（不改变样本）的整数格式；按 V 升序，V 相同时按 `preference` 中的
+/// 先后（设备偏好）排序。`preference` 中未列出的格式不作为候选；重复项只计一次。浮点源（F3）
+/// 只有同一浮点编码的格式（设备接受时）。
 pub fn candidates(src: &SourceFormat, preference: &[AlsaFormat]) -> Candidates {
     let mut out = Candidates {
         items: [None; 4],
         len: 0,
     };
+    if src.encoding().is_float() {
+        if let Some(&f) = preference.iter().find(|f| f.encoding() == src.encoding()) {
+            out.items[0] = Some(f);
+            out.len = 1;
+        }
+        return out;
+    }
     for v in [16u8, 24, 32] {
         for &f in preference {
             let dup = out.items[..out.len].contains(&Some(f));
-            if f.valid_bits() == v && v >= src.bits() && !dup && out.len < out.items.len() {
+            if !f.encoding().is_float()
+                && f.valid_bits() == v
+                && v >= src.bits()
+                && !dup
+                && out.len < out.items.len()
+            {
                 out.items[out.len] = Some(f);
                 out.len += 1;
             }
