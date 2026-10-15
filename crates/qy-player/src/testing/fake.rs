@@ -142,7 +142,7 @@ impl PacketApi for FakeApi {
             }
             WaitMode::Clock { period, next } => {
                 let now = Instant::now();
-                let due = next.map_or(now + *period, |t| t);
+                let due = next.unwrap_or(now + *period);
                 if due > now {
                     std::thread::sleep(due - now);
                 }

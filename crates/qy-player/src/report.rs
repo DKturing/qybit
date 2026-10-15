@@ -396,8 +396,13 @@ fn rate_probe_text(out: &mut String, p: &RateProbe, source_rate: u32) {
         let _ = writeln!(
             out,
             "  采样率探测（只读查询，未打开设备）：同一声道布局与位深候选下，查询的 {} Hz 也都被拒绝，\
-             问题不只在采样率。",
-            rate_list(&p.checked)
+             问题不只在采样率{}。",
+            rate_list(&p.checked),
+            if p.stereo_accepted.is_some() {
+                "，见下面的声道探测"
+            } else {
+                ""
+            }
         );
         match &p.stereo_accepted {
             Some(st) if st.contains(&source_rate) => {
