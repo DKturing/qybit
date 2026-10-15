@@ -596,6 +596,29 @@ impl Negotiator for SimpleNegotiator {
     }
 }
 
+/// 不接受单声道的假协商（端点在独占模式下只接受多声道时的情形）：单声道源直接拒绝，
+/// 其他按 [`SimpleNegotiator`]。用于单声道复制（O1）的会话测试。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoMonoNegotiator;
+
+impl Negotiator for NoMonoNegotiator {
+    type Attempt = TestAttempt;
+
+    fn negotiate(
+        &mut self,
+        source: &SourceFormat,
+        supported: &[(u8, u8)],
+    ) -> Result<(DeviceFormat, Negotiation<TestAttempt>), OpenFailure<TestAttempt>> {
+        if source.channels() == 1 {
+            return Err(OpenFailure {
+                negotiation: Negotiation::new(*source),
+                message: "设备不接受单声道".into(),
+            });
+        }
+        SimpleNegotiator.negotiate(source, supported)
+    }
+}
+
 /// 假设备的提交语义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FakeDevice {

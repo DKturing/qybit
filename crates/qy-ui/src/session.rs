@@ -136,6 +136,16 @@ pub(crate) fn run<B, F>(
         }) {
             return;
         }
+        send(UiEvent::Line {
+            session,
+            text: if req.mono_to_stereo {
+                "单声道复制到左右两路：开启（单声道 [FC] 曲目按 [FL FR] 播放，样本值不变，\
+                 声道已改变，不是严格路径）"
+                    .into()
+            } else {
+                "单声道复制到左右两路：关闭（严格路径；设备不接受单声道时该曲目无法播放）".into()
+            },
+        });
         let report = play_with(
             &mut backend,
             &mut res,

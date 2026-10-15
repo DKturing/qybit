@@ -115,13 +115,7 @@ impl App {
                 self.ui.model.device = self.devices.get(i).and_then(|d| d.0.clone());
                 Changes::default()
             }
-            Input::Mono(on) => {
-                self.ui.model.mono_to_stereo = on;
-                Changes {
-                    status: true,
-                    ..Default::default()
-                }
-            }
+            Input::Mono(on) => self.ui.set_mono_to_stereo(on),
             Input::Paths(paths) => self.ui.add_paths(paths),
             Input::Notify => self.ui.pump(),
         };

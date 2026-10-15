@@ -448,8 +448,8 @@ fn layout(h: &Handles) {
             let _ = MoveWindow(b, x, bar_y, s(w), bar_h, true);
             x += s(w) + s(6);
         }
-        let _ = MoveWindow(h.device, x + s(6), bar_y + s(2), s(320), s(300), true);
-        x += s(332);
+        let _ = MoveWindow(h.device, x + s(6), bar_y + s(2), s(260), s(300), true);
+        x += s(272);
         let _ = MoveWindow(
             h.mono,
             x + s(6),

@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use qy_core::engine::{HostAction, HostEvent, Poll, Wait};
+use qy_core::engine::{ChannelPolicy, HostAction, HostEvent, Poll, Wait};
 use qy_core::{DeviceFormat, Generation, SourceFormat};
 
 use crate::HostResources;
@@ -102,6 +102,9 @@ pub enum Command {
     Goto(u32),
     /// 停止：立即停止设备、丢弃队列（不排空），报告标记为已中断。
     Stop,
+    /// 单声道复制到左右两路（O1，非严格选项）开启或关闭：对之后开始解码的曲目生效，正在播放与
+    /// 已预读的曲目不变；之后跳曲（含跳回当前曲目）一定按新设置。
+    MonoToStereo(bool),
 }
 
 /// 播放状态快照（界面显示用；生产端线程生成，不涉及渲染线程的实时路径）。
@@ -123,6 +126,9 @@ pub struct Status {
     pub underrun_frames: u64,
     /// 本次播放累计的暂停静音帧（不是欠载）。
     pub paused_frames: u64,
+    /// 本次播放累计按单声道复制（O1，声道已改变）送到设备的曲目数，与报告的
+    /// `channels_altered` 一致。
+    pub channels_altered: u32,
 }
 
 /// 播放时的实时输出、中断与控制。
@@ -264,6 +270,11 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 Command::Goto(k) if k < self.count => e.skip_to(k),
                 Command::Goto(_) => continue,
                 Command::Stop => return false,
+                Command::MonoToStereo(on) => e.set_channel_policy(if on {
+                    ChannelPolicy::DuplicateMono
+                } else {
+                    ChannelPolicy::Strict
+                }),
             }
             match cmd {
                 Command::Next | Command::Prev | Command::Goto(_) => {
@@ -278,6 +289,13 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 }
                 Command::Pause => self.line("⏸ 暂停（设备输出静音，不算欠载）"),
                 Command::Resume => self.line("▶ 继续"),
+                Command::MonoToStereo(true) => self.line(
+                    "单声道复制到左右两路：已开启，重新播放或切换曲目后生效（已预读的下一首按原设置）；\
+                     单声道 [FC] 按 [FL FR] 播放，样本值不变，声道已改变，不是严格路径",
+                ),
+                Command::MonoToStereo(false) => {
+                    self.line("单声道复制到左右两路：已关闭，重新播放或切换曲目后按严格路径（已预读的下一首按原设置）")
+                }
                 Command::Stop => {}
             }
             // 引擎排队的控制动作（关闭音源、停止设备、暂停/恢复）立即执行。
@@ -320,6 +338,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
             underrun_events: ue,
             underrun_frames: uf,
             paused_frames: pf,
+            channels_altered: u32::try_from(self.report.channels_altered.len()).unwrap_or(u32::MAX),
         };
         let changed = self.last_status.is_none_or(|(prev, at)| {
             let discrete = |s: &Status| {
@@ -330,6 +349,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                     s.source,
                     s.device,
                     s.underrun_events,
+                    s.channels_altered,
                 )
             };
             discrete(&prev) != discrete(&now) || at.elapsed() >= STATUS_INTERVAL
@@ -732,9 +752,9 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
 mod tests {
     use super::*;
     use crate::testing::{
-        FakeBackend, FakeDevice, FakeOutput, TestAttempt, WCall, check_calls, check_write_calls,
-        data_chunk, ffmpeg_reference, fixture, fixture_path, flac_fixture_path, flac_reference,
-        place,
+        FakeBackend, FakeDevice, FakeOutput, Negotiator, NoMonoNegotiator, TestAttempt, WCall,
+        check_calls, check_write_calls, data_chunk, ffmpeg_reference, fixture, fixture_path,
+        flac_fixture_path, flac_reference, place,
     };
     use qy_core::engine::EngineFault;
     use qy_core::{DecodeError, Fault};
@@ -1073,8 +1093,7 @@ mod tests {
             let Ok(mut res) = HostResources::new() else {
                 panic!("res");
             };
-            res.engine
-                .set_channel_policy(qy_core::engine::ChannelPolicy::DuplicateMono);
+            res.engine.set_channel_policy(ChannelPolicy::DuplicateMono);
             let mut lines = Vec::new();
             let r = play_with(
                 &mut b,
@@ -1452,8 +1471,8 @@ mod tests {
     }
 
     /// 播放并在每次状态快照时调用 `on`（可发送命令）；返回报告、输出与全部状态快照。
-    fn run_ctl(
-        backend: &mut FakeBackend,
+    fn run_ctl<N: Negotiator<Attempt = TestAttempt>>(
+        backend: &mut FakeBackend<N>,
         files: &[PathBuf],
         mut on: impl FnMut(&Status, &std::sync::mpsc::Sender<Command>),
     ) -> (PlaybackReport<TestAttempt>, Vec<FakeOutput>, Vec<Status>) {
@@ -1497,6 +1516,53 @@ mod tests {
     }
 
     const TENTH: u64 = 4_410;
+
+    /// O1 命令：设备不接受单声道。严格路径下打开失败、播放停止；另一次播放在第 1 首（立体声）
+    /// 播放中开启单声道复制并跳到第 2 首（单声道），按 [FL FR] 播放，设备字节为每样本两份
+    /// （独立参考）；状态快照与报告都记为声道已改变。
+    #[test]
+    fn mono_to_stereo_command_applies_to_later_tracks() {
+        let dir = track_dir("mono");
+        let mono = dir.join("mono.wav");
+        assert!(crate::signal::write_test_wav(&mono, 44_100, 1, 16, 13_230).is_ok());
+        let raw = data_chunk(&std::fs::read(&mono).unwrap_or_default());
+        assert_eq!(raw.len(), 13_230 * 2);
+        let dup: Vec<u8> = raw.chunks_exact(2).flat_map(|s| [s, s].concat()).collect();
+        let (stereo, sdata) = distinct_track(&dir, 7, 26_460);
+        let files = [stereo, mono];
+
+        let mut b = FakeBackend::with_negotiator(&ALL, NoMonoNegotiator);
+        b.device = FakeDevice::Clock;
+        let (r, outs, _) = run_ctl(&mut b, &files, |_, _| {});
+        assert!(
+            r.channels_altered.is_empty() && !r.finished,
+            "{}",
+            r.summary()
+        );
+        assert!(r.summary().contains("设备不接受单声道"));
+        assert_eq!(outs.len(), 1);
+        check_output(&outs[0], &sdata);
+
+        let mut b = FakeBackend::with_negotiator(&ALL, NoMonoNegotiator);
+        b.device = FakeDevice::Clock;
+        let mut sent = false;
+        let (r, outs, seen) = run_ctl(&mut b, &files, |s, tx| {
+            if !sent && s.track == 0 && s.position_frames >= TENTH {
+                assert_eq!(s.channels_altered, 0);
+                sent = tx.send(Command::MonoToStereo(true)).is_ok()
+                    && tx.send(Command::Goto(1)).is_ok();
+            }
+        });
+        assert!(sent, "{}", r.summary());
+        assert_eq!(r.channels_altered, vec![1], "{}", r.summary());
+        assert!(r.finished && r.user_skips == 1 && !r.strict_path_intact());
+        // 第 1 首（被切走）、复制的第 2 首。
+        assert_eq!(outs.len(), 2);
+        assert_eq!(outs[1].format.channels(), 2);
+        check_output(&outs[1], &dup);
+        assert_eq!(seen.last().map(|s| s.channels_altered), Some(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 跳曲、下一首、上一首（按真实时间消费的设备，位置可控）：切歌丢弃已入队的音频，
     /// 新的输出流从目标曲目开头逐字节一致；被切走的流未排空、不记欠载。

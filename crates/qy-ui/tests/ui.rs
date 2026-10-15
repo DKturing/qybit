@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use qy_player::signal::write_test_wav;
-use qy_player::testing::{FakeBackend, FakeDevice};
+use qy_player::testing::{FakeBackend, FakeDevice, NoMonoNegotiator};
 use qy_ui::probe::{Prober, scan_folder};
 use qy_ui::{Kind, Probe, Ui, text};
 
@@ -298,6 +298,85 @@ fn dropping_ui_while_playing_stops_threads() {
     let t0 = Instant::now();
     drop(ui);
     assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 单声道复制选项（O1）在界面中的行为，设备不接受单声道时：
+/// - 默认关闭：单声道曲目打开失败，日志开头写明选项为关闭（严格路径）；
+/// - 勾选后重新播放：按 [FL FR] 播放，播放中保真行写明声道已改变，结果不是严格路径；
+/// - 播放中勾选：选项发给进行中的会话，跳到单声道曲目即按 [FL FR] 播放。
+#[test]
+fn mono_to_stereo_option_reaches_sessions() {
+    let dir = temp("mono");
+    let mono = dir.join("mono.wav");
+    if let Err(e) = write_test_wav(&mono, 44_100, 1, 16, 44_100) {
+        panic!("{e}");
+    }
+    let stereo = tracks(&dir, 1, 44_100);
+    let mut b = FakeBackend::with_negotiator(&ALL, NoMonoNegotiator);
+    b.device = FakeDevice::Clock;
+    let mut ui = Ui::new(move |_device: Option<&str>| Ok(b.clone()), Arc::new(|| {}));
+    let log = |ui: &Ui, text: &str| ui.model.log.iter().any(|l| l.contains(text));
+
+    ui.add_paths(vec![mono.clone()]);
+    assert!(until(&mut ui, 10, all_probed));
+    ui.play_from(0);
+    assert!(until(&mut ui, 10, |u| u.model.playing.is_none()));
+    let o = ui.model.last.clone();
+    assert!(o.as_ref().is_some_and(|o| !o.finished), "{o:?}");
+    assert!(log(&ui, "单声道复制到左右两路：关闭（严格路径"));
+    assert!(log(&ui, "设备不接受单声道"));
+
+    let c = ui.set_mono_to_stereo(true);
+    assert!(c.status && ui.model.mono_to_stereo);
+    ui.play_from(0);
+    let mut saw_altered = false;
+    assert!(until(&mut ui, 10, |u| {
+        saw_altered |= text::fidelity_line(&u.model).starts_with("声道已改变：本次播放有 1 首");
+        u.model.playing.is_none()
+    }));
+    let Some(o) = ui.model.last.clone() else {
+        panic!("无结果")
+    };
+    assert!(
+        o.finished && o.software_intact && !o.strict_intact && o.error.is_none(),
+        "{}",
+        o.summary
+    );
+    assert!(saw_altered);
+    assert!(log(&ui, "单声道复制到左右两路：开启"));
+    assert!(log(&ui, "曲目 1 声道已改变"));
+
+    // 播放中勾选：先关闭，播放立体声曲目时开启并跳到单声道曲目。
+    ui.set_mono_to_stereo(false);
+    ui.clear();
+    ui.add_paths(vec![stereo[0].clone(), mono]);
+    assert!(until(&mut ui, 10, all_probed));
+    ui.play_from(0);
+    let mut stage = 0;
+    assert!(until(&mut ui, 20, |u| {
+        if stage == 0
+            && let Some(s) = u.model.playing.as_ref().and_then(|p| p.status)
+            && s.track == 0
+            && s.position_frames >= TENTH
+        {
+            u.set_mono_to_stereo(true);
+            u.play_from(1);
+            stage = 1;
+        }
+        u.model.playing.is_none()
+    }));
+    assert_eq!(stage, 1);
+    let Some(o) = ui.model.last.clone() else {
+        panic!("无结果")
+    };
+    assert!(
+        o.finished && o.user_skips == 1 && !o.strict_intact,
+        "{}",
+        o.summary
+    );
+    assert!(log(&ui, "单声道复制到左右两路：已开启"));
+    assert!(log(&ui, "曲目 2 声道已改变"), "{}", o.summary);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

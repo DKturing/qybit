@@ -123,12 +123,11 @@ pub fn fidelity_line(m: &Model) -> String {
         if underruns > 0 {
             return format!("有欠载 {underruns} 次：本次播放不是完整保真");
         }
-        let mono = p
-            .status
-            .and_then(|s| s.source)
-            .is_some_and(|f| f.channels() == 1);
-        if m.mono_to_stereo && mono {
-            return "声道已改变：单声道复制到左右两路（明确开启的选项，样本值未改变）".into();
+        let altered = p.status.map_or(0, |s| s.channels_altered);
+        if altered > 0 {
+            return format!(
+                "声道已改变：本次播放有 {altered} 首单声道复制到左右两路（明确开启的选项，样本值未改变）"
+            );
         }
         return "软件路径：未改动样本、无欠载（不证明设备端 bit-perfect）".into();
     }

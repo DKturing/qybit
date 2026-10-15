@@ -343,6 +343,24 @@ impl Ui {
         }
     }
 
+    /// 单声道复制到左右两路（O1，非严格选项）。记为之后新会话的设置；有会话在进行时同时发给
+    /// 该会话，对之后开始的曲目生效（含会话内跳回的曲目），正在播放的曲目不变。
+    pub fn set_mono_to_stereo(&mut self, on: bool) -> Changes {
+        if self.model.mono_to_stereo == on {
+            return Changes::default();
+        }
+        self.model.mono_to_stereo = on;
+        if let Some(p) = self.model.playing.as_mut()
+            && !p.stopping
+        {
+            send(p, Command::MonoToStereo(on));
+        }
+        Changes {
+            status: true,
+            ..Default::default()
+        }
+    }
+
     pub fn pause(&mut self) {
         if let Some(p) = self.model.playing.as_mut() {
             send(p, Command::Pause);
