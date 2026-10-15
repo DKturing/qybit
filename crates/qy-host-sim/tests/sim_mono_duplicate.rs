@@ -151,8 +151,10 @@ fn duplicate_on_plays_each_sample_twice() {
         for layouts in [None, stereo_only.clone()] {
             for seed in SEEDS {
                 for device in DEVICES {
+                    let before = h.engine.stats().duplicated_tracks;
                     let r = run(&mut h, &scenario(seed, device, &[&fx], layouts.clone()));
                     let what = format!("{name} 种子 {seed} {device:?} {layouts:?}");
+                    assert_eq!(h.engine.stats().duplicated_tracks - before, 1, "{what}");
                     assert!(
                         r.finished && r.fault.is_none() && r.skipped.is_empty() && !r.timed_out,
                         "{what}: {:?} {:?}",
@@ -209,6 +211,7 @@ fn duplicate_off_is_strict() {
                     "{what}"
                 );
                 assert!(r.duplicated.is_empty(), "{what}");
+                assert_eq!(h.engine.stats().duplicated_tracks, 0, "{what}");
                 assert!(r.segments.iter().all(|s| s.valid.is_empty()), "{what}");
             }
         }
@@ -273,6 +276,7 @@ fn duplicate_not_reported_when_device_rejects() {
                 "{what}"
             );
             assert!(r.duplicated.is_empty(), "{what}");
+            assert_eq!(h.engine.stats().duplicated_tracks, 0, "{what}");
             assert!(r.segments.iter().all(|s| s.valid.is_empty()), "{what}");
         }
     }

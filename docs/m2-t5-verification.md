@@ -42,6 +42,11 @@ CI：`.github/workflows/verify.yml` 每周一与手动运行 Kani 与 cargo-muta
 | --- | --- | --- |
 | `qy-codec-wav` | `cargo mutants -p qy-codec-wav` | 本 crate |
 | `qy-codec-flac` | `cargo mutants -p qy-codec-flac --features static-cell,test-metrics` | 本 crate（含 MCU 静态缓冲与统计特性的测试） |
+| `qy-codec-auto` | `cargo mutants -p qy-codec-auto` | 本 crate |
+| `qy-pcm-format` | `cargo mutants -p qy-pcm-format --features ring,static-queue --test-package qy-pcm-format --test-package qy-player --test-package qy-host-alsa --test-package qy-host-wasapi` | 本 crate 与使用 pack/队列的播放器、两个后端 |
+| `qy-core` | `cargo mutants -p qy-core --test-package qy-core --test-package qy-host-sim --test-package qy-host-embedded --test-package qy-player --timeout 400` | 本 crate 与执行引擎的模拟、嵌入式宿主、播放器 |
+
+`qy-core` 与 `qy-pcm-format` 的行为主要由使用它们的宿主测试覆盖（核心与引擎没有设备，只有在宿主循环里才完整运行），只用本 crate 的测试时首轮存活分别为 167 与 108 个，大多是这一原因，因此测试范围加入这些宿主。`--test-package` 时基线只构建被变异的 crate，自动超时（20 秒）短于 qy-core 测试范围一轮的用时（约 2 分钟），会把存活变异误报为超时，所以 qy-core 显式给出 400 秒。CI 中 qy-core 分 3 片（`--shard k/3`）运行。
 
 ### 3.2 结果
 
@@ -49,6 +54,9 @@ CI：`.github/workflows/verify.yml` 每周一与手动运行 Kani 与 cargo-muta
 | --- | --- | --- | --- | --- |
 | `qy-codec-wav` | 312 | 31 | 280 / 5 / 2 / 25 | 2 分钟 |
 | `qy-codec-flac` | 771 | 129 | 691 / 18 / 14 / 48 | 22 分钟 |
+| `qy-codec-auto` | 189 | 32 | 143 / 10 / 5 / 31 | 2 分钟 |
+| `qy-pcm-format` | 710 | 108（只用本 crate 测试）/ 83（加入宿主测试） | 591 / 14 / 33 / 72 | 35 分钟（复测 49 个存活与超时项 7 分钟） |
+| `qy-core` | 250 | 167（只用本 crate 测试）/ 35（加入宿主测试，400 秒超时） | 198 / 9 / 1 / 42 | 45 分钟（补测试后复测 36 个存活与超时项 15 分钟） |
 
 超时是变异后陷入死循环（例如循环步长被改为 `*=`），由超时检出，计为发现。
 
@@ -65,6 +73,22 @@ CI：`.github/workflows/verify.yml` 每周一与手动运行 Kani 与 cargo-muta
 - 帧级：类 UTF-8 编号 1–7 字节全部长度与非法编码；帧头的全部块大小码、采样率码、位深码；只差一项的流参数不一致；侧声道解相关后单个声道溢出；预测阶数等于/大于块大小；首分区样本数等于/小于预测阶数；残差 zigzag 上界 2^32 − 1 与溢出；
 - 流级：STREAMINFO 位深、最大块、采样率的边界；声明的最大帧长度超出窗口；元数据块顺序与长度；结束时总样本数核对（含 > 2^32）；声道掩码标签的识别（超长字段不解析、长字段前后、尾部字节、十六进制位数）；窗口满时 EOF 为截断；
 - 其他：`FlacBuffers::check` 逐项检查、读越界时的位置、重试统计。
+
+**qy-codec-auto**（`crates/qy-codec-auto/tests/boundaries.rs`）：ID3v2 标签头的版本与标志字节、同步安全整数的高位、v2.4 标签尾；标签跨越分块与超出文件；配置档预算的各缓冲。
+
+**qy-pcm-format**（各模块单元测试）：
+- pack：低位放置且 N < V、单声道复制在 N = V 时、正负越界样本，以及 N 位范围的精确边界（−2^(N−1) 与 2^(N−1) − 1 接受，2^(N−1) 拒绝；原测试只用了远超范围的值）；
+- 帧队列：经 `FrameSink` / `FrameSource` 接口调用与固有方法一致、容量/代次/帧宽访问器、最宽帧；
+- 队列预算：单项计算、暂存区与队列预算、`min_ms(0)`；WAVE 默认掩码与声道数范围；布局位置列表长度上限；ALSA 格式候选、参数核对与声道映射的逐项分支。
+
+**qy-core**（`src/lib.rs`、`src/engine.rs` 单元测试，`crates/qy-host-sim/tests/engine_state.rs`，以及 `sim_engine.rs`、`sim_mono_duplicate.rs` 中的统计断言）：
+- 核心：EOF 后仍缺输入、窗口已满仍缺输入均为输入窗口错误（未满时继续读剩余空间）；读取目标只交给当前代次的当前请求；起始曲目不在列表内时直接结束；`with_window` 的容量检查；默认工作区大小；
+- 引擎对宿主公开的状态：曲目序号与曲目数、设备格式、播放计划（设备未定时按最小容器估计帧宽：双声道 24 位为 6 字节）、入队帧数、跳过数与单声道复制曲目数的统计；
+- 队列中最多记录 8 个曲目边界：设备未取数时第 9 首短曲目等旧曲目播完才入队（此时启动设备），正在播放的曲目始终可知；
+- 设备断开：关闭音源、不再排空、不报告正常结束，再次播放时重新打开设备；
+- 帧队列入队失败（宿主未重配置队列）：报告输出错误并停止；
+- 控制动作队列（6 项）溢出时不覆盖已排队动作，计为协议错误；
+- 修正明细与播放计划的显示文字（块标识中的空格、不可显示字节、最大帧未声明）；解码器资源接口的默认实现。
 
 **代码化简**（不改变行为，变异测试指出的死代码）：FLAC 中一个只有注释的空 `if` 块；重试门槛中 n ≥ 1 时不起作用的 `.max(n + 1)`。
 
@@ -92,6 +116,81 @@ CI：`.github/workflows/verify.yml` 每周一与手动运行 Kani 与 cargo-muta
 | `read_signed` 的 0 位分支 | 删除 | 不可达：有效位深 ≥ 1（wasted bits 小于子帧位深），escape 的 0 位单独处理 |
 | 残差一元码商 `q > u32::MAX`（2 处） | → `>=` / `==` | 不可达：商达到 2^32 需要至少 2^32 个连续 0 位（512 MiB），超过任何输入窗口；该检查是防御性的 |
 
-## 4. 待补
+**qy-codec-auto（10 个，均为等价变异）**：
 
-`qy-pcm-format`、`qy-codec-auto`、`qy-core` 的变异测试，场景 fuzz 的 10 分钟记录与 Miri 结果正在运行，完成后写入本节之前。
+| 位置 | 变异 | 结论 |
+| --- | --- | --- |
+| `id3v2_len` 合并同步安全整数 | `\|` → `^` | 每字节最高位为 0（已检查），左移 7 位后互不重叠 |
+| `identify`：`tag_left > 0`（取用标签字节前） | → `>=` | 为 0 时取用 0 字节，状态不变 |
+| `identify`：`tag_left > 0`（取用后） | → `<` | 无符号数不小于 0，改为继续识别；此时输入已用完，空余部分按标签前缀等待输入，结果相同（EOF 时同为截断） |
+| `identify`：不足 3 字节时的标签前缀判断（4 处） | `<` → `<=` / `==` / `>`，`&&` → `\|\|` | 只影响不足 4 字节时等待 10 字节还是 4 字节；两者都大于已有长度，都是继续等待输入，EOF 时都是截断 |
+| `activate`：容器与上一首相同时的守卫（2 处） | → `true` | 新曲目已复位解码器，重新构造与复用的结果相同（只多一次构造） |
+| `Profile::budget`：`input_window > window` | → `>=` | 相等时取同一个值 |
+
+**qy-pcm-format（14 个，均为等价变异）**：
+
+| 位置 | 变异 | 结论 |
+| --- | --- | --- |
+| `alsa::candidates`：`out.len < 4` | → `<=` | ALSA 格式只有 4 种，去重后候选不会超过 4 个，上限检查不起作用 |
+| `M_ACCESS = 1 << 0` | → `>>` | 都是 1 |
+| `Mismatches::is_empty` | → `false` | `Mismatches` 只在至少一项不符时构造，取值总是非空 |
+| `alsa::confirm` 合并不符项位、`layout_from_chmap` 合并掩码、`wave::channel_mask` | `\|` → `^` | 各位互不重叠 |
+| `OpenError::from_errno`：`err < 0` | → `<=` | 0 取反仍是 0 |
+| `ChannelLayout::from_mask` 循环上界 | `<` → `<=` | 已检查掩码第 18 位及以上为 0，多走一位不会选中 |
+| `queue_bytes`：`frames > usize::MAX` | → `==` / `>=` | 64 位目标上帧数（u32 × u32 / 1000）达不到 `u64::MAX`；该检查只在 32 位目标上起作用 |
+| `ring::reconfigure_for`、`static_queue::reconfigure` 代次检查 | `\|\|` → `&&` | 生产端与消费端的代次总是同时设置，二者相等 |
+| `push_frames` / `pop_frames`：`n > 0` | → `>=` | 0 字节的块写入/读取后提交 0 字节，结果相同 |
+
+**qy-core（9 个，等价或不可达）**：
+
+| 位置 | 变异 | 结论 |
+| --- | --- | --- |
+| `Resources::repair` 默认实现 | → `None` | 原实现就是返回 `None` |
+| `core_handle`：旧代次与协议错误计数（4 处） | `+=` → `-=` / `*=` | 不可达：引擎内部转交核心的回报只用当前模式中记录的代次，停止与播放会重置模式；转交的帧数不超过待输出帧数。模拟中该计数断言为 0 |
+| `on_output`：PCM 或设备缺失时的协议错误计数（2 处） | `+=` → `-=` / `*=` | 不可达：核心只在配置成功（已有设备）后才发出输出动作 |
+| `on_output`：单声道复制的条件 | `&&` → `\|\|` | 只有单声道源按策略呈现为双声道时才置位复制，此时设备必为双声道，附加条件恒真 |
+| `on_output`：入队 0 帧时是否记录曲目边界 | `>` → `>=` | 提前记录的边界与之后真正入队时记录的起点相同（期间没有入队），边界上限检查也已在这次调用中完成 |
+
+超时（qy-core 1 个、qy-pcm-format 33 个、qy-codec-auto 5 个）是变异后测试不能在限时内结束：例如入队/出队固定返回 0 帧或帧数算错，生产端或设备循环无法推进；`take_control` 的计数改为 `/=`。由超时检出，计为发现。
+
+## 4. 场景 fuzz
+
+目标 `fuzz/fuzz_targets/sim_scenario.rs`：输入的前 8 字节为种子（`种子 % 10` 选场景类型：正常、超预算停顿、输入故障、输出故障、停止重启），其余字节经 `Rng::from_tape` 依次决定曲目组合（格式、时长、样本）、读取模型、生产端停顿、断开与重启时刻等每个选择，用完后按种子继续。场景生成与核对和固定种子回归 `sim_seeds` 共用 `tests/seeds_common`，模拟宿主为真实核心、自有解码器、pack 与队列。
+
+核对分两层：
+- **不变式**（场景 fuzz 与固定种子共同）：不 panic、不超时、无协议错误与输出错误；正常场景设备字节与独立公式逐字节一致；故障场景为期望前缀并报告故障；重启时在途的旧代次读取全部被拒绝；
+- **覆盖要求**（只用于固定种子回归）：例如停止重启场景要求重启时确有在途读取，以确认覆盖了“拒绝旧回报”。
+
+命令：`cargo +nightly fuzz run sim_scenario <语料> -- -max_total_time=600 -max_len=4096 -len_control=0 -seed=1`，初始语料为种子 0–9 各 8 字节（覆盖全部场景类型）。初始语料只有 8 字节，不加 `-len_control=0` 时 libFuzzer 的长度上限增长很慢，输入几乎只含种子，与固定种子回归无异；CI 冒烟同样加上此参数。
+
+| 运行 | 结果 |
+| --- | --- |
+| 第一次（10 分钟计划） | 176 秒时失败：种子 3940652374624259（停止重启）。每首曲目只需一两次大块读取，重启点之后 1000 ms 内恰好没有在途读取，模拟按约定在 1000 ms 后照常重启并正确完成；失败的是覆盖要求，不是播放错误。处理：把覆盖要求与不变式分开，场景 fuzz 只核对不变式；该输入加入 `sim_seeds.rs` 的回归测试（核对不变式成立，覆盖要求仍对它报错） |
+| 第二次 | 601 秒，13 857 次执行，无失败；覆盖 1883 条边、语料 404 个（28 KB），约 23 次/秒（与变异测试共用 4 核） |
+
+CI：`ci.yml` 的 fuzz 冒烟每次提交运行 60 秒。
+
+## 5. Miri
+
+工具：nightly 2026-10-12 的 Miri。`MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-ignore-leaks"`：测试读取夹具文件与时钟需要关闭隔离；宿主按项目规则在启动时用 `Box::leak` 取得 `&'static mut` 缓冲，这是有意的一次性泄漏，需要忽略泄漏报告（不忽略时 qy-core 测试报 5 处泄漏，都是这些缓冲）。
+
+项目代码不写 `unsafe`（核心、codec 与播放器都 `deny(unsafe_code)`）；`unsafe` 边界在帧队列依赖 `rtrb`（桌面）与 `bbqueue`（MCU 静态队列）中，经 `qy-pcm-format` 的队列测试和 `qy-player` 的渲染测试运行。FFI 部分（WASAPI 的 COM 调用、ALSA 的 alsa-lib 调用、线程优先级系统调用）不适用 Miri，未运行；播放器测试使用不经 FFI 的模拟后端。
+
+| 测试 | 结果 | 用时 |
+| --- | --- | --- |
+| `qy-pcm-format --features ring,static-queue --lib`：`ring::`、`static_queue::`（7 个） | 通过 | 275 秒 |
+| `qy-pcm-format` 其余单元测试（32 个） | 通过 | 106 秒 |
+| `qy-core --lib`（13 个） | 通过 | 3 秒 |
+| `qy-player --lib`：`render::`（8 个，渲染线程、短写/整包、欠载与停止）与 3 个播放器测试 | 通过 | 491 秒 |
+| `qy-player --lib`：`aiff_plays_bit_exact_and_reports_rejections`、`device_invalidated_stops_playback`、`flac_decode_error_drains_verified_frames`、`format_change_drains_then_reopens`、`leading_id3_tag_is_skipped_and_reported`、`mono_to_stereo_duplicates_and_reports_altered`（逐个运行） | 通过 | 7–378 秒 / 个 |
+| `qy-player --lib`：`flac_and_wav_mixed_playlist` | 待定：第一次运行 709 秒时测试失败（输出未保留），单独复跑仍在运行，见下 | |
+| `qy-player --lib` 其余 6 个 | 运行中 | |
+
+Miri 下随机队列测试的轮数从 200 减为 8（`cfg!(miri)`），检查的不变式相同。整个 `qy-player --lib` 一次运行超过 50 分钟未完成，因此分组运行。
+
+## 6. 未运行与限制
+
+- 全部是软件验证；不涉及真实设备，不证明设备端 bit-perfect。
+- Kani 证明是有界的：pack 只证明单样本内核，解码器只证明文件头解析函数（§2）。
+- cargo-mutants 只覆盖任务卡列出的 5 个 crate；`qy-codec-aiff`、宿主与播放器 crate 未做变异测试。
+- Miri 不运行 FFI（WASAPI、ALSA、线程优先级）。

@@ -365,8 +365,14 @@ fn skip_policy_reports_and_continues() {
             ];
             let mut sc = scenario(seed, device, tracks, ErrorPolicy::Skip, Vec::new());
             sc.supported = vec![(16, 16)];
+            let skipped_before = h.engine.stats().skipped;
             let r = run(&mut h, &sc);
             clean(&r);
+            assert_eq!(
+                h.engine.stats().skipped - skipped_before,
+                3,
+                "引擎统计的跳过数"
+            );
             assert_eq!(
                 r.skipped,
                 vec![

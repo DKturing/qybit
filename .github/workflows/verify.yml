@@ -40,8 +40,14 @@ jobs:
         include:
           - name: qy-pcm-format
             args: -p qy-pcm-format --features ring,static-queue --test-package qy-pcm-format --test-package qy-player --test-package qy-host-alsa --test-package qy-host-wasapi
-          - name: qy-core
-            args: -p qy-core --test-package qy-core --test-package qy-host-sim --test-package qy-host-embedded --test-package qy-player
+          # qy-core 的测试范围含模拟、嵌入式宿主与播放器（约 2 分钟一轮）：基线只构建本 crate，
+          # 自动超时偏短，须显式给出；约 250 个变异分 3 片，单片约 1.5 小时。
+          - name: qy-core-1
+            args: -p qy-core --test-package qy-core --test-package qy-host-sim --test-package qy-host-embedded --test-package qy-player --timeout 400 --shard 0/3
+          - name: qy-core-2
+            args: -p qy-core --test-package qy-core --test-package qy-host-sim --test-package qy-host-embedded --test-package qy-player --timeout 400 --shard 1/3
+          - name: qy-core-3
+            args: -p qy-core --test-package qy-core --test-package qy-host-sim --test-package qy-host-embedded --test-package qy-player --timeout 400 --shard 2/3
           - name: qy-codec-wav
             args: -p qy-codec-wav
           - name: qy-codec-flac

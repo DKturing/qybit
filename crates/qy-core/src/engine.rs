@@ -1187,3 +1187,82 @@ impl<D: Decoder + Resources, S: FrameSink> fmt::Debug for Engine<D, S> {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use super::*;
+    use qy_pcm_format::{Endian, Placement};
+    use std::format;
+
+    /// M2 T5：只用默认实现的解码器“无额外说明”：没有修正、没有需求、不提前拒绝。
+    #[test]
+    fn resources_defaults_report_nothing() {
+        struct Plain;
+        impl Resources for Plain {}
+        let p = core::hint::black_box(Plain);
+        assert_eq!(p.repair_count(), 0);
+        assert_eq!(p.repair(0), None);
+        assert_eq!(p.demand(), None);
+        assert_eq!(p.capacity_rejection(), None);
+    }
+
+    /// 块标识按 ASCII 显示：空格原样保留，不可显示的字节显示为 `?`。
+    #[test]
+    fn repair_text_shows_chunk_id() {
+        let r = Repair::LengthMismatch {
+            chunk: *b"fmt ",
+            declared: 16,
+            actual: 18,
+        };
+        assert_eq!(
+            format!("{r}"),
+            "fmt  声明长度 16 字节与文件实际的 18 字节不符，以 data 的声明长度为准"
+        );
+        let r = Repair::LengthPlaceholder {
+            chunk: [b'd', 0, 0x7F, b'\n'],
+            declared: 0xFFFF_FFFF,
+            read: 4,
+        };
+        assert!(format!("{r}").starts_with("d??? 长度为流式占位值 0xffffffff"));
+    }
+
+    /// 播放计划的显示：设备未定、最大帧未声明（0）与已声明。
+    #[test]
+    fn plan_text_distinguishes_undeclared_max_frame() {
+        let (Ok(source), Ok(device)) = (
+            SourceFormat::new(44_100, 2, 24),
+            DeviceFormat::new(44_100, 2, 32, 24, Endian::Little, Placement::MsbAligned),
+        ) else {
+            panic!("格式");
+        };
+        let demand = DecoderDemand {
+            max_block: 4_608,
+            block_capacity: 65_535,
+            max_frame: 0,
+            window: 1_048_576,
+        };
+        let mut plan = PlaybackPlan {
+            source,
+            device: None,
+            prefill_frames: 22_050,
+            prefill_ms: 500,
+            queue_required: 132_300,
+            queue_available: 262_144,
+            decoder: Some(demand),
+        };
+        assert_eq!(
+            format!("{plan}"),
+            "源 44100 Hz / 2 声道 / 24 位，设备未定，预填 22050 帧（500 ms），队列 132300/262144 字节，\
+             FLAC 最大块 4608/65535 帧，最大帧 未声明/1048576 字节"
+        );
+        plan.device = Some(device);
+        plan.decoder = Some(DecoderDemand {
+            max_frame: 18_000,
+            ..demand
+        });
+        let text = format!("{plan}");
+        assert!(text.contains("设备 44100 Hz / 2 声道 / 32-24 位"), "{text}");
+        assert!(text.ends_with("最大帧 18000/1048576 字节"), "{text}");
+    }
+}

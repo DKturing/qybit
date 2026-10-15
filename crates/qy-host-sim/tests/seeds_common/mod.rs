@@ -524,7 +524,19 @@ fn total(segs: &[(DeviceFormat, Vec<u8>)]) -> usize {
     segs.iter().map(|s| s.1.len()).sum()
 }
 
+/// 核对不变式，并要求场景覆盖到预定情形（固定种子回归用）。
 pub fn verify(case: &Case, r: &Report) -> Result<(), String> {
+    check(case, r, true)
+}
+
+/// 只核对不变式，不要求场景覆盖到某种情形（场景 fuzz 用）：输入决定的场景可能恰好没有经过
+/// 固定种子回归要求覆盖的状态（例如重启时刻没有在途读取），这不是错误。
+pub fn verify_invariants(case: &Case, r: &Report) -> Result<(), String> {
+    check(case, r, false)
+}
+
+/// `coverage` 为真时另外要求场景覆盖了预定的情形（固定种子回归用）。
+fn check(case: &Case, r: &Report, coverage: bool) -> Result<(), String> {
     let sc = &case.scenario;
     if r.timed_out {
         return Err(format!("超时（{} tick）", r.ticks));
@@ -633,7 +645,7 @@ pub fn verify(case: &Case, r: &Report) -> Result<(), String> {
                     r.underruns.len()
                 ));
             }
-            if r.restarted_at.is_some() && r.reads_in_flight_at_restart == 0 {
+            if coverage && r.restarted_at.is_some() && r.reads_in_flight_at_restart == 0 {
                 return Err("重启时没有在途读取，未覆盖旧回报拒绝".into());
             }
             if r.stale_rejected < r.reads_in_flight_at_restart {

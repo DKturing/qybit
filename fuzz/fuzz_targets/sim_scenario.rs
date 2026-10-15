@@ -4,6 +4,8 @@
 //!
 //! 场景生成与核对与固定种子回归（`sim_seeds`）共用同一份代码，检查的不变式相同：不 panic、不超时、
 //! 无协议错误与输出错误；正常场景设备字节与独立公式逐字节一致，故障场景为期望前缀、旧代次回报被拒。
+//! 固定种子回归另外要求覆盖预定情形（如重启时有在途读取）；输入决定的场景不一定经过这些情形，
+//! 因此这里只核对不变式（`verify_invariants`）。
 #![no_main]
 
 #[allow(dead_code)]
@@ -15,7 +17,7 @@ use std::cell::RefCell;
 use libfuzzer_sys::fuzz_target;
 use qy_host_sim::SimHost;
 use qy_host_sim::sim::{Rng, run};
-use seeds_common::{build_case_with, verify};
+use seeds_common::{build_case_with, verify_invariants};
 
 thread_local! {
     static HOST: RefCell<Option<SimHost>> = const { RefCell::new(None) };
@@ -36,7 +38,7 @@ fuzz_target!(|data: &[u8]| {
             panic!("模拟宿主分配失败");
         };
         let report = run(host, &case.scenario);
-        if let Err(e) = verify(&case, &report) {
+        if let Err(e) = verify_invariants(&case, &report) {
             panic!("种子 {seed}（类型 {}）：{e}", seed % 10);
         }
     });

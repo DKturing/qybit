@@ -569,6 +569,16 @@ mod tests {
             pack_vec(&[-32_769, 0], 2, 16, &d16).map(|r| r.1),
             Err(PackError::SampleOutOfRange { index: 0 })
         );
+        // 恰在 N 位范围边界：−2^(N−1) 与 2^(N−1) − 1 接受，再大 1 拒绝（M2 T5）。
+        assert_eq!(
+            pack_vec(&[-32_768, 32_767], 2, 16, &d16)
+                .map(|r| (r.1, [r.0[0], r.0[1], r.0[2], r.0[3]])),
+            Ok((4, [0x00, 0x80, 0xFF, 0x7F]))
+        );
+        assert_eq!(
+            pack_vec(&[0, 32_768], 2, 16, &d16).map(|r| r.1),
+            Err(PackError::SampleOutOfRange { index: 1 })
+        );
         let Ok(rate) = DeviceFormat::wasapi(44_100, 2, 16, 16) else {
             panic!()
         };

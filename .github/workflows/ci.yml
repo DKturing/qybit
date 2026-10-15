@@ -194,9 +194,11 @@ jobs:
             fixtures: ""
             max_len: 4096
           # M2 T5：场景 fuzz（输入的前 8 字节为种子，其余字节决定场景中的每个选择）。
+          # 初始语料只有 8 字节种子：`-len_control=0` 让变异立即使用到最大长度，场景的选择由输入决定。
           - target: sim_scenario
             fixtures: ""
             max_len: 4096
+            extra: -len_control=0
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -228,4 +230,4 @@ jobs:
             done
           fi
       - working-directory: fuzz
-        run: cargo +nightly-2026-10-12 fuzz run ${{ matrix.target }} -- -max_total_time=60 -max_len=${{ matrix.max_len }} -seed=1
+        run: cargo +nightly-2026-10-12 fuzz run ${{ matrix.target }} -- -max_total_time=60 -max_len=${{ matrix.max_len }} -seed=1 ${{ matrix.extra }}

@@ -907,4 +907,138 @@ mod tests {
             "停止后须重新配置"
         );
     }
+
+    /// 始终缺输入、不消耗的解码器（违反“EOF 时不返回 NeedInput”的契约）。
+    struct Hungry;
+
+    impl Decoder for Hungry {
+        fn reset(&mut self) {}
+        fn format(&self) -> Option<SourceFormat> {
+            None
+        }
+        fn decode(&mut self, _: &[u8], _: bool) -> Result<Progress, DecodeError> {
+            Ok(Progress {
+                consumed: 0,
+                status: Status::NeedInput,
+            })
+        }
+        fn pcm(&self) -> &[i32] {
+            &[]
+        }
+        fn release(&mut self, _: usize) {}
+    }
+
+    fn open_hungry() -> (Core<Hungry>, Generation, u32) {
+        let Ok(mut c) = Core::new(leak(INPUT_WINDOW_BYTES), Hungry) else {
+            panic!("core");
+        };
+        c.play(0, 1);
+        let Some(Action::Open { generation: g, .. }) = c.poll() else {
+            panic!("open");
+        };
+        assert_eq!(c.handle(Event::Opened { generation: g }), Ok(()));
+        let Some(Action::Read { request, max, .. }) = c.poll() else {
+            panic!("read");
+        };
+        assert_eq!(max, INPUT_WINDOW_BYTES);
+        (c, g, request)
+    }
+
+    /// M2 T5：EOF 后仍缺输入、或输入窗口已满仍缺输入，都是输入窗口错误（不再发出读取）。
+    #[test]
+    fn need_input_at_eof_or_full_window_is_input_window_fault() {
+        let (mut c, g, request) = open_hungry();
+        assert_eq!(
+            c.handle(Event::ReadEof {
+                generation: g,
+                request
+            }),
+            Ok(())
+        );
+        assert_eq!(c.poll(), Some(Action::Close { generation: g }));
+        assert_eq!(
+            c.poll(),
+            Some(Action::Failed {
+                generation: g,
+                track: 0,
+                fault: Fault::InputWindow
+            })
+        );
+
+        let (mut c, g, request) = open_hungry();
+        assert_eq!(
+            c.handle(Event::ReadDone {
+                generation: g,
+                request,
+                len: INPUT_WINDOW_BYTES
+            }),
+            Ok(())
+        );
+        assert_eq!(c.poll(), Some(Action::Close { generation: g }));
+        assert!(matches!(
+            c.poll(),
+            Some(Action::Failed {
+                fault: Fault::InputWindow,
+                ..
+            })
+        ));
+
+        // 未满时照常继续读取剩余空间。
+        let (mut c, g, request) = open_hungry();
+        assert_eq!(
+            c.handle(Event::ReadDone {
+                generation: g,
+                request,
+                len: 100
+            }),
+            Ok(())
+        );
+        assert!(matches!(
+            c.poll(),
+            Some(Action::Read { max, .. }) if max == INPUT_WINDOW_BYTES - 100
+        ));
+    }
+
+    /// 读取目标只交给当前代次的当前请求。
+    #[test]
+    fn read_target_requires_current_generation_and_request() {
+        let (mut c, g, request) = open_hungry();
+        assert!(c.read_target(Generation(g.0 + 1), request).is_none());
+        assert!(c.read_target(g, request.wrapping_add(1)).is_none());
+        assert_eq!(
+            c.read_target(g, request).map(|t| t.len()),
+            Some(INPUT_WINDOW_BYTES)
+        );
+    }
+
+    /// 起始曲目不在列表内时直接结束，不打开音源。
+    #[test]
+    fn play_past_end_finishes_without_open() {
+        let mut c = core();
+        c.play(2, 2);
+        assert!(matches!(c.poll(), Some(Action::Finished { .. })));
+        c.play(1, 2);
+        assert!(matches!(c.poll(), Some(Action::Open { track: 1, .. })));
+    }
+
+    /// 输入窗口切片短于声明的窗口时拒绝；相等时接受。
+    #[test]
+    fn with_window_checks_declared_window() {
+        let r = Core::with_window(leak(20_000), 20_001, ScriptDecoder::new());
+        assert!(matches!(
+            r,
+            Err(CoreError::CapacityExceeded {
+                required: 20_001,
+                provided: 20_000
+            })
+        ));
+        assert!(Core::with_window(leak(20_000), 20_000, ScriptDecoder::new()).is_ok());
+    }
+
+    /// 默认工作区：4096 帧双声道。
+    #[test]
+    fn default_workspace_sizes() {
+        assert_eq!(core::hint::black_box(PCM_WORK_SAMPLES), 8_192);
+        assert_eq!(core::hint::black_box(PCM_WORK_FRAMES), 4_096);
+    }
 }
