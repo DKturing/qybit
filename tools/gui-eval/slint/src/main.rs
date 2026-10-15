@@ -11,6 +11,8 @@ slint::slint! {
     import { Button, StandardTableView, VerticalBox, HorizontalBox } from "std-widgets.slint";
     export component Main inherits Window {
         title: "QyBit GUI 选型（Slint）";
+        // 不指定时，字体回退可能选到不含简体字形的日文字体（实测“测试”二字缺失）。
+        default-font-family: "Microsoft YaHei UI";
         preferred-width: 800px;
         preferred-height: 600px;
         in property <[[StandardListViewItem]]> rows;
