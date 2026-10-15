@@ -7,6 +7,8 @@
 //! 场景（种子 % 10）：
 //! - 0–5 正常：短读/零长度读/慢读（≤ 2 tick，3%）、生产端停顿 ≤ 300 ms 且间隔 ≥ 1000 ms，
 //!   预填 500 ms；WASAPI 整包或短写设备。要求逐字节匹配、无欠载、尾部填充 < 1 包。
+//!   类型 5 的一半种子在播放中随机定位 1–3 次（S1，目标可超过曲目长度）：每次定位后的输出从
+//!   某首曲目的目标帧起与参考一致（之前为前缀，最后一次完整），无欠载。
 //! - 6 超预算停顿：192 kHz C32 双声道（队列恰为 500 ms），设备启动后停顿 1000 ms；
 //!   要求报告欠载（位置、缺失帧），有效音频仍逐字节完整、无重复，播放恢复并完成，
 //!   且不得标记为完整保真。
@@ -55,6 +57,7 @@ fn thousand_seeds() {
     let mut lost = 0u32;
     let mut faults = std::collections::BTreeMap::<String, u32>::new();
     let mut partial_nonempty = 0u32;
+    let mut seeks = 0usize;
     for &seed in &seeds {
         let _guard = SeedGuard(seed);
         let case = build_case(seed);
@@ -67,6 +70,7 @@ fn thousand_seeds() {
         stale += report.stale_rejected;
         restarts += u32::from(report.restarted_at.is_some());
         lost += u32::from(report.device_lost);
+        seeks += report.seeks.len() + report.sequential_seeks.len();
         if let Some((_, ef)) = report.fault {
             let EngineFault::Core(f) = ef else {
                 panic!("种子 {seed} 出现非核心故障 {ef:?}");
@@ -82,10 +86,14 @@ fn thousand_seeds() {
     }
     eprintln!(
         "模拟种子 {}：各类型 {:?}，欠载事件 {underrun_events}，拒绝旧回报 {stale}，\
-         实际重启 {restarts}，设备断开 {lost}，故障 {faults:?}，读错误前已有输出 {partial_nonempty}",
+         实际重启 {restarts}，设备断开 {lost}，故障 {faults:?}，读错误前已有输出 {partial_nonempty}，\
+         定位 {seeks}",
         seeds.len(),
         stats
     );
+    if seeds.len() == SEEDS as usize {
+        assert!(seeks >= 45, "定位只执行了 {seeks} 次");
+    }
     assert!(
         failures.is_empty(),
         "{} 个种子失败：\n{}",

@@ -74,8 +74,11 @@ fn fnv(bytes: &[u8]) -> u64 {
     h
 }
 
-/// 期望的设备段：(采样率, 声道, C, V, [(文件, N)])。
-type SegSpec = (u32, u16, u32, u32, &'static [(&'static str, u32)]);
+/// 期望的设备段：(采样率, 声道, C, V, [(文件, N, 起始帧)])。
+type SegSpec = (u32, u16, u32, u32, &'static [(&'static str, u32, usize)]);
+
+/// 演示脚本在 `play` 之后立即 `seek 5`（S1）：第一首（44.1 kHz，300 帧）从第 220 帧开始。
+const SEEK_FRAME: usize = 220;
 
 struct Expect {
     /// （FAT 短文件名，夹具文件）：播放列表由 `ls` 命令的回应核对。
@@ -106,12 +109,12 @@ const FULL: Expect = Expect {
             16,
             16,
             &[
-                ("pcm16_stereo_44k.wav", 16),
-                ("cli_16_stereo_44k_default.flac", 16),
-                ("err_frame_crc.flac", 16),
+                ("pcm16_stereo_44k.wav", 16, SEEK_FRAME),
+                ("cli_16_stereo_44k_default.flac", 16, 0),
+                ("err_frame_crc.flac", 16, 0),
             ],
         ),
-        (96_000, 1, 32, 24, &[("cli_24_mono_96k_lpc12.flac", 24)]),
+        (96_000, 1, 32, 24, &[("cli_24_mono_96k_lpc12.flac", 24, 0)]),
         // 20 位 FLAC 与 24 位 WAV 都由 32/24 承载（N ≤ V），共用一个设备段。
         (
             48_000,
@@ -119,8 +122,8 @@ const FULL: Expect = Expect {
             32,
             24,
             &[
-                ("fixed_orders_and_lpc32.flac", 20),
-                ("pcm24_mono_48k_odd_list.wav", 24),
+                ("fixed_orders_and_lpc32.flac", 20, 0),
+                ("pcm24_mono_48k_odd_list.wav", 24, 0),
             ],
         ),
     ],
@@ -146,8 +149,14 @@ const LITE: Expect = Expect {
         ("T06.WAV", "pcm16_mono_8k_fmt18.wav"),
     ],
     segments: &[
-        (44_100, 2, 16, 16, &[("pcm16_stereo_44k.wav", 16)]),
-        (8_000, 1, 16, 16, &[("pcm16_mono_8k_fmt18.wav", 16)]),
+        (
+            44_100,
+            2,
+            16,
+            16,
+            &[("pcm16_stereo_44k.wav", 16, SEEK_FRAME)],
+        ),
+        (8_000, 1, 16, 16, &[("pcm16_mono_8k_fmt18.wav", 16, 0)]),
     ],
     skipped: &[
         // 未链接 FLAC：按 Unsupported 拒绝。
@@ -156,7 +165,9 @@ const LITE: Expect = Expect {
         (3, "Capability(Bits { bits: 24, max: 16 })"),
         (4, "Capability(Rate { rate: 96000, max: 48000 })"),
     ],
-    pause_periods: 2,
+    // S1：第一首定位到第 220 帧后只剩 80 帧，脚本在第 2 个周期暂停时设备正在换曲（暂停静音只在设备
+    // 运行时计数），暂停静音由 2 个周期变为 1 个。
+    pause_periods: 1,
     has_flac: false,
 };
 
@@ -167,7 +178,10 @@ fn expected_seg_lines(e: &Expect) -> Vec<String> {
         .map(|(i, (rate, ch, c, v, files))| {
             let bytes: Vec<u8> = files
                 .iter()
-                .flat_map(|(name, n)| place(&samples(name, *n), *n, *c))
+                .flat_map(|(name, n, start)| {
+                    let s = samples(name, *n);
+                    place(&s[start * usize::from(*ch)..], *n, *c)
+                })
                 .collect();
             let frames = bytes.len() / (usize::from(*ch) * (*c / 8) as usize);
             format!(
@@ -371,6 +385,11 @@ fn check(tag: &str, elf: &Path, e: &Expect, report: &mut String) {
             .iter()
             .any(|l| *l == format!("OK ls tracks={}", e.tracks.len())),
         "{tag}: ls 回应"
+    );
+    // S1：`play` 之后立即 `seek 5`：格式尚未确定，先记下，格式确定后（入队音频之前）定位。
+    assert!(
+        lines.iter().any(|l| l == "OK seek track=0 pending ms=5"),
+        "{tag}: seek 回应"
     );
     let tracks: Vec<String> = lines
         .iter()

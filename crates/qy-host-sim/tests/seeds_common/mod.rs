@@ -5,7 +5,7 @@
 use qy_core::engine::{EngineFault, ErrorPolicy};
 use qy_core::{DecodeError, DeviceFormat, Fault, SourceFormat};
 use qy_host_sim::sim::{
-    DeviceModel, ReadModel, Report, Rng, Scenario, TrackSpec, choose_device_format,
+    Control, DeviceModel, ReadModel, Report, Rng, Scenario, TrackSpec, choose_device_format,
 };
 
 const DEFAULT_SUPPORTED: [(u8, u8); 4] = [(16, 16), (32, 24), (24, 24), (32, 32)];
@@ -208,6 +208,9 @@ enum Expect {
     Restart {
         from: u32,
     },
+    /// S1：播放中按 `Control::Seek` 定位。每个定位后的输出段从某首曲目的目标帧起与参考一致
+    /// （之前的段为前缀，最后一段完整），无欠载。
+    Seek,
 }
 
 pub struct Case {
@@ -239,7 +242,8 @@ pub fn build_case_with(seed: u64, mut rng: Rng) -> Case {
         DeviceModel::Wasapi
     };
     let mut tracks: Vec<Track>;
-    let expect;
+    let mut expect;
+    let mut controls = Vec::new();
 
     let gen_list = |rng: &mut Rng, max_rate: u32, max_ms: u64| -> Vec<Track> {
         let pool = [pick_fmt(rng, max_rate), pick_fmt(rng, max_rate)];
@@ -265,6 +269,17 @@ pub fn build_case_with(seed: u64, mut rng: Rng) -> Case {
                 t += 1000 + rng.range(0, 500);
             }
             expect = Expect::Normal;
+            // S1：类型 5 的一半种子在播放中随机定位 1–3 次（目标可超过曲目长度）。
+            if kind == 5 && (seed / 10) % 2 == 1 {
+                let longest = tracks.iter().map(|t| t.playable_frames).max().unwrap_or(0) as u64;
+                for _ in 0..rng.range(1, 3) {
+                    let at = rng.range(30, dur.max(40));
+                    let frame = rng.range(0, longest + longest / 5 + 1);
+                    controls.push((at, Control::Seek(frame)));
+                }
+                controls.sort_by_key(|c| c.0);
+                expect = Expect::Seek;
+            }
         }
         6 => {
             device = DeviceModel::Wasapi;
@@ -404,7 +419,7 @@ pub fn build_case_with(seed: u64, mut rng: Rng) -> Case {
         restart,
         max_ticks: dur * 3 + stall_total + 100 * tracks.len() as u64 + 5_000,
         on_error: ErrorPolicy::Stop,
-        controls: Vec::new(),
+        controls,
         device_layouts: None,
     };
     Case {
@@ -433,6 +448,36 @@ fn expected_segments(
         let n = u32::from(t.fmt.bits());
         let mut bytes = Vec::new();
         for &s in &t.samples[..frames * usize::from(t.fmt.channels)] {
+            let word = (i64::from(s) << (c - n)) as u32;
+            bytes.extend_from_slice(&word.to_le_bytes()[..(c / 8) as usize]);
+        }
+        match segs.last_mut() {
+            Some((f, b)) if *f == dev => b.extend_from_slice(&bytes),
+            _ => segs.push((dev, bytes)),
+        }
+    }
+    segs
+}
+
+/// 第 0 首从第 `start` 帧开始（S1 定位）、其后各首完整时的期望设备段。
+fn expected_from(
+    tracks: &[Track],
+    supported: &[(u8, u8)],
+    start: usize,
+) -> Vec<(DeviceFormat, Vec<u8>)> {
+    let mut segs: Vec<(DeviceFormat, Vec<u8>)> = Vec::new();
+    for (i, t) in tracks.iter().enumerate() {
+        let from = if i == 0 { start } else { 0 };
+        if t.playable_frames <= from {
+            continue;
+        }
+        let Some(dev) = choose_device_format(&t.fmt.source(), supported) else {
+            break;
+        };
+        let (c, n) = (u32::from(dev.container_bits()), u32::from(t.fmt.bits()));
+        let ch = usize::from(t.fmt.channels);
+        let mut bytes = Vec::new();
+        for &s in &t.samples[from * ch..t.playable_frames * ch] {
             let word = (i64::from(s) << (c - n)) as u32;
             bytes.extend_from_slice(&word.to_le_bytes()[..(c / 8) as usize]);
         }
@@ -664,6 +709,53 @@ fn check(case: &Case, r: &Report, coverage: bool) -> Result<(), String> {
                 case.tracks[from as usize + i].playable_frames
             });
             exact(&actual_segments(r, 1), &after)
+        }
+        Expect::Seek => {
+            if !r.finished || r.fault.is_some() || !r.underruns.is_empty() {
+                return Err(format!(
+                    "定位后未正常完成 finished={} fault={:?} underruns={}",
+                    r.finished,
+                    r.fault,
+                    r.underruns.len()
+                ));
+            }
+            let seeks: Vec<u64> = r
+                .controls_done
+                .iter()
+                .filter_map(|c| match c.1 {
+                    Control::Seek(f) => Some(f),
+                    _ => None,
+                })
+                .collect();
+            if seeks.is_empty() {
+                return exact(&actual, &all(n));
+            }
+            prefix(&actual, &all(n))?;
+            // 定位作用于当时正在播放的曲目 t（核对时不预设是哪一首）：输出须与某个 t 相符。
+            for (k, &f) in seeks.iter().enumerate() {
+                let got = actual_segments(r, k as u32 + 1);
+                let last = k + 1 == seeks.len();
+                let ok = (0..n).any(|t| {
+                    let want = expected_from(
+                        &case.tracks[t..],
+                        &sc.supported,
+                        usize::try_from(f).unwrap_or(usize::MAX),
+                    );
+                    if last {
+                        exact(&got, &want).is_ok()
+                    } else {
+                        prefix(&got, &want).is_ok()
+                    }
+                });
+                if !ok {
+                    return Err(format!(
+                        "第 {} 次定位（第 {f} 帧）后的输出与任何曲目从目标帧起的参考都不符：[{}]",
+                        k + 1,
+                        describe(&got)
+                    ));
+                }
+            }
+            Ok(())
         }
     }
 }

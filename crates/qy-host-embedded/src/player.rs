@@ -129,6 +129,8 @@ where
     counters: Counters,
     notices: [Option<Notice>; NOTICES],
     notice_len: usize,
+    /// 串口 `seek` 收到时曲目格式还不知道（刚开始播放）：毫秒数待格式确定后换算并定位（S1）。
+    pending_seek: Option<u32>,
 }
 
 impl<D, S, O, F, const N: usize> Player<D, S, O, F, N>
@@ -165,6 +167,7 @@ where
             counters: Counters::default(),
             notices: [None; NOTICES],
             notice_len: 0,
+            pending_seek: None,
         })
     }
 
@@ -245,6 +248,7 @@ where
 
     /// 从第 `first` 首开始播放整个列表。
     pub fn play(&mut self, first: u32) -> bool {
+        self.pending_seek = None;
         let count = self.storage.track_count();
         if first >= count {
             return false;
@@ -256,6 +260,7 @@ where
     }
 
     pub fn stop(&mut self) {
+        self.pending_seek = None;
         self.engine.stop();
         self.flush_control();
     }
@@ -271,11 +276,13 @@ where
     }
 
     pub fn next(&mut self) {
+        self.pending_seek = None;
         self.engine.next();
         self.flush_control();
     }
 
     pub fn prev(&mut self) {
+        self.pending_seek = None;
         self.engine.prev();
         self.flush_control();
     }
@@ -299,6 +306,17 @@ where
             self.handle(HostEvent::DeviceDrained);
             return Step::Busy;
         }
+        // 待定的定位：曲目格式确定后（入队任何音频之前）换算成帧并定位。
+        if let Some(ms) = self.pending_seek {
+            if !self.engine.is_active() {
+                self.pending_seek = None;
+            } else if let Some(rate) = self.track_rate() {
+                self.pending_seek = None;
+                self.engine.seek(u64::from(ms) * u64::from(rate) / 1000);
+                self.flush_control();
+                return Step::Busy;
+            }
+        }
         match self.engine.poll() {
             Poll::Action(a) => {
                 self.execute(a);
@@ -309,6 +327,14 @@ where
             // 未播放，或播放列表已结束/失败/停止。
             Poll::Idle => Step::Idle,
         }
+    }
+
+    /// 正在播放的曲目的采样率：设备已打开时取设备格式，否则取已解析的源格式。
+    fn track_rate(&self) -> Option<u32> {
+        self.engine
+            .device_format()
+            .map(|d| d.sample_rate())
+            .or_else(|| qy_core::Decoder::format(self.engine.decoder()).map(|f| f.sample_rate()))
     }
 
     fn handle(&mut self, e: HostEvent) {
@@ -590,20 +616,19 @@ where
             }
             Command::Status => write_status(w, &self.status()),
             Command::Seek(ms) => {
-                // 定位目标按正在播放的曲目的采样率换算（严格路径不重采样，源与设备采样率相同）。
-                let rate = self
-                    .engine
-                    .device_format()
-                    .map(|d| d.sample_rate())
-                    .or_else(|| {
-                        qy_core::Decoder::format(self.engine.decoder()).map(|f| f.sample_rate())
-                    });
-                match (self.engine.is_active(), rate) {
+                // 定位目标按正在播放的曲目的采样率换算（严格路径不重采样，源与设备采样率相同）；
+                // 刚开始播放、格式还不知道时先记下，格式确定后再定位。
+                let track = self.engine.playing_track();
+                match (self.engine.is_active(), self.track_rate()) {
                     (true, Some(rate)) => {
                         let frame = u64::from(ms) * u64::from(rate) / 1000;
-                        let track = self.engine.playing_track();
                         self.engine.seek(frame);
+                        self.flush_control();
                         writeln!(w, "OK seek track={track} frame={frame}")
+                    }
+                    (true, None) => {
+                        self.pending_seek = Some(ms);
+                        writeln!(w, "OK seek track={track} pending ms={ms}")
                     }
                     _ => writeln!(w, "ERR seek idle"),
                 }

@@ -58,17 +58,21 @@ const FRAME_BYTES: usize = PROFILE.caps.max_channels as usize * 4;
 const MAX_TRACKS: usize = 16;
 
 /// 串口命令脚本：（时钟周期，命令行）。时钟为 DMA 缓冲周期（含设备空闲时的等待）。
+/// `seek 5`（S1）：播放开始时定位到第一首的 5 ms 处（44.1 kHz 第 220 帧），宿主据此核对第一段
+/// 从该帧起与参考一致。
 #[cfg(feature = "full")]
-const SCRIPT: [(u32, &[u8]); 4] = [
+const SCRIPT: [(u32, &[u8]); 5] = [
     (0, b"ls\r\n"),
     (0, b"play\r\n"),
+    (0, b"seek 5\r\n"),
     (100, b"pause\r\n"),
     (150, b"resume\r\n"),
 ];
 #[cfg(not(feature = "full"))]
-const SCRIPT: [(u32, &[u8]); 4] = [
+const SCRIPT: [(u32, &[u8]); 5] = [
     (0, b"ls\r\n"),
     (0, b"play\r\n"),
+    (0, b"seek 5\r\n"),
     (2, b"pause\r\n"),
     (4, b"resume\r\n"),
 ];
