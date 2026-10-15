@@ -135,3 +135,42 @@ fn compressed_frames_count_samples_separately_from_input_scan() {
     );
     assert!(r.sample_ops >= 8_000 * 2, "样本运算 {}", r.sample_ops);
 }
+
+/// 计数在解码中累计，`reset_metrics` 清零后重新开始。
+#[test]
+fn metrics_reset_clears_counters() {
+    let data = fixture("cli_16_stereo_44k_default.flac");
+    let cap = Capacity::DESKTOP;
+    let Ok(mut d) = FlacDecoder::new(cap, leak(cap.workspace_len()), leak(cap.pcm_len())) else {
+        panic!()
+    };
+    let mut pos = 0;
+    loop {
+        let Ok(p) = d.decode(&data[pos..], true) else {
+            panic!()
+        };
+        pos += p.consumed;
+        match p.status {
+            Status::End => break,
+            Status::NeedInput => panic!("EOF 后 NeedInput"),
+            _ => {
+                let ch = d.format().map_or(1, |f| usize::from(f.channels()));
+                d.release(d.pcm().len() / ch);
+            }
+        }
+    }
+    let m = d.metrics();
+    assert!(m.frames > 0 && m.parse_attempts >= m.frames && m.scanned_bits > 0);
+    d.reset_metrics();
+    let z = d.metrics();
+    assert_eq!(
+        (
+            z.frames,
+            z.parse_attempts,
+            z.incomplete_attempts,
+            z.scanned_bits,
+            z.sample_ops
+        ),
+        (0, 0, 0, 0, 0)
+    );
+}

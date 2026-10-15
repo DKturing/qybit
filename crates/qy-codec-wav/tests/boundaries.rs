@@ -408,3 +408,27 @@ fn detail_texts() {
         .contains("IEC 61937")
     );
 }
+
+/// RIFF 声明的长度比 data 块短（W1：RIFF 长度写错，改为按块读到源结束）时，data 块之后按 data 的
+/// 奇偶决定填充：偶数长度没有填充。这里 data 之后先是一个长度 0 的 JUNK 块，再是一段内容恰好像
+/// data 块头的字节；按正确的填充，后者属于一个长度 97 的未知块（被源截断，不影响样本）；若把填充
+/// 算错多跳 9 字节，就会读到第二个 data 块头而被拒绝。
+#[test]
+fn data_pad_when_riff_too_short() {
+    let raw: Vec<u8> = [1i16, 2, 3, 4]
+        .iter()
+        .flat_map(|s| s.to_le_bytes())
+        .collect();
+    let fmt = chunk(b"fmt ", &fmt_pcm(2, 48_000, 4, 16));
+    let mut body = fmt.clone();
+    body.extend_from_slice(&chunk(b"data", &raw));
+    body.extend_from_slice(b"JUNK\0\0\0\0");
+    body.extend_from_slice(b"Zdata\0\0\0\0");
+    let mut file = b"RIFF".to_vec();
+    // RIFF 只覆盖 WAVE + fmt + data 块头。
+    file.extend_from_slice(&(4 + fmt.len() as u32 + 8).to_le_bytes());
+    file.extend_from_slice(b"WAVE");
+    file.extend_from_slice(&body);
+    let (r, s, _) = decode(&file);
+    assert_eq!((r, s), (Ok(()), vec![1, 2, 3, 4]));
+}

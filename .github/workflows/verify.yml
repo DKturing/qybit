@@ -1,0 +1,70 @@
+# M2 T5：验证加强（Kani 有界证明、cargo-mutants 变异测试）。
+# 每周运行一次，也可手动运行；不在每次提交时运行，不阻塞提交。记录与存活变异的处理见
+# docs/m2-t5-verification.md。工具版本锁定。
+name: verify
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Kani：pack 单样本放置、CRC-8/16、WAV 与 FLAC 头部、AIFF 80 位采样率。证明失败即作业失败。
+  kani:
+    name: Kani 证明
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: cargo install --locked kani-verifier --version 0.68.0
+      - run: cargo kani setup
+      - name: 运行全部证明
+        run: |
+          for c in qy-pcm-format qy-codec-flac qy-codec-wav qy-codec-aiff; do
+            echo "== $c"
+            (cd "crates/$c" && cargo kani)
+          done
+
+  # cargo-mutants：逐 crate 运行，结果作为构件上传。存活变异中有已分析的等价变异，
+  # 因此存活不使作业失败；新的存活项按文档的流程逐个处理（补测试或说明为等价）。
+  mutants:
+    name: 变异测试 (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: qy-pcm-format
+            args: -p qy-pcm-format --features ring,static-queue --test-package qy-pcm-format --test-package qy-player --test-package qy-host-alsa --test-package qy-host-wasapi
+          - name: qy-core
+            args: -p qy-core --test-package qy-core --test-package qy-host-sim --test-package qy-host-embedded --test-package qy-player
+          - name: qy-codec-wav
+            args: -p qy-codec-wav
+          - name: qy-codec-flac
+            args: -p qy-codec-flac --features static-cell,test-metrics
+          - name: qy-codec-auto
+            args: -p qy-codec-auto
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: cargo install --locked cargo-mutants --version 27.1.0
+      - name: 运行
+        run: |
+          cargo mutants ${{ matrix.args }} -j 2 --output mutants-out || true
+          {
+            echo "### ${{ matrix.name }}"
+            for k in caught missed timeout unviable; do
+              f="mutants-out/mutants.out/$k.txt"
+              [ -f "$f" ] && echo "- $k: $(wc -l < "$f")"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mutants-${{ matrix.name }}
+          path: mutants-out/mutants.out
+          if-no-files-found: warn

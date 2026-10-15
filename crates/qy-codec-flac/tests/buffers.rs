@@ -210,3 +210,44 @@ fn channels_beyond_capacity_are_capacity_errors() {
     );
     assert_eq!(decode_all(&data, Capacity::DESKTOP_MULTICHANNEL), Ok(6_000));
 }
+
+/// 一套宿主缓冲按容量逐项检查：任一切片短 1 个元素都报出是哪一块、需要多少、提供了多少。
+#[test]
+fn flac_buffers_check_each_slice() {
+    use qy_codec_flac::{Buffer, FlacBuffers, InitError};
+    let cap = Capacity::MCU;
+    let full = || FlacBuffers {
+        input: leak(cap.input_window),
+        workspace: leak(cap.workspace_len()),
+        pcm: leak(cap.pcm_len()),
+    };
+    assert_eq!(full().check(&cap), Ok(()));
+    let mut b = full();
+    b.input = leak(cap.input_window - 1);
+    assert_eq!(
+        b.check(&cap),
+        Err(InitError::CapacityExceeded {
+            buffer: Buffer::InputWindow,
+            required: cap.input_window,
+            provided: cap.input_window - 1
+        })
+    );
+    let mut b = full();
+    b.workspace = leak(cap.workspace_len() - 1);
+    assert!(matches!(
+        b.check(&cap),
+        Err(InitError::CapacityExceeded {
+            buffer: Buffer::Workspace,
+            ..
+        })
+    ));
+    let mut b = full();
+    b.pcm = leak(cap.pcm_len() - 1);
+    assert!(matches!(
+        b.check(&cap),
+        Err(InitError::CapacityExceeded {
+            buffer: Buffer::Pcm,
+            ..
+        })
+    ));
+}

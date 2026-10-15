@@ -193,6 +193,10 @@ jobs:
           - target: fat_storage
             fixtures: ""
             max_len: 4096
+          # M2 T5：场景 fuzz（输入的前 8 字节为种子，其余字节决定场景中的每个选择）。
+          - target: sim_scenario
+            fixtures: ""
+            max_len: 4096
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -216,6 +220,12 @@ jobs:
           if [ "${{ matrix.target }}" = fat_storage ]; then
             printf '\x00' > fuzz/corpus/fat_storage/fat16
             printf '\x01' > fuzz/corpus/fat_storage/fat32
+          fi
+          if [ "${{ matrix.target }}" = sim_scenario ]; then
+            # 种子 0–9：覆盖全部场景类型（种子 % 10）。
+            for k in 0 1 2 3 4 5 6 7 8 9; do
+              printf "\\x0$k\\x00\\x00\\x00\\x00\\x00\\x00\\x00" > fuzz/corpus/sim_scenario/seed$k
+            done
           fi
       - working-directory: fuzz
         run: cargo +nightly-2026-10-12 fuzz run ${{ matrix.target }} -- -max_total_time=60 -max_len=${{ matrix.max_len }} -seed=1
