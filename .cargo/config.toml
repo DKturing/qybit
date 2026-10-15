@@ -1,0 +1,4 @@
+# GUI T4：Windows MSVC 目标静态链接 C 运行库（vcruntime 与 UCRT），发布的 qybit.exe / qybit-gui.exe
+# 不依赖 VC++ 可再发行组件包，只导入系统 DLL（CI 的 gui-windows 作业用 dumpbin 列出并记录）。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

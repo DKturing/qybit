@@ -149,6 +149,17 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup show
       - run: cargo build --locked --release -p qybit-gui -p qybit
+      # GUI T4：导入的 DLL（应只有系统组件）、子系统与最低系统版本、大小。
+      - name: 发布产物的依赖与系统要求
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products * -property installationPath
+          $dumpbin = (Get-ChildItem "$vs/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" | Select-Object -First 1).FullName
+          foreach ($exe in @("target/release/qybit-gui.exe", "target/release/qybit.exe")) {
+            $size = (Get-Item $exe).Length / 1MB
+            Write-Output ("===== {0}：{1:N2} MiB" -f $exe, $size)
+            & $dumpbin /nologo /dependents $exe | Select-String "\.dll" | ForEach-Object { Write-Output "  导入 $($_.Line.Trim())" }
+            & $dumpbin /nologo /headers $exe | Select-String "subsystem|operating system version|machine \(" | ForEach-Object { Write-Output "  $($_.Line.Trim())" }
+          }
       - name: 启动、截图、空闲 CPU 与正常关闭
         run: |
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
