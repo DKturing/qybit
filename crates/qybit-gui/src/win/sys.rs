@@ -125,7 +125,10 @@ fn open_volume() {
         Err("模拟设备，没有音量控制".to_string())
     } else {
         let id = APP.with(|a| a.try_borrow().ok().and_then(|g| g.as_ref()?.device_id()));
-        EndpointVolume::open(id.as_deref()).map_err(|e| e.message())
+        EndpointVolume::open(id.as_deref()).map_err(|e| match id {
+            Some(_) => format!("找不到所选设备（{}）", e.message()),
+            None => format!("找不到默认输出设备（{}）", e.message()),
+        })
     };
     VOLUME.with_borrow_mut(|v| *v = Some(opened));
     show_volume();
