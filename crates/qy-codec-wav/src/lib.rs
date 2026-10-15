@@ -546,7 +546,7 @@ impl WavDecoder {
         }
         let (container_bits, valid_bits, channel_mask) = match tag {
             FORMAT_PCM => {
-                if bits % 8 != 0 {
+                if !bits.is_multiple_of(8) {
                     return Err(DecodeError::Unsupported);
                 }
                 (bits, bits, None)
@@ -559,7 +559,7 @@ impl WavDecoder {
                 if u32::from(cb_size) < FMT_EXT_LEN - 18 || u32::from(cb_size) + 18 > size {
                     return Err(DecodeError::Malformed);
                 }
-                if bits % 8 != 0 {
+                if !bits.is_multiple_of(8) {
                     return Err(DecodeError::Malformed);
                 }
                 let valid = u16_at(b, 18);
@@ -911,6 +911,66 @@ impl Decoder for WavDecoder {
         if self.start == self.end {
             self.start = 0;
             self.end = 0;
+        }
+    }
+}
+
+/// M2 T5：Kani 有界证明（`cargo kani -p qy-codec-wav`）。文件头与第一个数据块的所有字段都是任意值
+/// 时，解码不 panic：没有整数溢出、越界索引或除零（Kani 默认检查这些），状态与消耗量自洽。
+#[cfg(kani)]
+mod proofs {
+    extern crate alloc;
+    use super::*;
+    use alloc::boxed::Box;
+    use alloc::vec;
+
+    fn decoder() -> WavDecoder {
+        let pcm = Box::leak(vec![0i32; PCM_WORK_SAMPLES].into_boxed_slice());
+        match WavDecoder::new(pcm) {
+            Ok(d) => d,
+            Err(_) => panic!(),
+        }
+    }
+
+    /// RIFF 头 + 任意长度字段 + 任意 fmt（长度 16/18/40）+ data 块头 + 8 字节数据，任意 EOF：
+    /// 两次调用（第二次在取走输出之后）都不 panic，消耗量不超过输入。
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn header_fields_never_panic() {
+        let mut d = decoder();
+        let fmt_len: u32 = match kani::any::<u8>() % 3 {
+            0 => 16,
+            1 => 18,
+            _ => 40,
+        };
+        let fields: [u8; 40] = kani::any();
+        let riff_len: u32 = kani::any();
+        let data_len: u32 = kani::any();
+        let data: [u8; 8] = kani::any();
+        let mut b = [0u8; 12 + 8 + 40 + 8 + 8];
+        let mut n = 0;
+        let mut put = |x: &[u8]| {
+            b[n..n + x.len()].copy_from_slice(x);
+            n += x.len();
+        };
+        put(b"RIFF");
+        put(&riff_len.to_le_bytes());
+        put(b"WAVE");
+        put(b"fmt ");
+        put(&fmt_len.to_le_bytes());
+        put(&fields[..fmt_len as usize]);
+        put(b"data");
+        put(&data_len.to_le_bytes());
+        put(&data);
+        let input = &b[..n];
+        let eof: bool = kani::any();
+        if let Ok(p) = d.decode(input, eof) {
+            assert!(p.consumed <= input.len());
+            if let Status::Frames(_) | Status::NeedOutput = p.status {
+                let ch = d.format().map_or(1, |f| usize::from(f.channels()));
+                d.release(d.pcm().len() / ch);
+                let _ = d.decode(&input[p.consumed..], eof);
+            }
         }
     }
 }

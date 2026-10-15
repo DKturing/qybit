@@ -288,7 +288,7 @@ fn write_residual(w: &mut BitW, r: &[i64], block: usize, order: usize) {
     // 分区数 2^p：每分区至少 256 个样本、块长能整除、首分区长于阶数。
     let mut porder = 0u32;
     while porder < 8
-        && block % (1 << (porder + 1)) == 0
+        && block.is_multiple_of(1 << (porder + 1))
         && block >> (porder + 1) >= 256
         && block >> (porder + 1) > order
     {

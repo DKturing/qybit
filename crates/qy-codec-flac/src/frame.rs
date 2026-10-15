@@ -356,7 +356,7 @@ fn residual(b: &mut Bits<'_>, order: usize, out: &mut [i64]) -> Result<(), Frame
     let porder = b.read(4)?;
     let parts = 1usize << porder;
     let per = block >> porder;
-    if block % parts != 0 || per < order {
+    if !block.is_multiple_of(parts) || per < order {
         return bad(FlacError::BadPartitionOrder);
     }
     let escape = (1u32 << param_bits) - 1;

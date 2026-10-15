@@ -71,7 +71,7 @@ impl<const N: usize> Feeder<N> {
     /// 填一个 DMA 缓冲（中断中调用）。缓冲长度必须是当前帧宽的整数倍，否则整缓冲静音并计错。
     pub fn fill(&mut self, out: &mut [u8]) -> Fill {
         let fb = self.consumer.frame_bytes();
-        if fb == 0 || out.len() % fb != 0 {
+        if fb == 0 || !out.len().is_multiple_of(fb) {
             out.fill(0);
             self.stats.errors = self.stats.errors.saturating_add(1);
             return Fill {

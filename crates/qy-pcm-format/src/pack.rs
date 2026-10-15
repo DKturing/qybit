@@ -59,7 +59,7 @@ impl<'a> Pcm<'a, Exact> {
     /// 由解码器输出构造精确 PCM。仅供直接承载解码结果的宿主/核心使用，
     /// 任何改变样本值的操作都不得返回 `Pcm<Exact>`。
     pub fn exact(samples: &'a [i32], format: SourceFormat) -> Result<Self, PackError> {
-        if samples.len() % usize::from(format.channels()) != 0 {
+        if !samples.len().is_multiple_of(usize::from(format.channels())) {
             return Err(PackError::PartialFrame);
         }
         Ok(Self {
@@ -151,6 +151,39 @@ pub fn check_mode(
     }
 }
 
+/// 样本在 C 位容器中的左移量：高位放置为 C − N（V 位居高位、低位补 0），低位放置为 V − N。
+/// 调用方保证 N ≤ V ≤ C ≤ 32。
+fn placement_shift(placement: Placement, c: u32, v: u32, n: u32) -> u32 {
+    match placement {
+        Placement::MsbAligned => c - n,
+        Placement::LsbAligned => v - n,
+    }
+}
+
+/// 一个样本写入设备字节（pack 中唯一的数值运算；M2 T5 的 Kani 证明对象）。`s` 已检查在 N 位
+/// 有符号范围内，`shift` 来自 [`placement_shift`]，`dst` 为一个容器（C/8 字节）。
+fn place_sample(s: i64, shift: u32, endian: Endian, dst: &mut [u8]) {
+    let bytes = dst.len();
+    // shift ≤ 31 且 s 在 N 位内，结果落在 C 位有符号范围内，不会溢出。
+    let word = ((s << shift) as u32).to_le_bytes();
+    match endian {
+        Endian::Little => dst.copy_from_slice(&word[..bytes]),
+        Endian::Big => {
+            for (k, b) in dst.iter_mut().enumerate() {
+                *b = word[bytes - 1 - k];
+            }
+        }
+        // 高半字在前，半字内小端；16 位容器只有一个半字（构造时已拒绝 24 位容器）。
+        Endian::HalfWordSwapped => {
+            if bytes == 4 {
+                dst.copy_from_slice(&[word[2], word[3], word[0], word[1]]);
+            } else {
+                dst.copy_from_slice(&word[..bytes]);
+            }
+        }
+    }
+}
+
 /// 把 `src` 尽可能多的完整帧 pack 到 `out`，返回帧数（受 `out` 容量限制）。
 ///
 /// 设备声道顺序与源不同（位置集合相同）时按位置纯置换：每个样本值原样放入对应扬声器的
@@ -183,10 +216,7 @@ pub fn pack_with(
     let align = usize::from(dev.block_align());
     let channels = usize::from(dev.channels());
     let frames = src.frames().min(out.len() / align);
-    let shift = match dev.placement() {
-        Placement::MsbAligned => c - n,
-        Placement::LsbAligned => v - n,
-    };
+    let shift = placement_shift(dev.placement(), c, v, n);
     let lo = -(1i64 << (n - 1));
     let hi = (1i64 << (n - 1)) - 1;
     for (f, (frame, dst_frame)) in src
@@ -206,27 +236,128 @@ pub fn pack_with(
                     index: f * src_channels + from,
                 });
             }
-            // shift ≤ 31 且 s 在 N 位内，结果落在 C 位有符号范围内，不会溢出。
-            let word = ((s << shift) as u32).to_le_bytes();
-            match dev.endian() {
-                Endian::Little => dst.copy_from_slice(&word[..bytes]),
-                Endian::Big => {
-                    for (k, b) in dst.iter_mut().enumerate() {
-                        *b = word[bytes - 1 - k];
-                    }
-                }
-                // 高半字在前，半字内小端；16 位容器只有一个半字（构造时已拒绝 24 位容器）。
-                Endian::HalfWordSwapped => {
-                    if bytes == 4 {
-                        dst.copy_from_slice(&[word[2], word[3], word[0], word[1]]);
-                    } else {
-                        dst.copy_from_slice(&word[..bytes]);
-                    }
-                }
-            }
+            place_sample(s, shift, dev.endian(), dst);
         }
     }
     Ok(frames)
+}
+
+/// M2 T5：Kani 有界证明（`cargo kani -p qy-pcm-format`）。
+///
+/// 独立的解包参考：按字节序取回 C 位容器字并符号扩展，按放置方式取出 V 位值，再去掉 V−N 位
+/// 的零填充，必须等于原样本；被填充的低位必须为 0（相对幅度不变）。
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+    use crate::ChannelLayout;
+
+    /// 从设备字节取回容器字（低 C 位）。
+    fn word_of(b: &[u8], endian: Endian) -> u32 {
+        let mut w = [0u8; 4];
+        match endian {
+            Endian::Little => w[..b.len()].copy_from_slice(b),
+            Endian::Big => {
+                for (k, x) in b.iter().enumerate() {
+                    w[b.len() - 1 - k] = *x;
+                }
+            }
+            Endian::HalfWordSwapped => {
+                if b.len() == 4 {
+                    w = [b[2], b[3], b[0], b[1]];
+                } else {
+                    w[..b.len()].copy_from_slice(b);
+                }
+            }
+        }
+        u32::from_le_bytes(w)
+    }
+
+    /// 给定 C、放置方式与字节序：所有 N ≤ V ≤ C 与任意 N 位样本，`placement_shift` +
+    /// `place_sample` 不 panic、不溢出，解包后等于原样本，被填充的低位为 0。
+    fn roundtrip(c: u8, placement: Placement, endian: Endian) {
+        let n: u32 = kani::any();
+        let v: u32 = kani::any();
+        let c = u32::from(c);
+        kani::assume((1..=32).contains(&n) && n <= v && v <= c);
+        let s: i32 = kani::any();
+        let s = i64::from(s);
+        kani::assume(s >= -(1i64 << (n - 1)) && s < (1i64 << (n - 1)));
+        let bytes = (c / 8) as usize;
+        let mut out = [0u8; 4];
+        place_sample(
+            s,
+            placement_shift(placement, c, v, n),
+            endian,
+            &mut out[..bytes],
+        );
+        let w = word_of(&out[..bytes], endian);
+        // 符号扩展 C 位容器字。
+        let ws = i64::from(((w << (32 - c)) as i32) >> (32 - c));
+        let value = match placement {
+            // V 位居高位：低 C−V 位为 0。
+            Placement::MsbAligned => {
+                assert!(ws & ((1i64 << (c - v)) - 1) == 0);
+                ws >> (c - v)
+            }
+            // V 位居低位，高位为符号扩展：值本身在 V 位有符号范围内。
+            Placement::LsbAligned => {
+                assert!(ws >= -(1i64 << (v - 1)) && ws < (1i64 << (v - 1)));
+                ws
+            }
+        };
+        assert!(value & ((1i64 << (v - n)) - 1) == 0);
+        assert!(value >> (v - n) == s);
+    }
+
+    macro_rules! roundtrip_proofs {
+        ($($name:ident: $c:expr, $p:ident, $e:ident;)*) => {$(
+            #[kani::proof]
+            #[kani::solver(kissat)]
+            fn $name() {
+                roundtrip($c, Placement::$p, Endian::$e);
+            }
+        )*};
+    }
+
+    // 24 位容器不能半字交换（构造时拒绝），其余组合全部覆盖：3 种容器 × 2 种放置 × 3 种字节序 − 2。
+    roundtrip_proofs! {
+        c16_msb_le: 16, MsbAligned, Little;
+        c16_msb_be: 16, MsbAligned, Big;
+        c16_msb_hw: 16, MsbAligned, HalfWordSwapped;
+        c16_lsb_le: 16, LsbAligned, Little;
+        c16_lsb_be: 16, LsbAligned, Big;
+        c16_lsb_hw: 16, LsbAligned, HalfWordSwapped;
+        c24_msb_le: 24, MsbAligned, Little;
+        c24_msb_be: 24, MsbAligned, Big;
+        c24_lsb_le: 24, LsbAligned, Little;
+        c24_lsb_be: 24, LsbAligned, Big;
+        c32_msb_le: 32, MsbAligned, Little;
+        c32_msb_be: 32, MsbAligned, Big;
+        c32_msb_hw: 32, MsbAligned, HalfWordSwapped;
+        c32_lsb_le: 32, LsbAligned, Little;
+        c32_lsb_be: 32, LsbAligned, Big;
+        c32_lsb_hw: 32, LsbAligned, HalfWordSwapped;
+    }
+
+    /// 24 位容器的半字交换在构造时拒绝（pack 因此不必处理这种组合）。
+    #[kani::proof]
+    fn c24_half_word_swap_rejected() {
+        let v: u8 = kani::any();
+        let p = if kani::any() {
+            Placement::MsbAligned
+        } else {
+            Placement::LsbAligned
+        };
+        let r = DeviceFormat::with_layout(
+            48_000,
+            ChannelLayout::MONO,
+            24,
+            v,
+            Endian::HalfWordSwapped,
+            p,
+        );
+        assert!(r.is_err());
+    }
 }
 
 #[cfg(test)]
@@ -257,6 +388,32 @@ mod tests {
         let mut out = [0u8; 64];
         let frames = pack(&pcm, d, &mut out)?;
         Ok((out, frames * usize::from(d.block_align())))
+    }
+
+    /// 低位放置（ALSA `S24_LE` 等）且 N < V：样本乘 2^(V−N) 后放在容器低 V 位，高位为符号扩展。
+    /// 期望字节手写（变异测试发现此前只有 N = V 的低位放置用例）。
+    #[test]
+    fn lsb_aligned_with_fewer_source_bits() {
+        // 16 位样本 → 32 位容器、低 24 位有效：×256，高 8 位为符号。
+        let d = dev(1, 32, 24, Endian::Little, Placement::LsbAligned);
+        let Ok((out, len)) = pack_vec(&[0x7FFF, -0x8000, -1, 1], 1, 16, &d) else {
+            panic!()
+        };
+        assert_eq!(
+            &out[..len],
+            &[
+                0x00, 0xFF, 0x7F, 0x00, // 0x7FFF00
+                0x00, 0x00, 0x80, 0xFF, // −0x800000
+                0x00, 0xFF, 0xFF, 0xFF, // −256
+                0x00, 0x01, 0x00, 0x00, // 256
+            ]
+        );
+        // 12 位样本 → 16 位容器、低 14 位有效（大端）：×4，高 2 位为符号。
+        let d = dev(1, 16, 14, Endian::Big, Placement::LsbAligned);
+        let Ok((out, len)) = pack_vec(&[0x7FF, -0x800, -1], 1, 12, &d) else {
+            panic!()
+        };
+        assert_eq!(&out[..len], &[0x1F, 0xFC, 0xE0, 0x00, 0xFF, 0xFC]);
     }
 
     /// (样本, 声道, N, 设备格式, 期望字节)
@@ -685,6 +842,14 @@ mod tests {
                 source_bits: 24,
                 valid_bits: 16
             })
+        );
+        // N = V 时接受（精度刚好够）。
+        let Ok(d16_16) = DeviceFormat::wasapi(48_000, 2, 16, 16) else {
+            panic!()
+        };
+        assert_eq!(
+            check_mode(&mono, &d16_16, ChannelMode::DuplicateMono),
+            Ok(())
         );
         // 输出容量只够 2 帧时只 pack 2 帧。
         let mut small = [0u8; 16];

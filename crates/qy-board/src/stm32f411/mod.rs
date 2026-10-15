@@ -249,7 +249,7 @@ impl I2sOut {
             .sample_rate()
             .checked_mul(frame_bits)
             .ok_or(OutError::Clock)?;
-        if per_div == 0 || self.i2s_clk % per_div != 0 {
+        if per_div == 0 || !self.i2s_clk.is_multiple_of(per_div) {
             return Err(OutError::Clock);
         }
         let d = self.i2s_clk / per_div; // 2 × I2SDIV + ODD

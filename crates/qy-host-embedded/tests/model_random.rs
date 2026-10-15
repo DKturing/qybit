@@ -85,9 +85,13 @@ fn playlist(rng: &mut Prng) -> (Vec<Track>, Vec<Ref>) {
             }
             // 合成曲目：44.1/48 kHz、16/24 位、单/双声道。
             _ => {
-                let rate = if rng.next() % 2 == 0 { 44_100 } else { 48_000 };
-                let bits = if rng.next() % 2 == 0 { 16 } else { 24 };
-                let ch = if rng.next() % 4 == 0 { 1 } else { 2 };
+                let rate = if rng.next().is_multiple_of(2) {
+                    44_100
+                } else {
+                    48_000
+                };
+                let bits = if rng.next().is_multiple_of(2) { 16 } else { 24 };
+                let ch = if rng.next().is_multiple_of(4) { 1 } else { 2 };
                 let frames = 6_000 + (rng.next() % 30_000) as usize;
                 let t = synth_wav(&name, rate, ch, bits, frames, rng.next());
                 refs.push(Some((rate, ch, bits, t.samples.clone())));
@@ -118,14 +122,14 @@ fn ops(rng: &mut Prng, tracks: usize) -> Vec<(u64, Op)> {
             16 => Op::Line([b'x'; 40].iter().copied().chain(*b"\n").collect()),
             17 => Op::FailRead(1 + rng.next() % 60),
             18 => {
-                if rng.next() % 4 == 0 {
+                if rng.next().is_multiple_of(4) {
                     Op::BigStall
                 } else {
                     Op::Line(b"status\n".to_vec())
                 }
             }
             _ => {
-                if rng.next() % 3 == 0 {
+                if rng.next().is_multiple_of(3) {
                     Op::Pull(100_000 + rng.next() % 900_000)
                 } else {
                     Op::Line(b"play\n".to_vec())

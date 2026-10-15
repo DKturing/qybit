@@ -184,7 +184,7 @@ impl FrameProducer {
         if fb == 0 {
             return Err(RingError::NotConfigured);
         }
-        if bytes.len() % fb != 0 {
+        if !bytes.len().is_multiple_of(fb) {
             return Err(RingError::PartialFrame);
         }
         let slots = self.inner.slots();

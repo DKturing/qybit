@@ -74,7 +74,7 @@ impl Spec {
 }
 
 fn fmt_rate(rate: u32) -> String {
-    if rate % 1000 == 0 {
+    if rate.is_multiple_of(1000) {
         format!("{}", rate / 1000)
     } else {
         format!("{:.1}", f64::from(rate) / 1000.0)

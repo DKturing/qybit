@@ -1,0 +1,5 @@
+# M2 T5：cargo-mutants 配置（cargo-mutants 27.1.0）。
+# Kani 证明（cfg(kani) 的 proofs 模块）不是测试，变异它们没有意义。
+exclude_re = ["proofs::"]
+# 不复制被 .gitignore 忽略的文件（子目录中的 target、fuzz 语料），否则构建目录会占满磁盘。
+gitignore = true

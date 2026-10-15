@@ -27,17 +27,44 @@ pub const DEVICE_PERIOD_TICKS: u64 = 10;
 const MAX_POLLS_PER_TICK: usize = 1_000_000;
 
 /// 可复现的伪随机数（SplitMix64）。
+///
+/// [`Rng::from_tape`] 先按顺序取用给定字节（每次 8 字节，小端；不足时补 0），用完后再按 SplitMix64
+/// 继续。场景 fuzz 用它让 fuzzer 的输入直接决定场景中的每个选择（M2 T5）。
 #[derive(Debug, Clone)]
-pub struct Rng(u64);
+pub struct Rng {
+    state: u64,
+    tape: Vec<u8>,
+    pos: usize,
+}
 
 impl Rng {
     pub fn new(seed: u64) -> Self {
-        Self(seed)
+        Self {
+            state: seed,
+            tape: Vec::new(),
+            pos: 0,
+        }
+    }
+
+    /// 以 `tape` 为前缀的随机源，用完后按 `seed` 的 SplitMix64 继续。
+    pub fn from_tape(seed: u64, tape: &[u8]) -> Self {
+        Self {
+            state: seed,
+            tape: tape.to_vec(),
+            pos: 0,
+        }
     }
 
     pub fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
+        if self.pos < self.tape.len() {
+            let end = self.tape.len().min(self.pos + 8);
+            let mut b = [0u8; 8];
+            b[..end - self.pos].copy_from_slice(&self.tape[self.pos..end]);
+            self.pos = end;
+            return u64::from_le_bytes(b);
+        }
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
@@ -381,7 +408,7 @@ impl Sim<'_> {
             if self.phase != Phase::Done && !self.stalled(tick) {
                 self.produce(tick);
             }
-            if tick % DEVICE_PERIOD_TICKS == 0 {
+            if tick.is_multiple_of(DEVICE_PERIOD_TICKS) {
                 self.device_period(tick);
             }
             if self.phase == Phase::Done && self.pending.is_empty() {

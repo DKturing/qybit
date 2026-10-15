@@ -196,7 +196,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 /// 位深 = 源位深），返回 (样本, "raw")；其他位深（12/20）输出 WAV，再按容器与有效位
 /// 还原，返回 (样本, "wav")。
 pub fn libflac_reference(path: &Path, bits: u32, tmp: &Path) -> Result<(Vec<i64>, &'static str)> {
-    if bits % 8 == 0 {
+    if bits.is_multiple_of(8) {
         let raw = tmp.join("ref.raw");
         run(Command::new("flac")
             .args([

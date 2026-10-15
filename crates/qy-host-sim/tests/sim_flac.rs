@@ -349,7 +349,7 @@ fn build_case(seed: u64, fixtures: &[Fixture]) -> Case {
                 slow_per_mille: 10,
                 slow_max_ticks: 2,
             };
-            device = if (seed / 6) % 2 == 0 {
+            device = if (seed / 6).is_multiple_of(2) {
                 DeviceModel::Wasapi
             } else {
                 DeviceModel::ShortWrite

@@ -866,3 +866,33 @@ impl Decoder for FlacDecoder {
 
 #[cfg(feature = "static-cell")]
 pub mod mcu;
+/// M2 T5：Kani 有界证明（`cargo kani -p qy-codec-flac --harness stream_info`）。STREAMINFO 的 34 字节
+/// 全为任意值、任意 EOF 时，解析与能力检查不 panic（无整数溢出、越界或除零），消耗量不超过输入。
+#[cfg(kani)]
+mod proofs {
+    extern crate alloc;
+    use super::*;
+    use alloc::boxed::Box;
+    use alloc::vec;
+
+    #[kani::proof]
+    #[kani::unwind(40)]
+    fn stream_info_fields_never_panic() {
+        let cap = Capacity::for_limits(16, 2, 32);
+        let ws = Box::leak(vec![0i64; cap.workspace_len()].into_boxed_slice());
+        let pcm = Box::leak(vec![0i32; cap.pcm_len()].into_boxed_slice());
+        let Ok(mut d) = FlacDecoder::new(cap, ws, pcm) else {
+            panic!()
+        };
+        let info: [u8; 34] = kani::any();
+        let mut b = [0u8; 4 + 4 + 34];
+        b[..4].copy_from_slice(b"fLaC");
+        // 最后一个元数据块、类型 0（STREAMINFO）、长度 34。
+        b[4..8].copy_from_slice(&[0x80, 0, 0, 34]);
+        b[8..].copy_from_slice(&info);
+        let eof: bool = kani::any();
+        if let Ok(p) = d.decode(&b, eof) {
+            assert!(p.consumed <= b.len());
+        }
+    }
+}

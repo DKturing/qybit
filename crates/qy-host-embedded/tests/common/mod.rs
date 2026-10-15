@@ -190,7 +190,7 @@ impl BlockDevice for SimDisk {
             w.disk.block_reads += 1;
             let n = w.disk.block_reads;
             let mut dt = w.disk.block_us;
-            if w.disk.stall_every > 0 && n % w.disk.stall_every == 0 {
+            if w.disk.stall_every > 0 && n.is_multiple_of(w.disk.stall_every) {
                 dt += w.disk.stall_us;
             }
             w.advance(dt);
@@ -235,7 +235,7 @@ impl ReadStorage for SimFlash {
             w.disk.block_reads += 1;
             let n = w.disk.block_reads;
             let mut dt = w.disk.block_us;
-            if w.disk.stall_every > 0 && n % w.disk.stall_every == 0 {
+            if w.disk.stall_every > 0 && n.is_multiple_of(w.disk.stall_every) {
                 dt += w.disk.stall_us;
             }
             w.advance(dt);

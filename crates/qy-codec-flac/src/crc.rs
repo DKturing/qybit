@@ -56,6 +56,61 @@ pub fn crc16(data: &[u8]) -> u16 {
     })
 }
 
+/// M2 T5：Kani 有界证明（`cargo kani -p qy-codec-flac --harness crc`）。查表实现与按位的参考定义
+/// （逐位移位、最高位为 1 时异或多项式）对任意长度 ≤ 4 的输入相等。
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    fn crc8_bitwise(data: &[u8]) -> u8 {
+        let mut c = 0u8;
+        for &b in data {
+            c ^= b;
+            for _ in 0..8 {
+                c = if c & 0x80 != 0 {
+                    (c << 1) ^ 0x07
+                } else {
+                    c << 1
+                };
+            }
+        }
+        c
+    }
+
+    fn crc16_bitwise(data: &[u8]) -> u16 {
+        let mut c = 0u16;
+        for &b in data {
+            c ^= u16::from(b) << 8;
+            for _ in 0..8 {
+                c = if c & 0x8000 != 0 {
+                    (c << 1) ^ 0x8005
+                } else {
+                    c << 1
+                };
+            }
+        }
+        c
+    }
+
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn crc8_matches_bitwise_reference() {
+        let data: [u8; 4] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= data.len());
+        assert!(crc8(&data[..len]) == crc8_bitwise(&data[..len]));
+    }
+
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn crc16_matches_bitwise_reference() {
+        let data: [u8; 4] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= data.len());
+        assert!(crc16(&data[..len]) == crc16_bitwise(&data[..len]));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

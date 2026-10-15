@@ -24,6 +24,8 @@ qy-codec-auto = { path = "../crates/qy-codec-auto" }
 qy-host-embedded = { path = "../crates/qy-host-embedded" }
 embedded-sdmmc = { version = "=0.10.0", default-features = false }
 qy-fat-image = { path = "../tools/qy-fat-image" }
+# M2 T5：场景 fuzz（真实核心、解码、pack 与队列的模拟宿主）。
+qy-host-sim = { path = "../crates/qy-host-sim" }
 
 [[bin]]
 name = "wav_decode"
@@ -56,6 +58,13 @@ bench = false
 [[bin]]
 name = "fat_storage"
 path = "fuzz_targets/fat_storage.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sim_scenario"
+path = "fuzz_targets/sim_scenario.rs"
 test = false
 doc = false
 bench = false

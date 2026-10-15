@@ -60,6 +60,8 @@ windows = { version = "=0.62.2", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+# M2 T5：Kani 证明在 cfg(kani) 下编译。
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
