@@ -25,7 +25,7 @@ pub use backend::{Backend, PendingStream, RunningStream};
 pub use player::{PlayControl, TrackSource, play, play_source, play_with};
 pub use report::{
     AppliedParams, AttemptRecord, Evidence, Negotiation, OpenFailure, PhysicalSpeakers,
-    PlaybackReport, StreamReport, Submission, fault_text,
+    PlaybackReport, RateProbe, StreamReport, Submission, fault_text,
 };
 
 use qy_codec_auto::profile::{DESKTOP, Profile};

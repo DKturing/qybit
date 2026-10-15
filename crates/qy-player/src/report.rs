@@ -76,6 +76,21 @@ pub struct Negotiation<A> {
     pub chosen: Option<usize>,
     /// 端点报告的物理扬声器配置（O1 §2：只作提示）。
     pub speakers: PhysicalSpeakers,
+    /// 按单声道复制（O1）以立体声请求设备：源文件实际为同采样率、同位数的单声道 `[FC]`，
+    /// `source` 为请求用的立体声格式。
+    pub duplicated_mono: bool,
+    /// 全部请求都因格式不受支持被拒绝时，对其他采样率的只读探测（后端支持时填写）。
+    pub rate_probe: Option<Box<RateProbe>>,
+}
+
+/// 采样率探测：同一声道布局与位深候选下，逐个采样率做只读的格式查询（不打开设备）。
+/// 用来说明失败是因为采样率不受支持，不代表会改用其他采样率：本程序不重采样。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateProbe {
+    /// 查询过的采样率（不含源采样率）。
+    pub checked: Vec<u32>,
+    /// 其中端点接受的采样率。
+    pub accepted: Vec<u32>,
 }
 
 impl<A> Negotiation<A> {
@@ -85,6 +100,8 @@ impl<A> Negotiation<A> {
             attempts: Vec::new(),
             chosen: None,
             speakers: PhysicalSpeakers::NotQueryable,
+            duplicated_mono: false,
+            rate_probe: None,
         }
     }
 
@@ -319,13 +336,22 @@ fn applied_text(out: &mut String, a: Option<AppliedParams>) {
 
 pub(crate) fn negotiation_text<A: AttemptRecord>(out: &mut String, n: &Negotiation<A>) {
     let s = &n.source;
-    let _ = writeln!(
+    let channels = if n.duplicated_mono { 1 } else { s.channels() };
+    let _ = write!(
         out,
-        "  源格式：{} Hz / {} 声道 / {} 位有效",
+        "  源格式：{} Hz / {channels} 声道 / {} 位有效",
         s.sample_rate(),
-        s.channels(),
         s.bits()
     );
+    if n.duplicated_mono {
+        let _ = write!(
+            out,
+            "（--mono-to-stereo：按 {} 声道 {} 请求设备）",
+            n.source.channels(),
+            n.source.layout()
+        );
+    }
+    out.push('\n');
     for (i, a) in n.attempts.iter().enumerate() {
         let _ = write!(
             out,
@@ -342,6 +368,47 @@ pub(crate) fn negotiation_text<A: AttemptRecord>(out: &mut String, n: &Negotiati
         applied_text(out, a.applied());
         speakers_text(out, n.speakers, &a.requested().layout());
     }
+    if let Some(p) = &n.rate_probe {
+        rate_probe_text(out, p, n.source.sample_rate());
+    }
+}
+
+fn rate_list(rates: &[u32]) -> String {
+    rates
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+/// 采样率探测的说明行。
+fn rate_probe_text(out: &mut String, p: &RateProbe, source_rate: u32) {
+    let rejected: Vec<u32> = p
+        .checked
+        .iter()
+        .copied()
+        .filter(|r| !p.accepted.contains(r))
+        .collect();
+    if p.accepted.is_empty() {
+        let _ = writeln!(
+            out,
+            "  采样率探测（只读查询，未打开设备）：同一声道布局与位深候选下，查询的 {} Hz 也都被拒绝，\
+             问题不只在采样率。",
+            rate_list(&p.checked)
+        );
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "  采样率探测（只读查询，未打开设备）：同一声道布局与位深候选下，端点接受 {} Hz{}。\
+         源的 {source_rate} Hz 不受支持；本程序不重采样，因此不能播放。",
+        rate_list(&p.accepted),
+        if rejected.is_empty() {
+            String::new()
+        } else {
+            format!("，拒绝 {} Hz", rate_list(&rejected))
+        }
+    );
 }
 
 impl<A: AttemptRecord> PlaybackReport<A> {

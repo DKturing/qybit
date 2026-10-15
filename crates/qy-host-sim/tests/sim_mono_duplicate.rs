@@ -254,3 +254,26 @@ fn duplicate_only_affects_center_mono() {
         }
     }
 }
+
+/// 开启复制但设备只接受单声道：按立体声请求被拒，曲目配置失败；没有输出，不记“声道已改变”。
+#[test]
+fn duplicate_not_reported_when_device_rejects() {
+    let mut h = host(ChannelPolicy::DuplicateMono);
+    let fx = wav("pcm16_mono_8k_fmt18");
+    for seed in SEEDS {
+        for device in DEVICES {
+            let what = format!("种子 {seed} {device:?}");
+            let r = run(
+                &mut h,
+                &scenario(seed, device, &[&fx], Some(vec![ChannelLayout::MONO])),
+            );
+            assert_eq!(
+                r.fault,
+                Some((0, EngineFault::Core(Fault::Configure))),
+                "{what}"
+            );
+            assert!(r.duplicated.is_empty(), "{what}");
+            assert!(r.segments.iter().all(|s| s.valid.is_empty()), "{what}");
+        }
+    }
+}

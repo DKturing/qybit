@@ -142,8 +142,10 @@ impl Backend for WasapiBackend {
             Some(_) => Vec::new(),
             None => attempts(&source, self.container),
         };
+        // 矩阵逐项测试（forced）不探测；普通播放按同样的 --container 限制探测其他采样率。
+        let probe = self.forced.is_none().then_some(self.container);
         let handle =
-            std::thread::spawn(move || stream_thread(&id, &source, &list, &info_tx, &go_rx));
+            std::thread::spawn(move || stream_thread(&id, &source, &list, probe, &info_tx, &go_rx));
         let failure = |message: String| OpenFailure {
             negotiation: Negotiation::new(source),
             message,
@@ -222,6 +224,7 @@ fn stream_thread(
     id: &str,
     source: &SourceFormat,
     list: &[((u8, u8), Descriptor)],
+    probe: Option<Option<u8>>,
     info: &Sender<Result<(DeviceFormat, Negotiation), OpenFailure>>,
     go: &Receiver<Go>,
 ) -> ThreadOut {
@@ -235,7 +238,7 @@ fn stream_thread(
             return None;
         }
     };
-    let (stream, negotiation) = match negotiate(id, source, list) {
+    let (stream, negotiation) = match negotiate(id, source, list, probe) {
         Ok(v) => v,
         Err(f) => {
             let _ = info.send(Err(f));
@@ -266,6 +269,7 @@ fn negotiate(
     id: &str,
     source: &SourceFormat,
     list: &[((u8, u8), Descriptor)],
+    probe: Option<Option<u8>>,
 ) -> Result<(Stream, Negotiation), OpenFailure> {
     let mut negotiation = Negotiation::new(*source);
     let fail = |negotiation: Negotiation, message: String| OpenFailure {
@@ -303,10 +307,26 @@ fn negotiate(
             return Ok((stream, negotiation));
         }
     }
-    Err(fail(
-        negotiation,
-        "设备不支持任何可无损承载该源格式的独占格式".into(),
-    ))
+    if let Some(container) = probe {
+        negotiation.rate_probe = crate::attempt::probe_rates(&negotiation, container, |f, d| {
+            exclusive_supported(&device, f, d)
+        });
+    }
+    let message = crate::attempt::failure_message(&negotiation);
+    Err(fail(negotiation, message))
+}
+
+/// 一次只读的独占格式查询（新的音频客户端，不初始化、不打开流）。
+fn exclusive_supported(device: &IMMDevice, format: &DeviceFormat, descriptor: Descriptor) -> bool {
+    let Some(sdk) = sdk_format(format, descriptor) else {
+        return false;
+    };
+    let Some(client) = activate(device) else {
+        return false;
+    };
+    // SAFETY: sdk 在本函数内存活，指针指向完整的格式结构；独占模式下 ppClosestMatch 必须为空。
+    let hr = unsafe { client.IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, sdk.ptr(), None) };
+    hr.0 == 0
 }
 
 /// 纯描述 → SDK 结构；返回的结构在调用期间保持存活。

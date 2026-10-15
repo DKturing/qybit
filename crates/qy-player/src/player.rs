@@ -424,6 +424,8 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
             self.report.protocol_errors += 1;
             self.finish_stream(false);
         }
+        // O1：按单声道复制以立体声请求设备时，协商记录写明源文件的实际格式。
+        let duplicated_mono = self.res.engine.duplicating();
         match self.backend.open(source) {
             Ok(pending) => {
                 let format = pending.format();
@@ -431,8 +433,10 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                     self.report.messages.push(format!("队列重配置失败: {e:?}"));
                     return None;
                 }
+                let mut negotiation = pending.negotiation().clone();
+                negotiation.duplicated_mono = duplicated_mono;
                 self.active = Some(Active {
-                    negotiation: pending.negotiation().clone(),
+                    negotiation,
                     submission: pending.submission(),
                     stream: Stream::Pending(pending),
                     format,
@@ -453,7 +457,8 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 });
                 Some(format)
             }
-            Err(f) => {
+            Err(mut f) => {
+                f.negotiation.duplicated_mono = duplicated_mono;
                 self.report.open_failures.push(f);
                 None
             }
@@ -898,6 +903,15 @@ mod tests {
                 "{text}"
             );
             assert!(!text.contains("软件路径无损"), "{text}");
+            // 协商记录写源文件的实际格式，并注明按 2 声道请求设备。
+            assert!(
+                text.contains("源格式：8000 Hz / 1 声道 / 16 位有效（--mono-to-stereo：按 2 声道 [FL FR] 请求设备）"),
+                "{text}"
+            );
+            // 设备打开之后才报告声道已改变。
+            let opened = all.find("设备流已打开").unwrap_or(usize::MAX);
+            let altered = all.find("曲目 1 声道已改变").unwrap_or(0);
+            assert!(opened < altered, "{all}");
             let outs = b.outputs();
             assert_eq!(outs.len(), 1);
             assert_eq!(outs[0].format.channels(), 2);

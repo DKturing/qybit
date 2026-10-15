@@ -113,6 +113,8 @@ fn failure(source: &SourceFormat, attempts: Vec<Attempt>, message: String) -> Op
             attempts,
             chosen: None,
             speakers: PhysicalSpeakers::NotQueryable,
+            duplicated_mono: false,
+            rate_probe: None,
         },
         message,
     }
@@ -254,6 +256,8 @@ impl<O: Opener, P: ThreadPriority + Clone + Send + 'static> Backend for AlsaBack
                                     chosen: Some(chosen),
                                     // ALSA 没有对应的物理扬声器属性（O1 §2），不推测。
                                     speakers: PhysicalSpeakers::NotQueryable,
+                                    duplicated_mono: false,
+                                    rate_probe: None,
                                 },
                                 priority: self.priority.clone(),
                             });

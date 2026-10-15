@@ -5,7 +5,66 @@
 //! 帧数，格式标为不可查询——`GetMixFormat` 是共享混音格式，不得冒充独占流格式。
 
 use qy_core::{DeviceFormat, SourceFormat};
-use qy_player::{AppliedParams, AttemptRecord};
+use qy_player::{AppliedParams, AttemptRecord, RateProbe};
+
+/// 独占 `IsFormatSupported` 的 `AUDCLNT_E_UNSUPPORTED_FORMAT`（格式不受支持）。
+pub const AUDCLNT_E_UNSUPPORTED_FORMAT: i32 = 0x8889_0008_u32 as i32;
+
+/// 采样率探测查询的常见采样率。
+pub const PROBE_RATES: [u32; 13] = [
+    8_000, 11_025, 16_000, 22_050, 32_000, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000,
+    352_800, 384_000,
+];
+
+/// 全部尝试的 `IsFormatSupported` 都是 [`AUDCLNT_E_UNSUPPORTED_FORMAT`] 时，对 [`PROBE_RATES`] 中
+/// 其他采样率，按同一声道布局与同样的候选（[`attempts`]，`container` 同协商）逐个只读查询，
+/// `supported` 为一次独占格式查询，每个采样率找到一个被接受的格式即止。其他失败（设备忙、初始化
+/// 失败等）不探测，返回 `None`。探测只用于说明原因，不改用其他采样率。
+pub fn probe_rates(
+    n: &Negotiation,
+    container: Option<u8>,
+    mut supported: impl FnMut(&DeviceFormat, Descriptor) -> bool,
+) -> Option<Box<RateProbe>> {
+    if n.attempts.is_empty()
+        || n.attempts
+            .iter()
+            .any(|a| a.is_format_supported != Some(AUDCLNT_E_UNSUPPORTED_FORMAT))
+    {
+        return None;
+    }
+    let src = n.source;
+    let mut probe = RateProbe {
+        checked: Vec::new(),
+        accepted: Vec::new(),
+    };
+    for rate in PROBE_RATES {
+        if rate == src.sample_rate() {
+            continue;
+        }
+        let Ok(at) = SourceFormat::with_layout(rate, src.layout(), src.bits()) else {
+            continue;
+        };
+        probe.checked.push(rate);
+        let ok = attempts(&at, container).into_iter().any(|((c, v), d)| {
+            DeviceFormat::wasapi_layout(rate, at.layout(), c, v).is_ok_and(|f| supported(&f, d))
+        });
+        if ok {
+            probe.accepted.push(rate);
+        }
+    }
+    Some(Box::new(probe))
+}
+
+/// 协商全部失败时的说明：探测表明其他采样率可用时，写明是采样率不受支持。
+pub fn failure_message(n: &Negotiation) -> String {
+    match &n.rate_probe {
+        Some(p) if !p.accepted.is_empty() => format!(
+            "端点在独占模式下拒绝了 {} Hz 的全部候选格式：该采样率不受支持（本程序不重采样）",
+            n.source.sample_rate()
+        ),
+        _ => "设备不支持任何可无损承载该源格式的独占格式".into(),
+    }
+}
 
 /// 设备格式候选 (C, V)：V ≥ N 中 V 最小者优先，同 V 先小容器。
 /// 只列出不改变样本值的表示（pack 只做 N ≤ V 的放置）。
@@ -123,6 +182,7 @@ mod tests {
     use qy_player::{HostResources, play};
 
     use super::*;
+    use crate::attempt::PROBE_RATES;
     use crate::fake::{
         AUDCLNT_E_UNSUPPORTED_FORMAT, WasapiNegotiator, fake_backend, fake_backend_with,
     };
@@ -248,6 +308,78 @@ mod tests {
                 "{mono}"
             );
         }
+    }
+
+    /// 端点只接受 44.1/48 kHz：16 kHz 单声道（开启单声道复制）全部被拒，探测其他采样率后写明是
+    /// 采样率不受支持并列出接受的采样率；没有曲目播放，因此不记“声道已改变”；协商记录写明源文件
+    /// 实际为单声道。48 kHz 的同一类文件照常播放，字节为每样本两份。
+    #[test]
+    fn unsupported_rate_is_explained_by_probe() {
+        static RATES: [u32; 2] = [44_100, 48_000];
+        let backend = || {
+            fake_backend_with(
+                &ALL,
+                WasapiNegotiator {
+                    rates: Some(&RATES),
+                    ..WasapiNegotiator::default()
+                },
+            )
+        };
+        let Ok(mut res) = HostResources::new() else {
+            panic!("res");
+        };
+        res.engine
+            .set_channel_policy(qy_core::engine::ChannelPolicy::DuplicateMono);
+        // 8 kHz 单声道 16 位夹具（按单声道复制以 2 声道请求）。
+        let mut b = backend();
+        let r = play(&mut b, &mut res, &[fixture_path("pcm16_mono_8k_fmt18.wav")]);
+        assert!(!r.finished);
+        assert!(r.channels_altered.is_empty(), "{r:?}");
+        let f = &r.open_failures[0];
+        assert_eq!(
+            f.message,
+            "端点在独占模式下拒绝了 8000 Hz 的全部候选格式：该采样率不受支持（本程序不重采样）"
+        );
+        let Some(p) = &f.negotiation.rate_probe else {
+            panic!("应探测");
+        };
+        assert_eq!(p.accepted, vec![44_100, 48_000]);
+        assert_eq!(p.checked.len(), PROBE_RATES.len() - 1);
+        assert!(!p.checked.contains(&8_000));
+        let s = r.summary();
+        assert!(
+            s.contains("源格式：8000 Hz / 1 声道 / 16 位有效（--mono-to-stereo：按 2 声道 [FL FR] 请求设备）"),
+            "{s}"
+        );
+        assert!(
+            s.contains("端点接受 44100、48000 Hz，拒绝 11025、16000"),
+            "{s}"
+        );
+        assert!(s.contains("源的 8000 Hz 不受支持；本程序不重采样"), "{s}");
+        assert!(!s.contains("声道已改变"), "{s}");
+
+        // 位深不支持（只接受 16/16，源 24 位）：所有采样率都被拒，说明问题不只在采样率。
+        let mut b = fake_backend_with(
+            &[(16, 16)],
+            WasapiNegotiator {
+                rates: Some(&RATES),
+                ..WasapiNegotiator::default()
+            },
+        );
+        let r = play(
+            &mut b,
+            &mut res,
+            &[fixture_path("pcm24_mono_48k_odd_list.wav")],
+        );
+        let f = &r.open_failures[0];
+        assert_eq!(f.message, "设备不支持任何可无损承载该源格式的独占格式");
+        assert!(
+            f.negotiation
+                .rate_probe
+                .as_ref()
+                .is_some_and(|p| p.accepted.is_empty())
+        );
+        assert!(r.summary().contains("问题不只在采样率"));
     }
 
     /// O1 §2：端点物理扬声器只作提示。掩码包含设备流的位置：只记录掩码；缺少位置：提示可能听不到；

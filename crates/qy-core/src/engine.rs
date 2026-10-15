@@ -403,7 +403,8 @@ pub enum HostAction {
     /// 顺序逐条给出；宿主据此在报告中写明。
     Repaired { track: u32, repair: Repair },
     /// 第 `track` 首按 [`ChannelPolicy::DuplicateMono`] 把单声道复制到左右两路（声道布局已改变，
-    /// 样本值未改变）。在该曲目配置设备时给出；宿主据此在报告中标为“已改变”。
+    /// 样本值未改变）。在设备按该曲目配置成功（新打开或续用）后给出；配置失败的曲目不给出。
+    /// 宿主据此在报告中标为“已改变”。
     ChannelsDuplicated { track: u32 },
     /// 播放列表正常结束，设备中的音频已播完。
     Finished,
@@ -919,7 +920,7 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
                 match self.device {
                     Some(d) if d.format == format => {
                         self.mode = Mode::Run;
-                        self.core_handle(Event::Configured { generation });
+                        self.configured(generation);
                     }
                     Some(_) => self.begin_drain(After::Open {
                         generation,
@@ -946,7 +947,7 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
                     running: false,
                 });
                 self.mode = Mode::Run;
-                self.core_handle(Event::Configured { generation });
+                self.configured(generation);
             }
             (HostEvent::DeviceDrained, Mode::Drain(after)) => {
                 if let Some(d) = self.device.as_mut() {
@@ -1017,16 +1018,28 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
         Poll::Yield
     }
 
-    fn on_configure(&mut self, generation: Generation, source: SourceFormat) {
-        let actual = source;
-        let source = self.presented(actual);
-        self.duplicating = source != actual;
+    /// 设备已按本曲目配置好（新打开或续用）。按单声道复制配置的曲目在此时才报告“声道已改变”，
+    /// 配置失败（能力不足、设备不支持）的曲目没有输出，不报告。
+    fn configured(&mut self, generation: Generation) {
         if self.duplicating {
             self.stats.duplicated_tracks += 1;
             self.push(HostAction::ChannelsDuplicated {
                 track: self.core.track(),
             });
         }
+        self.core_handle(Event::Configured { generation });
+    }
+
+    /// 当前曲目是否按 [`ChannelPolicy::DuplicateMono`] 配置（打开设备时宿主据此在协商记录中写明
+    /// 源的实际格式）。
+    pub fn duplicating(&self) -> bool {
+        self.duplicating
+    }
+
+    fn on_configure(&mut self, generation: Generation, source: SourceFormat) {
+        let actual = source;
+        let source = self.presented(actual);
+        self.duplicating = source != actual;
         if let Err(e) = self.cfg.caps.check(&source) {
             self.reject = Some(EngineFault::Capability(e));
             self.core_handle(Event::ConfigureFailed { generation });
@@ -1036,7 +1049,7 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
             && self.cfg.reuse == ReusePolicy::Accepts
             && d.format.accepts(&source)
         {
-            self.core_handle(Event::Configured { generation });
+            self.configured(generation);
             return;
         }
         match self.cfg.reuse {

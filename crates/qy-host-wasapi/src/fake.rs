@@ -6,9 +6,10 @@ use qy_core::{DeviceFormat, SourceFormat};
 use qy_player::PhysicalSpeakers;
 use qy_player::testing::{FakeBackend, Negotiator};
 
-use crate::attempt::{Attempt, Descriptor, Negotiation, OpenFailure, attempts};
-
-pub const AUDCLNT_E_UNSUPPORTED_FORMAT: i32 = 0x8889_0008_u32 as i32;
+pub use crate::attempt::AUDCLNT_E_UNSUPPORTED_FORMAT;
+use crate::attempt::{
+    Attempt, Descriptor, Negotiation, OpenFailure, attempts, failure_message, probe_rates,
+};
 
 /// 按设备支持列表逐项协商。
 #[derive(Debug, Clone, Copy, Default)]
@@ -19,6 +20,17 @@ pub struct WasapiNegotiator {
     pub extensible_16_rejected: bool,
     /// 端点物理扬声器属性的读取结果（O1 §2）。
     pub speakers: PhysicalSpeakers,
+    /// 端点接受的采样率；`None` 为全部接受。
+    pub rates: Option<&'static [u32]>,
+}
+
+impl WasapiNegotiator {
+    fn accepts(&self, supported: &[(u8, u8)], f: &DeviceFormat, d: Descriptor) -> bool {
+        let cv = (f.container_bits(), f.valid_bits());
+        supported.contains(&cv)
+            && self.rates.is_none_or(|r| r.contains(&f.sample_rate()))
+            && !(self.extensible_16_rejected && cv == (16, 16) && d == Descriptor::Extensible)
+    }
 }
 
 impl Negotiator for WasapiNegotiator {
@@ -42,10 +54,7 @@ impl Negotiator for WasapiNegotiator {
             else {
                 continue;
             };
-            let ok = supported.contains(&(c, v))
-                && !(self.extensible_16_rejected
-                    && (c, v) == (16, 16)
-                    && descriptor == Descriptor::Extensible);
+            let ok = self.accepts(supported, &format, descriptor);
             negotiation.attempts.push(Attempt {
                 format,
                 descriptor,
@@ -60,9 +69,18 @@ impl Negotiator for WasapiNegotiator {
                 return Ok((format, negotiation));
             }
         }
+        if self.forced.is_none() {
+            negotiation.rate_probe =
+                probe_rates(&negotiation, None, |f, d| self.accepts(supported, f, d));
+        }
+        let message = if negotiation.rate_probe.is_some() {
+            failure_message(&negotiation)
+        } else {
+            "设备不支持该格式".into()
+        };
         Err(OpenFailure {
             negotiation,
-            message: "设备不支持该格式".into(),
+            message,
         })
     }
 }
