@@ -91,6 +91,9 @@ pub struct RateProbe {
     pub checked: Vec<u32>,
     /// 其中端点接受的采样率。
     pub accepted: Vec<u32>,
+    /// 源为单声道 `[FC]` 且所有采样率都被拒时，按立体声 `[FL FR]`（同样的位深候选）查询被接受的
+    /// 采样率（含源采样率）。用来说明 `--mono-to-stereo` 能否让该文件播放；不会自动改用立体声。
+    pub stereo_accepted: Option<Vec<u32>>,
 }
 
 impl<A> Negotiation<A> {
@@ -396,6 +399,30 @@ fn rate_probe_text(out: &mut String, p: &RateProbe, source_rate: u32) {
              问题不只在采样率。",
             rate_list(&p.checked)
         );
+        match &p.stereo_accepted {
+            Some(st) if st.contains(&source_rate) => {
+                let _ = writeln!(
+                    out,
+                    "  声道探测：端点在所有查询的采样率下都不接受单声道 [FC]；按立体声 [FL FR] 查询，\
+                     端点接受 {} Hz（含源的 {source_rate} Hz）。可用 --mono-to-stereo 明确开启单声道\
+                     复制（样本值不变，报告标为“声道已改变”，不是严格路径）。",
+                    rate_list(st)
+                );
+            }
+            Some(st) if !st.is_empty() => {
+                let _ = writeln!(
+                    out,
+                    "  声道探测：端点在所有查询的采样率下都不接受单声道 [FC]；按立体声 [FL FR] 查询，\
+                     端点接受 {} Hz，不含源的 {source_rate} Hz。即使开启 --mono-to-stereo 也不能播放\
+                     （本程序不重采样）。",
+                    rate_list(st)
+                );
+            }
+            Some(_) => {
+                out.push_str("  声道探测：按立体声 [FL FR] 查询也都被拒绝（位深候选不受支持）。\n");
+            }
+            None => {}
+        }
         return;
     }
     let _ = writeln!(

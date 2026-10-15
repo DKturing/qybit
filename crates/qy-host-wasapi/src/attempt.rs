@@ -36,32 +36,61 @@ pub fn probe_rates(
     let mut probe = RateProbe {
         checked: Vec::new(),
         accepted: Vec::new(),
+        stereo_accepted: None,
+    };
+    let mut accepts = |rate: u32, layout: qy_core::ChannelLayout| -> bool {
+        let Ok(at) = SourceFormat::with_layout(rate, layout, src.bits()) else {
+            return false;
+        };
+        attempts(&at, container).into_iter().any(|((c, v), d)| {
+            DeviceFormat::wasapi_layout(rate, layout, c, v).is_ok_and(|f| supported(&f, d))
+        })
     };
     for rate in PROBE_RATES {
         if rate == src.sample_rate() {
             continue;
         }
-        let Ok(at) = SourceFormat::with_layout(rate, src.layout(), src.bits()) else {
-            continue;
-        };
         probe.checked.push(rate);
-        let ok = attempts(&at, container).into_iter().any(|((c, v), d)| {
-            DeviceFormat::wasapi_layout(rate, at.layout(), c, v).is_ok_and(|f| supported(&f, d))
-        });
-        if ok {
+        if accepts(rate, src.layout()) {
             probe.accepted.push(rate);
         }
+    }
+    // 单声道在所有采样率都被拒：按立体声再查一遍（含源采样率），说明 --mono-to-stereo 能否播放。
+    if probe.accepted.is_empty() && src.layout() == qy_core::ChannelLayout::MONO {
+        let mut rates: Vec<u32> = PROBE_RATES.to_vec();
+        if !rates.contains(&src.sample_rate()) {
+            rates.push(src.sample_rate());
+            rates.sort_unstable();
+        }
+        probe.stereo_accepted = Some(
+            rates
+                .into_iter()
+                .filter(|&r| accepts(r, qy_core::ChannelLayout::STEREO))
+                .collect(),
+        );
     }
     Some(Box::new(probe))
 }
 
-/// 协商全部失败时的说明：探测表明其他采样率可用时，写明是采样率不受支持。
+/// 协商全部失败时的说明：探测表明其他采样率可用时，写明是采样率不受支持；单声道在所有采样率都被
+/// 拒而立体声可用时，写明是不接受单声道。
 pub fn failure_message(n: &Negotiation) -> String {
     match &n.rate_probe {
         Some(p) if !p.accepted.is_empty() => format!(
             "端点在独占模式下拒绝了 {} Hz 的全部候选格式：该采样率不受支持（本程序不重采样）",
             n.source.sample_rate()
         ),
+        Some(p) if p.stereo_accepted.as_ref().is_some_and(|st| !st.is_empty()) => {
+            let rate = n.source.sample_rate();
+            if p.stereo_accepted
+                .as_ref()
+                .is_some_and(|st| st.contains(&rate))
+            {
+                "端点在独占模式下不接受单声道 [FC]（同采样率的立体声可用，见声道探测）".into()
+            } else {
+                format!("端点在独占模式下不接受单声道 [FC]，也不支持 {rate} Hz（本程序不重采样）")
+            }
+        }
         _ => "设备不支持任何可无损承载该源格式的独占格式".into(),
     }
 }
@@ -380,6 +409,71 @@ mod tests {
                 .is_some_and(|p| p.accepted.is_empty())
         );
         assert!(r.summary().contains("问题不只在采样率"));
+    }
+
+    /// 端点拒绝一切单声道、立体声只接受 44.1/48 kHz（严格路径，未开启复制）：48 kHz 单声道的报告
+    /// 写明不接受单声道、立体声可用并提示 --mono-to-stereo；8 kHz 单声道写明即使开启也不能播放。
+    #[test]
+    fn mono_rejection_is_explained_by_stereo_probe() {
+        static RATES: [u32; 2] = [44_100, 48_000];
+        let Ok(mut res) = HostResources::new() else {
+            panic!("res");
+        };
+        let backend = || {
+            fake_backend_with(
+                &ALL,
+                WasapiNegotiator {
+                    rates: Some(&RATES),
+                    mono_rejected: true,
+                    ..WasapiNegotiator::default()
+                },
+            )
+        };
+        let mut b = backend();
+        let r = play(
+            &mut b,
+            &mut res,
+            &[fixture_path("pcm24_mono_48k_odd_list.wav")],
+        );
+        let f = &r.open_failures[0];
+        assert_eq!(
+            f.message,
+            "端点在独占模式下不接受单声道 [FC]（同采样率的立体声可用，见声道探测）"
+        );
+        let p = f.negotiation.rate_probe.as_ref();
+        assert_eq!(
+            p.and_then(|p| p.stereo_accepted.clone()),
+            Some(vec![44_100, 48_000])
+        );
+        let s = r.summary();
+        assert!(
+            s.contains("按立体声 [FL FR] 查询，端点接受 44100、48000 Hz（含源的 48000 Hz）。可用 --mono-to-stereo"),
+            "{s}"
+        );
+
+        let mut b = backend();
+        let r = play(&mut b, &mut res, &[fixture_path("pcm16_mono_8k_fmt18.wav")]);
+        assert_eq!(
+            r.open_failures[0].message,
+            "端点在独占模式下不接受单声道 [FC]，也不支持 8000 Hz（本程序不重采样）"
+        );
+        let s = r.summary();
+        assert!(
+            s.contains("不含源的 8000 Hz。即使开启 --mono-to-stereo 也不能播放"),
+            "{s}"
+        );
+
+        // 立体声源被拒时不做声道探测。
+        let mut b = fake_backend_with(
+            &[(16, 16)],
+            WasapiNegotiator {
+                rates: Some(&RATES),
+                ..WasapiNegotiator::default()
+            },
+        );
+        let r = play(&mut b, &mut res, &[fixture_path("pcm24_stereo_large.wav")]);
+        let p = r.open_failures[0].negotiation.rate_probe.as_ref();
+        assert!(p.is_some_and(|p| p.accepted.is_empty() && p.stereo_accepted.is_none()));
     }
 
     /// O1 §2：端点物理扬声器只作提示。掩码包含设备流的位置：只记录掩码；缺少位置：提示可能听不到；

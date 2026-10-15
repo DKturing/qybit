@@ -22,6 +22,8 @@ pub struct WasapiNegotiator {
     pub speakers: PhysicalSpeakers,
     /// 端点接受的采样率；`None` 为全部接受。
     pub rates: Option<&'static [u32]>,
+    /// 模拟拒绝一切单声道格式的端点。
+    pub mono_rejected: bool,
 }
 
 impl WasapiNegotiator {
@@ -29,6 +31,7 @@ impl WasapiNegotiator {
         let cv = (f.container_bits(), f.valid_bits());
         supported.contains(&cv)
             && self.rates.is_none_or(|r| r.contains(&f.sample_rate()))
+            && !(self.mono_rejected && f.channels() == 1)
             && !(self.extensible_16_rejected && cv == (16, 16) && d == Descriptor::Extensible)
     }
 }
