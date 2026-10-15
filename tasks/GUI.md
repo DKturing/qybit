@@ -20,7 +20,7 @@ AGENTS 中 M0 不做的交互设备选择与拖放，在本卡只对 GUI 放开�
 
 **待用户决定**：拖动进度条定位（seek）需要核心与解码器支持定位（WAV 按帧计算偏移；FLAC 依 SEEKTABLE 或按帧同步扫描，RFC 9639），属于核心能力，另立任务卡；建议 GUI 基本可用后再做。
 
-## T1：技术选型
+## T1：技术选型（已完成：选用 Slint，见 docs/gui-t1-selection.md）
 
 - 纯 Rust，不嵌入 WebView、不依赖 Node/Python；候选 egui/eframe、iced、slint，按以下标准比较后选定一个并记录理由：Windows 支持（首要）、Linux 支持、表格/列表控件、文件拖放、系统文件对话框（可用 rfd 等成熟 crate）、二进制大小、依赖数量与许可证、是否需要系统运行库、空闲 CPU 占用。
 - 依赖锁定版本，新增依赖说明用途。
