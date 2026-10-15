@@ -7,7 +7,7 @@
 //! 生产端只按完整帧入队，消费端只按完整帧出队；环形回绕时最多两段拷贝。
 //! 消费端不做位移、字节序或样本格式转换。
 
-use crate::pack::{ChannelMode, Exact, Pcm, pack_with};
+use crate::pack::{ChannelMode, Fidelity, Pcm, pack_with};
 pub use crate::queue::RingError;
 use crate::queue::{FrameSink, FrameSource};
 use crate::{DeviceFormat, frames_for_millis};
@@ -124,9 +124,9 @@ impl FrameProducer {
 
     /// 生产端：把精确 PCM 中能放入队列的完整帧 pack 到 `scratch` 后入队。
     /// 返回入队帧数，调用方据此从解码器释放同样帧数；队列满时返回 0。
-    pub fn pack_push(
+    pub fn pack_push<M: Fidelity>(
         &mut self,
-        pcm: &Pcm<'_, Exact>,
+        pcm: &Pcm<'_, M>,
         device: &DeviceFormat,
         scratch: &mut [u8],
     ) -> Result<usize, RingError> {
@@ -134,9 +134,9 @@ impl FrameProducer {
     }
 
     /// 同 [`FrameProducer::pack_push`]，声道处理方式由 `mode` 给出（[`ChannelMode`]）。
-    pub fn pack_push_with(
+    pub fn pack_push_with<M: Fidelity>(
         &mut self,
-        pcm: &Pcm<'_, Exact>,
+        pcm: &Pcm<'_, M>,
         device: &DeviceFormat,
         mode: ChannelMode,
         scratch: &mut [u8],
@@ -305,9 +305,9 @@ impl FrameConsumer {
 impl FrameSink for FrameProducer {
     type Error = RingError;
 
-    fn push(
+    fn push<M: Fidelity>(
         &mut self,
-        pcm: &Pcm<'_, Exact>,
+        pcm: &Pcm<'_, M>,
         device: &DeviceFormat,
         mode: ChannelMode,
         scratch: &mut [u8],
@@ -415,7 +415,7 @@ mod tests {
             panic!()
         };
         assert_eq!(
-            usize::from(wide.block_align()),
+            usize::from(wide.block_align()) * 2,
             crate::queue::MAX_FRAME_BYTES
         );
         let (mut p, mut c) = frame_ring(300_000);

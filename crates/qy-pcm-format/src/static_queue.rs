@@ -27,7 +27,7 @@ use bbqueue::traits::notifier::polling::Polling;
 use bbqueue::traits::storage::Inline;
 
 use crate::DeviceFormat;
-use crate::pack::{ChannelMode, Exact, Pcm, pack_with};
+use crate::pack::{ChannelMode, Fidelity, Pcm, pack_with};
 use crate::queue::{FrameSink, FrameSource, RingError};
 
 type Bbq<const N: usize> = BBQueue<Inline<N>, AtomicCoord, Polling>;
@@ -158,18 +158,18 @@ impl<const N: usize> StaticProducer<N> {
     }
 
     /// 把精确 PCM 中能放入的完整帧直接 pack 进队列存储，返回入队帧数；队列满时返回 0。
-    pub fn pack_push(
+    pub fn pack_push<M: Fidelity>(
         &mut self,
-        pcm: &Pcm<'_, Exact>,
+        pcm: &Pcm<'_, M>,
         device: &DeviceFormat,
     ) -> Result<usize, RingError> {
         self.pack_push_with(pcm, device, ChannelMode::Exact)
     }
 
     /// 同 [`StaticProducer::pack_push`]，声道处理方式由 `mode` 给出（[`ChannelMode`]）。
-    pub fn pack_push_with(
+    pub fn pack_push_with<M: Fidelity>(
         &mut self,
-        pcm: &Pcm<'_, Exact>,
+        pcm: &Pcm<'_, M>,
         device: &DeviceFormat,
         mode: ChannelMode,
     ) -> Result<usize, RingError> {
@@ -227,9 +227,9 @@ impl<const N: usize> StaticProducer<N> {
 impl<const N: usize> FrameSink for StaticProducer<N> {
     type Error = RingError;
 
-    fn push(
+    fn push<M: Fidelity>(
         &mut self,
-        pcm: &Pcm<'_, Exact>,
+        pcm: &Pcm<'_, M>,
         device: &DeviceFormat,
         mode: ChannelMode,
         _scratch: &mut [u8],

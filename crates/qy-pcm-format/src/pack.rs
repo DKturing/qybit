@@ -7,11 +7,12 @@
 //! - [`Placement::LsbAligned`]（ALSA `S24_LE` 等）：V 位居容器低位，高位符号扩展。
 //!
 //! N > V 拒绝；样本超出 N 位有符号范围视为溢出并拒绝，不截断、不饱和。
+//! 浮点源（F3）只放入同一浮点编码的设备格式：按位复制，只做字节序与声道位置的排列，不做数值运算。
 //! pack 在生产端运行；渲染线程只搬运其结果，不做任何位移或字节序转换。
 
 use core::marker::PhantomData;
 
-use crate::{DeviceFormat, Endian, MAX_LAYOUT_CHANNELS, Placement, SourceFormat};
+use crate::{DeviceFormat, Endian, MAX_LAYOUT_CHANNELS, Placement, SampleEncoding, SourceFormat};
 
 mod sealed {
     pub trait Sealed {}
@@ -23,7 +24,7 @@ pub trait Fidelity: sealed::Sealed {}
 /// 样本值与源逐位一致（解码器的直接输出）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exact {}
-/// 样本值已被改变（增益、重采样、抖动等）。M0 没有任何产生它的操作。
+/// 样本值已被改变。唯一的产生者是明确开启的浮点转整数（F3，[`crate::convert`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Altered {}
 
@@ -53,13 +54,28 @@ pub enum PackError {
     Precision { source_bits: u8, valid_bits: u8 },
     /// 样本超出 N 位有符号范围。
     SampleOutOfRange { index: usize },
+    /// 源与设备的样本编码不同（F3：浮点只按位放入同一浮点编码的设备格式；整数不放入浮点格式）。
+    Encoding,
 }
 
 impl<'a> Pcm<'a, Exact> {
     /// 由解码器输出构造精确 PCM。仅供直接承载解码结果的宿主/核心使用，
     /// 任何改变样本值的操作都不得返回 `Pcm<Exact>`。
     pub fn exact(samples: &'a [i32], format: SourceFormat) -> Result<Self, PackError> {
-        if !samples.len().is_multiple_of(usize::from(format.channels())) {
+        Self::checked(samples, format)
+    }
+}
+
+impl<'a> Pcm<'a, Altered> {
+    /// 改变了样本值的 PCM。只在本 crate 内由明确开启的转换构造（[`crate::convert`]）。
+    pub(crate) fn altered(samples: &'a [i32], format: SourceFormat) -> Result<Self, PackError> {
+        Self::checked(samples, format)
+    }
+}
+
+impl<'a, M: Fidelity> Pcm<'a, M> {
+    fn checked(samples: &'a [i32], format: SourceFormat) -> Result<Self, PackError> {
+        if !samples.len().is_multiple_of(format.words_per_frame()) {
             return Err(PackError::PartialFrame);
         }
         Ok(Self {
@@ -71,6 +87,7 @@ impl<'a> Pcm<'a, Exact> {
 }
 
 impl<M: Fidelity> Pcm<'_, M> {
+    /// 解码输出原样（浮点为位模式，binary64 每样本两个字）。
     pub fn samples(&self) -> &[i32] {
         self.samples
     }
@@ -80,7 +97,7 @@ impl<M: Fidelity> Pcm<'_, M> {
     }
 
     pub fn frames(&self) -> usize {
-        self.samples.len() / usize::from(self.format.channels())
+        self.samples.len() / self.format.words_per_frame()
     }
 }
 
@@ -88,6 +105,12 @@ impl<M: Fidelity> Pcm<'_, M> {
 pub fn check(src: &SourceFormat, dev: &DeviceFormat) -> Result<(), PackError> {
     if src.sample_rate() != dev.sample_rate() || !src.layout().same_positions(&dev.layout()) {
         return Err(PackError::FormatMismatch);
+    }
+    if src.encoding() != dev.encoding() {
+        return Err(PackError::Encoding);
+    }
+    if src.encoding().is_float() {
+        return Ok(());
     }
     if src.bits() > dev.valid_bits() {
         return Err(PackError::Precision {
@@ -140,7 +163,10 @@ pub fn check_mode(
             {
                 return Err(PackError::FormatMismatch);
             }
-            if src.bits() > dev.valid_bits() {
+            if src.encoding() != dev.encoding() {
+                return Err(PackError::Encoding);
+            }
+            if !src.encoding().is_float() && src.bits() > dev.valid_bits() {
                 return Err(PackError::Precision {
                     source_bits: src.bits(),
                     valid_bits: dev.valid_bits(),
@@ -190,14 +216,18 @@ fn place_sample(s: i64, shift: u32, endian: Endian, dst: &mut [u8]) {
 /// 设备声道，不增减、不混合声道（tasks/F1.md §6）。
 ///
 /// 出错时 `out` 内容未定义，调用方不得入队。
-pub fn pack(src: &Pcm<'_, Exact>, dev: &DeviceFormat, out: &mut [u8]) -> Result<usize, PackError> {
+pub fn pack<M: Fidelity>(
+    src: &Pcm<'_, M>,
+    dev: &DeviceFormat,
+    out: &mut [u8],
+) -> Result<usize, PackError> {
     pack_with(src, dev, ChannelMode::Exact, out)
 }
 
 /// 同 [`pack`]，声道处理方式由 `mode` 给出。[`ChannelMode::DuplicateMono`] 时设备第 0、1 声道都取
 /// 源的唯一声道。
-pub fn pack_with(
-    src: &Pcm<'_, Exact>,
+pub fn pack_with<M: Fidelity>(
+    src: &Pcm<'_, M>,
     dev: &DeviceFormat,
     mode: ChannelMode,
     out: &mut [u8],
@@ -208,6 +238,9 @@ pub fn pack_with(
         // 设备 [FL FR] 两个声道都取源声道 0（[FC]）。
         ChannelMode::DuplicateMono => [0u8; MAX_LAYOUT_CHANNELS],
     };
+    if src.format.encoding().is_float() {
+        return Ok(pack_float(src, dev, &map, out));
+    }
     let src_channels = usize::from(src.format.channels());
     let n = u32::from(src.format.bits());
     let v = u32::from(dev.valid_bits());
@@ -240,6 +273,52 @@ pub fn pack_with(
         }
     }
     Ok(frames)
+}
+
+/// 浮点按位复制（F3）：每个样本的位模式按设备字节序写出，设备第 j 个声道取 `map[j]`。
+/// 编码相同由 [`check_mode`] 保证。不做数值运算。
+fn pack_float<M: Fidelity>(
+    src: &Pcm<'_, M>,
+    dev: &DeviceFormat,
+    map: &[u8; MAX_LAYOUT_CHANNELS],
+    out: &mut [u8],
+) -> usize {
+    let words = src.format.encoding().words();
+    let src_words = src.format.words_per_frame();
+    let bytes = words * 4;
+    let align = usize::from(dev.block_align());
+    let channels = usize::from(dev.channels());
+    let frames = src.frames().min(out.len() / align);
+    for (frame, dst_frame) in src
+        .samples
+        .chunks_exact(src_words)
+        .zip(out[..frames * align].chunks_exact_mut(align))
+    {
+        for (&from, dst) in map[..channels]
+            .iter()
+            .zip(dst_frame.chunks_exact_mut(bytes))
+        {
+            let at = usize::from(from) * words;
+            let le: [u8; 8] = match src.format.encoding() {
+                SampleEncoding::Float64 => {
+                    let lo = u64::from(frame[at] as u32);
+                    let hi = u64::from(frame[at + 1] as u32);
+                    (hi << 32 | lo).to_le_bytes()
+                }
+                _ => u64::from(frame[at] as u32).to_le_bytes(),
+            };
+            match dev.endian() {
+                Endian::Big => {
+                    for (k, b) in dst.iter_mut().enumerate() {
+                        *b = le[bytes - 1 - k];
+                    }
+                }
+                // 浮点设备格式只有小端与大端（构造时拒绝半字交换）。
+                Endian::Little | Endian::HalfWordSwapped => dst.copy_from_slice(&le[..bytes]),
+            }
+        }
+    }
+    frames
 }
 
 /// M2 T5：Kani 有界证明（`cargo kani -p qy-pcm-format`）。
@@ -792,6 +871,104 @@ mod tests {
         assert_eq!(
             pack(&pcm, &dev, &mut out),
             Err(PackError::SampleOutOfRange { index: 8 })
+        );
+    }
+
+    /// F3：浮点按位复制。binary32 / binary64、小端与大端、声道按位置置换、单声道复制；位模式（含
+    /// NaN、−0、次正规数）原样写出，期望字节独立写出。编码不同一律拒绝。
+    #[test]
+    fn float_samples_copied_bit_exact() {
+        use crate::{ChannelLayout, SampleEncoding::*, Speaker::*};
+        let stereo = ChannelLayout::STEREO;
+        let Ok(src32) = SourceFormat::float(48_000, stereo, Float32) else {
+            panic!()
+        };
+        let x: [u32; 4] = [0x3F00_0000, 0x7FC0_0001, 0x8000_0000, 0x0000_0001];
+        let w = x.map(|b| b as i32);
+        let Ok(pcm) = Pcm::exact(&w, src32) else {
+            panic!()
+        };
+        let Ok(le) = DeviceFormat::float_layout(48_000, stereo, Float32, Endian::Little) else {
+            panic!()
+        };
+        let mut out = [0u8; 16];
+        assert_eq!(pack(&pcm, &le, &mut out), Ok(2));
+        let want: std::vec::Vec<u8> = x.iter().flat_map(|b| b.to_le_bytes()).collect();
+        assert_eq!(&out[..], &want[..]);
+        let Ok(be) = DeviceFormat::float_layout(48_000, stereo, Float32, Endian::Big) else {
+            panic!()
+        };
+        assert_eq!(pack(&pcm, &be, &mut out), Ok(2));
+        let want: std::vec::Vec<u8> = x.iter().flat_map(|b| b.to_be_bytes()).collect();
+        assert_eq!(&out[..], &want[..]);
+        // binary64：每样本两个字（低、高）；左右声道顺序反过来的设备（[FR FL] 不是掩码顺序，
+        // 用通用构造）按位置置换。
+        let Ok(src64) = SourceFormat::float(48_000, stereo, Float64) else {
+            panic!()
+        };
+        let y: [u64; 2] = [(-0.75f64).to_bits(), 0x7FF0_0000_0000_0001];
+        let w = [
+            y[0] as u32 as i32,
+            (y[0] >> 32) as u32 as i32,
+            y[1] as u32 as i32,
+            (y[1] >> 32) as u32 as i32,
+        ];
+        let Ok(pcm) = Pcm::exact(&w, src64) else {
+            panic!()
+        };
+        assert_eq!(pcm.frames(), 1);
+        let Some(rl) = ChannelLayout::from_positions(&[FrontRight, FrontLeft]) else {
+            panic!()
+        };
+        let Ok(dev) = DeviceFormat::float_layout(48_000, rl, Float64, Endian::Little) else {
+            panic!()
+        };
+        assert_eq!(dev.block_align(), 16);
+        let mut out = [0u8; 16];
+        assert_eq!(pack(&pcm, &dev, &mut out), Ok(1));
+        let want: std::vec::Vec<u8> = [y[1], y[0]].iter().flat_map(|b| b.to_le_bytes()).collect();
+        assert_eq!(&out[..], &want[..]);
+        // 单声道复制（O1）同样按位复制。
+        let Ok(mono) = SourceFormat::float(48_000, ChannelLayout::MONO, Float32) else {
+            panic!()
+        };
+        let Ok(pcm) = Pcm::exact(&[0x3E80_0000u32 as i32], mono) else {
+            panic!()
+        };
+        let mut out = [0u8; 8];
+        assert_eq!(
+            pack_with(&pcm, &le, ChannelMode::DuplicateMono, &mut out),
+            Ok(1)
+        );
+        assert_eq!(out, [0, 0, 0x80, 0x3E, 0, 0, 0x80, 0x3E]);
+        // 编码不同：浮点不放入整数格式，整数不放入浮点格式，binary32 不放入 binary64。
+        let Ok(int_dev) = DeviceFormat::wasapi(48_000, 2, 32, 32) else {
+            panic!()
+        };
+        let Ok(pcm32) = Pcm::exact(&[0, 0], src32) else {
+            panic!()
+        };
+        let mut out = [0u8; 16];
+        assert_eq!(pack(&pcm32, &int_dev, &mut out), Err(PackError::Encoding));
+        // [FR FL] 与 [FL FR] 位置相同，不同的是编码。
+        assert_eq!(pack(&pcm32, &dev, &mut out), Err(PackError::Encoding));
+        let Ok(dev64) = DeviceFormat::float_layout(48_000, stereo, Float64, Endian::Little) else {
+            panic!()
+        };
+        assert_eq!(pack(&pcm32, &dev64, &mut out), Err(PackError::Encoding));
+        let Ok(int_src) = Pcm::exact(&[0, 0], src(48_000, 2, 16)) else {
+            panic!()
+        };
+        assert_eq!(pack(&int_src, &le, &mut out), Err(PackError::Encoding));
+        // binary64 半帧（奇数个字）不是完整帧。
+        assert_eq!(
+            Pcm::exact(&[0, 0, 0], src64).map(|p| p.frames()),
+            Err(PackError::PartialFrame)
+        );
+        // 浮点设备格式不能半字交换。
+        assert_eq!(
+            DeviceFormat::float_layout(48_000, stereo, Float32, Endian::HalfWordSwapped),
+            Err(crate::FormatError::Layout)
         );
     }
 

@@ -10,11 +10,11 @@
 
 use core::fmt;
 
-use crate::pack::{ChannelMode, Exact, PackError, Pcm};
+use crate::pack::{ChannelMode, Fidelity, PackError, Pcm};
 use crate::{DeviceFormat, MAX_CHANNELS};
 
-/// 最大设备帧字节数：有布局可描述的最大声道数（18）× C32。
-pub const MAX_FRAME_BYTES: usize = MAX_CHANNELS as usize * 4;
+/// 最大设备帧字节数：有布局可描述的最大声道数（18）× 最大容器 64 位（binary64 浮点，F3）。
+pub const MAX_FRAME_BYTES: usize = MAX_CHANNELS as usize * 8;
 
 /// 需要暂存区的队列实现（`rtrb`）每批 pack 的最大字节数：4096 帧双声道 C32（32 KiB）。
 /// 声道更多时每批帧数相应减少（至少一帧，18 声道 C32 一帧 72 字节），不改变结果。
@@ -135,9 +135,9 @@ pub trait FrameSink {
 
     /// 把 `pcm` 中能放入队列的完整帧按 `mode` pack 为设备格式后入队，返回入队帧数；队列满时
     /// 返回 0。`scratch` 为宿主启动时分配的 pack 暂存区；能直接 pack 进队列存储的实现可以不用它。
-    fn push(
+    fn push<M: Fidelity>(
         &mut self,
-        pcm: &Pcm<'_, Exact>,
+        pcm: &Pcm<'_, M>,
         device: &DeviceFormat,
         mode: ChannelMode,
         scratch: &mut [u8],

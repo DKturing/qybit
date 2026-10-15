@@ -15,6 +15,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod alsa;
+pub mod convert;
 pub mod layout;
 pub mod pack;
 pub mod queue;
@@ -51,6 +52,46 @@ pub enum FormatError {
     UndefinedLayout,
     /// 声道布局不是掩码顺序（按位从低到高），目标描述（WAVEFORMATEXTENSIBLE）无法表示。
     LayoutOrder,
+    /// 样本编码与所用构造函数不符（如用浮点构造函数构造整数格式，F3）。
+    Encoding,
+}
+
+/// 样本编码（F3）：整数 PCM 或 IEEE 754 浮点。
+///
+/// 浮点样本在解码输出（`&[i32]`）中按位存放、不做数值运算：binary32 每个样本占 1 个 `i32`
+/// （`f32::to_bits` 的按位重解释），binary64 每个样本占 2 个 `i32`（先低 32 位、后高 32 位）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SampleEncoding {
+    /// 整数 PCM（交错、右对齐的 `i32`，有效位 N）。
+    #[default]
+    Int,
+    /// IEEE 754 binary32。
+    Float32,
+    /// IEEE 754 binary64。
+    Float64,
+}
+
+impl SampleEncoding {
+    /// 每个样本在解码输出中占的 `i32` 个数。
+    pub const fn words(self) -> usize {
+        match self {
+            Self::Float64 => 2,
+            Self::Int | Self::Float32 => 1,
+        }
+    }
+
+    pub const fn is_float(self) -> bool {
+        !matches!(self, Self::Int)
+    }
+
+    /// 浮点编码的位宽（32 / 64）；整数为 `None`。
+    pub const fn float_bits(self) -> Option<u8> {
+        match self {
+            Self::Int => None,
+            Self::Float32 => Some(32),
+            Self::Float64 => Some(64),
+        }
+    }
 }
 
 /// 样本字节序。
@@ -73,13 +114,15 @@ pub enum Placement {
     LsbAligned,
 }
 
-/// 源 PCM 格式：解码器输出为交错、右对齐的 `i32`，携带有效位数 N 与声道布局。
+/// 源 PCM 格式：解码器输出为交错、右对齐的 `i32`，携带有效位数 N 与声道布局；浮点源（F3）
+/// 按位存放，见 [`SampleEncoding`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceFormat {
     sample_rate: u32,
     channels: u16,
     bits: u8,
     layout: ChannelLayout,
+    encoding: SampleEncoding,
 }
 
 impl SourceFormat {
@@ -114,6 +157,29 @@ impl SourceFormat {
             channels: layout.channels(),
             bits,
             layout,
+            encoding: SampleEncoding::Int,
+        })
+    }
+
+    /// 浮点源格式（F3）：`encoding` 为 [`SampleEncoding::Float32`] 或 [`SampleEncoding::Float64`]；
+    /// [`SourceFormat::bits`] 为浮点位宽 32 / 64。
+    pub const fn float(
+        sample_rate: u32,
+        layout: ChannelLayout,
+        encoding: SampleEncoding,
+    ) -> Result<Self, FormatError> {
+        if sample_rate == 0 {
+            return Err(FormatError::SampleRate);
+        }
+        let Some(bits) = encoding.float_bits() else {
+            return Err(FormatError::Encoding);
+        };
+        Ok(Self {
+            sample_rate,
+            channels: layout.channels(),
+            bits,
+            layout,
+            encoding,
         })
     }
 
@@ -125,7 +191,7 @@ impl SourceFormat {
         self.channels
     }
 
-    /// 源有效位数 N。
+    /// 整数源为有效位数 N；浮点源为浮点位宽（32 / 64）。
     pub const fn bits(&self) -> u8 {
         self.bits
     }
@@ -133,6 +199,28 @@ impl SourceFormat {
     /// 声道布局（样本顺序）。
     pub const fn layout(&self) -> ChannelLayout {
         self.layout
+    }
+
+    /// 样本编码（F3）。
+    pub const fn encoding(&self) -> SampleEncoding {
+        self.encoding
+    }
+
+    /// 一帧在解码输出中占的 `i32` 个数（声道数 × 每样本字数）。
+    pub const fn words_per_frame(&self) -> usize {
+        self.channels as usize * self.encoding.words()
+    }
+
+    /// 同采样率、同布局、编码与位数换成 `encoding` / `bits` 的格式（整数时 `bits` 为 N）。
+    pub const fn with_encoding(
+        &self,
+        encoding: SampleEncoding,
+        bits: u8,
+    ) -> Result<Self, FormatError> {
+        match encoding {
+            SampleEncoding::Int => Self::with_layout(self.sample_rate, self.layout, bits),
+            _ => Self::float(self.sample_rate, self.layout, encoding),
+        }
     }
 }
 
@@ -148,6 +236,7 @@ pub struct DeviceFormat {
     block_align: u16,
     bytes_per_sec: u32,
     layout: ChannelLayout,
+    encoding: SampleEncoding,
 }
 
 impl DeviceFormat {
@@ -221,7 +310,60 @@ impl DeviceFormat {
             block_align,
             bytes_per_sec,
             layout,
+            encoding: SampleEncoding::Int,
         })
+    }
+
+    /// 浮点设备格式（F3）：容器即浮点位宽（32 / 64），有效位等于容器。字节序为小端或大端；
+    /// 半字交换没有浮点表示，拒绝。
+    pub const fn float_layout(
+        sample_rate: u32,
+        layout: ChannelLayout,
+        encoding: SampleEncoding,
+        endian: Endian,
+    ) -> Result<Self, FormatError> {
+        if sample_rate == 0 {
+            return Err(FormatError::SampleRate);
+        }
+        let Some(bits) = encoding.float_bits() else {
+            return Err(FormatError::Encoding);
+        };
+        if matches!(endian, Endian::HalfWordSwapped) {
+            return Err(FormatError::Layout);
+        }
+        let channels = layout.channels();
+        let block_align = match channels.checked_mul(bits as u16 / 8) {
+            Some(v) => v,
+            None => return Err(FormatError::Overflow),
+        };
+        let bytes_per_sec = match sample_rate.checked_mul(block_align as u32) {
+            Some(v) => v,
+            None => return Err(FormatError::Overflow),
+        };
+        Ok(Self {
+            sample_rate,
+            channels,
+            container_bits: bits,
+            valid_bits: bits,
+            endian,
+            placement: Placement::MsbAligned,
+            block_align,
+            bytes_per_sec,
+            layout,
+            encoding,
+        })
+    }
+
+    /// WASAPI 浮点设备格式（小端，布局为掩码顺序；`KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`）。
+    pub const fn wasapi_float(
+        sample_rate: u32,
+        layout: ChannelLayout,
+        encoding: SampleEncoding,
+    ) -> Result<Self, FormatError> {
+        if !layout.is_wave_order() {
+            return Err(FormatError::LayoutOrder);
+        }
+        Self::float_layout(sample_rate, layout, encoding, Endian::Little)
     }
 
     /// WASAPI PCM 设备格式（布局为掩码顺序）。
@@ -301,18 +443,35 @@ impl DeviceFormat {
         self.layout
     }
 
-    /// 源格式能否无损放入本设备格式：采样率一致、N ≤ V，扬声器位置集合相同（顺序可以不同，
-    /// 不同时由 pack 纯置换，见 [`DeviceFormat::reorders`]）。
+    /// 样本编码（F3）。
+    pub const fn encoding(&self) -> SampleEncoding {
+        self.encoding
+    }
+
+    /// 源格式能否无损放入本设备格式：采样率一致、编码相同、扬声器位置集合相同（顺序可以不同，
+    /// 不同时由 pack 纯置换，见 [`DeviceFormat::reorders`]）；整数还要求 N ≤ V。浮点源只能放入
+    /// 同一浮点编码的设备格式（按位复制）。
     pub const fn accepts(&self, src: &SourceFormat) -> bool {
         src.sample_rate == self.sample_rate
             && src.layout.same_positions(&self.layout)
-            && src.bits <= self.valid_bits
+            && same_encoding(src.encoding, self.encoding)
+            && (src.encoding.is_float() || src.bits <= self.valid_bits)
     }
 
     /// 承载 `src` 时是否需要按设备映射重排声道（位置集合相同而顺序不同）。
     pub fn reorders(&self, src: &SourceFormat) -> bool {
         src.layout.same_positions(&self.layout) && src.layout != self.layout
     }
+}
+
+/// 两个编码是否相同（`const` 上下文不能用 `==`）。
+pub const fn same_encoding(a: SampleEncoding, b: SampleEncoding) -> bool {
+    matches!(
+        (a, b),
+        (SampleEncoding::Int, SampleEncoding::Int)
+            | (SampleEncoding::Float32, SampleEncoding::Float32)
+            | (SampleEncoding::Float64, SampleEncoding::Float64)
+    )
 }
 
 /// 给定采样率下 `millis` 毫秒对应的帧数（向上取整）。
@@ -449,6 +608,52 @@ mod tests {
             SourceFormat::new(48_000, 2, 33),
             Err(FormatError::ValidBits)
         );
+    }
+
+    /// F3：浮点格式的构造、派生字段与承载判断。
+    #[test]
+    fn float_formats() {
+        let st = ChannelLayout::STEREO;
+        let Ok(s32) = SourceFormat::float(96_000, st, SampleEncoding::Float32) else {
+            panic!()
+        };
+        assert_eq!((s32.bits(), s32.words_per_frame()), (32, 2));
+        let Ok(s64) = SourceFormat::float(96_000, st, SampleEncoding::Float64) else {
+            panic!()
+        };
+        assert_eq!((s64.bits(), s64.words_per_frame()), (64, 4));
+        assert_eq!(
+            SourceFormat::float(96_000, st, SampleEncoding::Int),
+            Err(FormatError::Encoding)
+        );
+        assert_eq!(
+            SourceFormat::float(0, st, SampleEncoding::Float32),
+            Err(FormatError::SampleRate)
+        );
+        let Ok(d64) = DeviceFormat::wasapi_float(96_000, st, SampleEncoding::Float64) else {
+            panic!()
+        };
+        assert_eq!(
+            (
+                d64.container_bits(),
+                d64.valid_bits(),
+                d64.block_align(),
+                d64.bytes_per_sec()
+            ),
+            (64, 64, 16, 1_536_000)
+        );
+        let Ok(d32) = DeviceFormat::wasapi_float(96_000, st, SampleEncoding::Float32) else {
+            panic!()
+        };
+        assert!(d32.accepts(&s32) && !d32.accepts(&s64) && d64.accepts(&s64));
+        let Ok(i32dev) = DeviceFormat::wasapi(96_000, 2, 32, 32) else {
+            panic!()
+        };
+        let Ok(int24) = SourceFormat::new(96_000, 2, 24) else {
+            panic!()
+        };
+        assert!(!i32dev.accepts(&s32) && !d32.accepts(&int24) && i32dev.accepts(&int24));
+        assert_eq!(s32.with_encoding(SampleEncoding::Int, 24), Ok(int24));
     }
 
     #[test]
