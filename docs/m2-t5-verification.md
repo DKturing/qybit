@@ -182,11 +182,12 @@ CI：`ci.yml` 的 fuzz 冒烟每次提交运行 60 秒。
 | `qy-pcm-format` 其余单元测试（32 个） | 通过 | 106 秒 |
 | `qy-core --lib`（13 个） | 通过 | 3 秒 |
 | `qy-player --lib`：`render::`（8 个，渲染线程、短写/整包、欠载与停止）与 3 个播放器测试 | 通过 | 491 秒 |
-| `qy-player --lib`：`aiff_plays_bit_exact_and_reports_rejections`、`device_invalidated_stops_playback`、`flac_decode_error_drains_verified_frames`、`format_change_drains_then_reopens`、`leading_id3_tag_is_skipped_and_reported`、`mono_to_stereo_duplicates_and_reports_altered`（逐个运行） | 通过 | 7–378 秒 / 个 |
-| `qy-player --lib`：`flac_and_wav_mixed_playlist` | 待定：第一次运行 709 秒时测试失败（输出未保留），单独复跑仍在运行，见下 | |
-| `qy-player --lib` 其余 6 个 | 运行中 | |
+| `qy-player --lib` 其余 13 个中的 12 个（逐个运行：AIFF、设备失效、FLAC 解码错误、换格式、ID3 标签、单声道复制、多声道、同格式无缝、三项报告文字、资源容量） | 通过 | 2–2726 秒 / 个（多声道最长） |
+| `qy-player --lib`：`flac_and_wav_mixed_playlist` | 待定：第一次运行 709 秒时测试失败（当时输出未保留），复跑 50 分钟未结束；正在复核失败原因，见下 | |
 
 Miri 下随机队列测试的轮数从 200 减为 8（`cfg!(miri)`），检查的不变式相同。整个 `qy-player --lib` 一次运行超过 50 分钟未完成，因此分组运行。
+
+`flac_and_wav_mixed_playlist` 的复核：播放器测试的模拟设备（Packet、ShortWrite）等待生产端时有 20 秒的真实时间上限，Miri 比原生执行慢约两个数量级，解码 192 kHz 与 65535 帧最大块的 FLAC 时可能超过该上限，导致测试按设备超时失败。正在分别运行原测试（保留输出）与把上限临时放宽的副本（不提交），以确认失败来自真实时间上限而不是未定义行为。
 
 ## 6. 未运行与限制
 
