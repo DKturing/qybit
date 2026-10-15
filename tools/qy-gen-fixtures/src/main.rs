@@ -9,6 +9,7 @@
 
 mod aiff;
 mod flac;
+mod wav_float;
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -573,28 +574,7 @@ fn build_cases() -> Vec<Case> {
     // ---- 合法但不支持 ----
     let d = chunk(b"data", &[0u8; 8]);
     let un = "Unsupported";
-    cs.push(err_case(
-        "unsup_float_tag3",
-        riff(&[
-            fmt_pcm(Pcm {
-                tag: 3,
-                ..pcm(2, 44_100, 32)
-            }),
-            d.clone(),
-        ]),
-        un,
-    ));
-    cs.push(err_case(
-        "unsup_ext_float",
-        riff(&[
-            fmt_ext(Ext {
-                sub: SUBTYPE_FLOAT,
-                ..ext(2, 44_100, 32, 32, 3)
-            }),
-            d.clone(),
-        ]),
-        un,
-    ));
+    // 浮点（F3 起支持）的夹具在 wav_float 中单独生成。
     cs.push(err_case(
         "unsup_3ch",
         riff(&[fmt_pcm(pcm(3, 44_100, 16)), chunk(b"data", &[0u8; 6])]),
@@ -1472,5 +1452,5 @@ fn wav_main(out: PathBuf) -> Result<()> {
         }
     }
     println!("{} cases -> {}", cases.len(), out.display());
-    Ok(())
+    wav_float::generate(&out.join("float"))
 }

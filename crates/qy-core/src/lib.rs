@@ -28,7 +28,9 @@
 pub mod engine;
 
 pub use qy_pcm_format::pack::{Exact, Pcm};
-pub use qy_pcm_format::{ChannelLayout, DeviceFormat, MAX_CHANNELS, SourceFormat, Speaker};
+pub use qy_pcm_format::{
+    ChannelLayout, DeviceFormat, MAX_CHANNELS, SampleEncoding, SourceFormat, Speaker,
+};
 
 /// M0 默认输入窗口字节数。
 pub const INPUT_WINDOW_BYTES: usize = 8192;

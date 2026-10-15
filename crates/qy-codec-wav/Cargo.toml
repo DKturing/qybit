@@ -13,3 +13,7 @@ qy-core.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# F3：浮点夹具测试用转换模块核对 ffmpeg 的整数转换参考。
+qy-pcm-format.workspace = true

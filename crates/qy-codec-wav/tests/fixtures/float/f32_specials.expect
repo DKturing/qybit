@@ -1,0 +1,19 @@
+result ok
+format 44100 1 f32
+mask none
+detail none
+samples 14
+00000000
+80000000
+00000001
+807fffff
+00800000
+7f7fffff
+ff7fffff
+3f800001
+bf800001
+7f800000
+ff800000
+7fc00000
+7f800001
+ffc12345

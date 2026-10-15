@@ -7,7 +7,12 @@
 //! 压缩码流的 [`BITSTREAM_SCAN`] 字节（小于核心最小输入窗口），因此任意输入分块都能推进。
 //!
 //! 支持范围：
-//! - RIFF/WAVE，小端；格式码 1（PCM）与 0xFFFE（EXTENSIBLE，子格式 PCM）。
+//! - RIFF/WAVE，小端；格式码 1（PCM）、3（`WAVE_FORMAT_IEEE_FLOAT`）与 0xFFFE（EXTENSIBLE，子格式
+//!   PCM 或 `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`）。
+//! - 浮点（F3）：32 / 64 位 IEEE 754，小端，样本按位输出（binary32 每样本 1 个 `i32`，binary64 每样本
+//!   2 个 `i32`，先低后高），不做数值运算；EXTENSIBLE 的有效位必须等于容器。非 PCM 格式按 RIFF
+//!   规范须有 `fact` 块（样本帧数）：浮点文件在 data 之前没有 `fact`、`fact` 重复或帧数与 data 不符时
+//!   按不合规拒绝并给出 [`WavDetail::Fact`]（先严格，以后按真实样例逐条加容错，tasks/F3.md §2）。
 //! - 容器 8/16/24/32 位；采样率不设软件上限（M3 T1）；声道布局见 F1。
 //! - 8 位 PCM 按 WAVE 规范为无符号、偏移 128：读取时减去 128 得到有符号值（W1），是精确的整数
 //!   表示变换。
@@ -35,7 +40,7 @@
 //! RIFF、RIFF 为占位值而 data 长度为 0（可能是未回填的占位，也可能真的为空）。
 //!
 //! 错误分类：结构违反 RIFF/WAVE 规范为 [`DecodeError::Malformed`]；
-//! 合法但不支持（浮点、RIFX/RF64 等）为 [`DecodeError::Unsupported`]；
+//! 合法但不支持（16/24 位浮点、RIFX/RF64 等）为 [`DecodeError::Unsupported`]；
 //! 源在完整结构前结束为 [`DecodeError::Truncated`]。
 //! 出错后解码器保持该错误，直到 [`Decoder::reset`]。
 //!
@@ -47,8 +52,8 @@
 
 use qy_core::engine::{MAX_REPAIRS, Repair};
 use qy_core::{
-    ChannelLayout, DecodeError, Decoder, PCM_WORK_SAMPLES, Progress, SeekError, SourceFormat,
-    Status,
+    ChannelLayout, DecodeError, Decoder, PCM_WORK_SAMPLES, Progress, SampleEncoding, SeekError,
+    SourceFormat, Status,
 };
 
 /// 流式写入程序的长度占位值（ffmpeg 输出到不可定位的管道时，RIFF 与 data 都写 0xFFFFFFFF；
@@ -62,11 +67,18 @@ pub const BITSTREAM_SCAN: usize = 4096;
 const NONE: u64 = u64::MAX;
 
 const FORMAT_PCM: u16 = 0x0001;
+/// `WAVE_FORMAT_IEEE_FLOAT`（mmreg.h）。
+const FORMAT_IEEE_FLOAT: u16 = 0x0003;
 const FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 
 /// `KSDATAFORMAT_SUBTYPE_PCM` = {00000001-0000-0010-8000-00AA00389B71} 的磁盘字节序。
 const SUBTYPE_PCM: [u8; 16] = [
     0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
+];
+
+/// `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT` = {00000003-0000-0010-8000-00AA00389B71} 的磁盘字节序。
+const SUBTYPE_IEEE_FLOAT: [u8; 16] = [
+    0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
 ];
 
 pub const SPEAKER_FRONT_LEFT: u32 = 0x1;
@@ -83,6 +95,11 @@ enum State {
     RiffHeader,
     ChunkHeader,
     Fmt {
+        size: u32,
+        pad: u32,
+    },
+    /// `fact` 块：读出前 4 字节（dwSampleLength），其余跳过。
+    Fact {
         size: u32,
         pad: u32,
     },
@@ -121,6 +138,15 @@ struct Layout {
     block_align: usize,
     channels: usize,
     channel_mask: Option<u32>,
+    /// 样本编码（F3）；浮点时 `shift` 为 0。
+    encoding: SampleEncoding,
+}
+
+impl Layout {
+    /// 一帧在 PCM 工作区中占的 `i32` 个数。
+    fn words_per_frame(&self) -> usize {
+        self.channels * self.encoding.words()
+    }
 }
 
 /// 拒绝的明细（宿主报告用；`DecodeError` 只给类别）。
@@ -133,6 +159,14 @@ pub enum WavDetail {
     DataShort { declared: u32, missing: u64 },
     /// data 不是 PCM，而是伪装成 16 位双声道 PCM 的压缩码流（在 data 中 `offset` 字节处识别）。
     Bitstream { kind: Bitstream, offset: u32 },
+    /// 浮点文件的 `fact` 块不合规（F3）：data 之前没有 `fact`（`declared` 为 `None`）、`fact` 重复
+    /// （`duplicate`），或声明的帧数与 data 的完整帧数 `frames` 不符（data 长度为占位值时 `frames`
+    /// 为 `None`）。
+    Fact {
+        declared: Option<u32>,
+        frames: Option<u64>,
+        duplicate: bool,
+    },
 }
 
 /// 识别出的压缩码流类型。
@@ -255,6 +289,32 @@ impl core::fmt::Display for WavDetail {
                 f,
                 "文件比 data 声明的 {declared} 字节短 {missing} 字节（录音中断或文件被截断），已播放全部完整帧"
             ),
+            Self::Fact {
+                duplicate: true, ..
+            } => write!(
+                f,
+                "浮点 WAV 有重复的 fact 块（RIFF 规范：非 PCM 格式有一个 fact 块）"
+            ),
+            Self::Fact { declared: None, .. } => write!(
+                f,
+                "浮点 WAV 在 data 之前没有 fact 块（RIFF 规范要求非 PCM 格式有 fact 块）"
+            ),
+            Self::Fact {
+                declared: Some(d),
+                frames: Some(n),
+                ..
+            } => write!(
+                f,
+                "浮点 WAV 的 fact 块声明 {d} 帧，data 中有 {n} 帧，两者不符"
+            ),
+            Self::Fact {
+                declared: Some(d),
+                frames: None,
+                ..
+            } => write!(
+                f,
+                "浮点 WAV 的 data 长度是流式写入程序的占位值，无法与 fact 块声明的 {d} 帧核对"
+            ),
             Self::Bitstream { kind, offset } => {
                 let what = match kind {
                     Bitstream::Dts14 => "DTS 编码流（14 位字，常见于“DTS CD”的 DTS-WAV）",
@@ -297,6 +357,10 @@ pub struct WavDecoder {
     partial_dropped: u32,
     /// data 声明的完整帧数（长度为占位值或尚未读到 data 时为 `None`）。
     declared_frames: Option<u64>,
+    /// `fact` 块声明的样本帧数（F3）；尚未读到时为 `None`。
+    fact: Option<u32>,
+    /// 读到了不止一个 `fact` 块。
+    fact_duplicate: bool,
     /// 已消耗的总字节数（用于报告源的实际长度）。
     offset: u64,
     /// data 第一个字节距源开头的位置（S1 定位）；尚未读到 data 时为 [`NONE`]。
@@ -336,6 +400,8 @@ impl WavDecoder {
             riff_actual: NONE,
             partial_dropped: 0,
             declared_frames: None,
+            fact: None,
+            fact_duplicate: false,
             offset: 0,
             data_start: NONE,
             start: 0,
@@ -572,6 +638,7 @@ impl WavDecoder {
                 }
                 State::Fmt { size, pad }
             }
+            b"fact" if size >= 4 => State::Fact { size, pad },
             b"data" => {
                 let Some(layout) = self.layout else {
                     return Err(DecodeError::Malformed);
@@ -580,6 +647,9 @@ impl WavDecoder {
                     return Err(DecodeError::Malformed);
                 }
                 self.data_seen = true;
+                if layout.encoding.is_float() {
+                    self.check_fact(&layout, size)?;
+                }
                 if size == LENGTH_PLACEHOLDER {
                     // R2：data 延伸到源末尾。
                     self.riff = Riff::Open;
@@ -616,6 +686,23 @@ impl WavDecoder {
         Ok(())
     }
 
+    /// 浮点文件的 `fact` 核对（F3）：data 之前恰有一个 `fact`，声明的帧数等于 data 的完整帧数。
+    fn check_fact(&mut self, layout: &Layout, size: u32) -> Result<(), DecodeError> {
+        let frames =
+            (size != LENGTH_PLACEHOLDER).then(|| u64::from(size) / layout.block_align as u64);
+        let ok = !self.fact_duplicate
+            && matches!((self.fact, frames), (Some(d), Some(n)) if u64::from(d) == n);
+        if ok {
+            return Ok(());
+        }
+        self.detail = Some(WavDetail::Fact {
+            declared: self.fact,
+            frames,
+            duplicate: self.fact_duplicate,
+        });
+        Err(DecodeError::Malformed)
+    }
+
     fn parse_fmt(&mut self, b: &[u8], size: u32) -> Result<Layout, DecodeError> {
         let tag = u16_at(b, 0);
         let channels = u16_at(b, 2);
@@ -626,13 +713,14 @@ impl WavDecoder {
         if channels == 0 || rate == 0 || block_align == 0 || bits == 0 {
             return Err(DecodeError::Malformed);
         }
-        let (container_bits, valid_bits, channel_mask) = match tag {
+        let (container_bits, valid_bits, channel_mask, float) = match tag {
             FORMAT_PCM => {
                 if !bits.is_multiple_of(8) {
                     return Err(DecodeError::Unsupported);
                 }
-                (bits, bits, None)
+                (bits, bits, None, false)
             }
+            FORMAT_IEEE_FLOAT => (bits, bits, None, true),
             FORMAT_EXTENSIBLE => {
                 if size < FMT_EXT_LEN {
                     return Err(DecodeError::Malformed);
@@ -649,16 +737,27 @@ impl WavDecoder {
                     return Err(DecodeError::Malformed);
                 }
                 let mask = u32_at(b, 20);
-                if b[24..40] != SUBTYPE_PCM {
+                let float = if b[24..40] == SUBTYPE_PCM {
+                    false
+                } else if b[24..40] == SUBTYPE_IEEE_FLOAT {
+                    // 浮点没有“容器内的有效位”：有效位必须等于容器。
+                    if valid != bits {
+                        return Err(DecodeError::Malformed);
+                    }
+                    true
+                } else {
                     return Err(DecodeError::Unsupported);
-                }
-                (bits, valid, Some(mask))
+                };
+                (bits, valid, Some(mask), float)
             }
             _ => return Err(DecodeError::Unsupported),
         };
-        if !matches!(container_bits, 8 | 16 | 24 | 32) {
-            return Err(DecodeError::Unsupported);
-        }
+        let encoding = match (float, container_bits) {
+            (false, 8 | 16 | 24 | 32) => SampleEncoding::Int,
+            (true, 32) => SampleEncoding::Float32,
+            (true, 64) => SampleEncoding::Float64,
+            _ => return Err(DecodeError::Unsupported),
+        };
         let container_bytes = container_bits / 8;
         let expected_align = channels
             .checked_mul(container_bytes)
@@ -686,8 +785,11 @@ impl WavDecoder {
             });
             return Err(DecodeError::Unsupported);
         };
-        let format = SourceFormat::with_layout(rate, layout, valid_bits as u8)
-            .map_err(|_| DecodeError::Unsupported)?;
+        let format = match encoding {
+            SampleEncoding::Int => SourceFormat::with_layout(rate, layout, valid_bits as u8),
+            _ => SourceFormat::float(rate, layout, encoding),
+        }
+        .map_err(|_| DecodeError::Unsupported)?;
         Ok(Layout {
             format,
             container_bytes: usize::from(container_bytes),
@@ -695,11 +797,21 @@ impl WavDecoder {
             block_align: usize::from(block_align),
             channels: usize::from(channels),
             channel_mask,
+            encoding,
         })
     }
 
-    /// 将完整帧转换为右对齐 `i32` 写入工作区。
+    /// 将完整帧转换为右对齐 `i32` 写入工作区（浮点按位存放），返回写入的 `i32` 个数。
     fn convert(&mut self, layout: &Layout, src: &[u8]) -> usize {
+        if layout.encoding.is_float() {
+            // binary32：每样本一个字；binary64：每样本两个字（先低 32 位、后高 32 位，即小端
+            // 字节序的前 4 字节与后 4 字节）。都是按位重解释，不做数值运算。
+            let words = src.len() / 4;
+            for (o, c) in self.pcm[..words].iter_mut().zip(src.chunks_exact(4)) {
+                *o = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            }
+            return words;
+        }
         let samples = src.len() / layout.container_bytes;
         let out = &mut self.pcm[..samples];
         match layout.container_bytes {
@@ -808,6 +920,21 @@ impl WavDecoder {
                         remaining: size - want + pad,
                     };
                 }
+                State::Fact { size, pad } => {
+                    if avail.len() < 4 {
+                        return self.need_input(pos, eof);
+                    }
+                    if self.fact.is_some() {
+                        self.fact_duplicate = true;
+                    } else {
+                        self.fact = Some(u32_at(avail, 0));
+                    }
+                    self.take_riff(4)?;
+                    pos += 4;
+                    self.state = State::Skip {
+                        remaining: (size - 4).checked_add(pad).ok_or(DecodeError::Malformed)?,
+                    };
+                }
                 State::Skip { remaining } => {
                     if remaining == 0 {
                         self.state = State::ChunkHeader;
@@ -879,7 +1006,7 @@ impl WavDecoder {
                     };
                     let frames = (avail.len() / ba)
                         .min(limit)
-                        .min(self.pcm.len() / layout.channels);
+                        .min(self.pcm.len() / layout.words_per_frame());
                     if frames == 0 {
                         if !eof {
                             return self.need_input(pos, eof);
@@ -956,6 +1083,8 @@ impl Decoder for WavDecoder {
         self.riff_actual = NONE;
         self.partial_dropped = 0;
         self.declared_frames = None;
+        self.fact = None;
+        self.fact_duplicate = false;
         self.offset = 0;
         self.data_start = NONE;
         self.start = 0;
@@ -995,8 +1124,8 @@ impl Decoder for WavDecoder {
     }
 
     fn release(&mut self, frames: usize) {
-        let channels = self.layout.map_or(1, |l| l.channels);
-        let samples = frames.saturating_mul(channels);
+        let words = self.layout.map_or(1, |l| l.words_per_frame());
+        let samples = frames.saturating_mul(words);
         self.start = self.start.saturating_add(samples).min(self.end);
         if self.start == self.end {
             self.start = 0;

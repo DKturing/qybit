@@ -313,6 +313,7 @@ name = "qy-codec-wav"
 version = "0.0.0"
 dependencies = [
  "qy-core",
+ "qy-pcm-format",
 ]
 
 [[package]]
