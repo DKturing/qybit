@@ -4,7 +4,7 @@
 
 | 规范 | 用于 | 来源 | 校验 |
 | --- | --- | --- | --- |
-| RFC 9639《Free Lossless Audio Codec (FLAC)》，IETF Standards Track，2024-12 | `qy-codec-flac`，ID3v2 跳过的依据 | 用户提供的 PDF，75 页，xml2rfc 3.25.0 生成，以它为准。IETF 工作组仓库 `ietf-wg-cellar/flac-specification` 的提交 `c311d21`（2024-01-14，此后仓库删除了正文）是发布前的源文本，只作辅助 | PDF SHA-256 `40f1b37b731562359b811a26c6350af13ec67ba91ab7368f739ea46217bfe21f` |
+| RFC 9639《Free Lossless Audio Codec (FLAC)》，IETF Standards Track，2024-12 | `qy-codec-flac`，ID3v2 跳过的依据，S1 定位（§8.2 总样本数、§8.5 SEEKTABLE、§9.1.5 帧号/样本号、§9.1.8 帧头 CRC-8、§9.3 帧尾 CRC-16） | 用户提供的 PDF，75 页，xml2rfc 3.25.0 生成，以它为准。IETF 工作组仓库 `ietf-wg-cellar/flac-specification` 的提交 `c311d21`（2024-01-14，此后仓库删除了正文）是发布前的源文本，只作辅助 | PDF SHA-256 `40f1b37b731562359b811a26c6350af13ec67ba91ab7368f739ea46217bfe21f` |
 | Apple《Audio Interchange File Format: "AIFF"》Version 1.3，1989-01-04 | F2 `qy-codec-aiff` | 用户提供的 PDF，31 页 | SHA-256 `56902eb9a5410adcde5f928830b26234442070e0ab1f047f564b23af84067e0a` |
 | Apple《Audio Interchange File Format AIFF-C》草案，正文日期 1991-08-26（文件名与 PDF 标题为 9/26/91） | F2 `qy-codec-aiff` | 用户提供的 PDF，45 页 | SHA-256 `04417236851b4e5a9c792d144ed6aa73e9154553c60369de3d9919dcf20845bd` |
 | Microsoft Learn `WAVEFORMATEX`、`WAVEFORMATEXTENSIBLE` | `qy-pcm-format::wave`、WASAPI 协商 | GitHub `MicrosoftDocs/sdk-api` 中的文档源 | — |
