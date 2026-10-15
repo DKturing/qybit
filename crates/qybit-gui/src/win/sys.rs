@@ -607,6 +607,7 @@ fn apply_dpi(h: &Handles) {
             h.log,
             h.status,
             h.format,
+            h.volume_label,
         ];
         for c in all {
             SendMessageW(
