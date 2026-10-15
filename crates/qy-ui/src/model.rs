@@ -98,6 +98,9 @@ pub struct Playing {
     pub status: Option<Status>,
     /// 已请求停止。
     pub stopping: bool,
+    /// 已发出的定位命令数与最近一次的目标帧（S1）。状态快照的 `user_seeks` 赶上之前，播放位置按
+    /// 目标帧显示：定位命令在播放线程执行前到达的旧快照不把进度条与时间拉回原位置。
+    seek_hold: Option<(u32, u64)>,
 }
 
 /// 界面模型。
@@ -144,17 +147,19 @@ impl Model {
 
     /// 正在播放的曲目的播放位置与总长度（帧，文件头声明）及采样率（S1）。总长度未知（如 FLAC
     /// 总样本数为 0、WAV 占位长度）或尚无状态时为 `None`。
+    /// 已发出、播放线程尚未执行的定位按目标帧计。
     pub fn playing_position(&self) -> Option<(u64, u64, u32)> {
-        let s = self.playing.as_ref()?.status?;
+        let p = self.playing.as_ref()?;
+        let s = p.status?;
         let Probe::Ready(info) = &self.playing_info()?.probe else {
             return None;
         };
         let total = info.frames.filter(|&n| n > 0)?;
-        Some((
-            s.position_frames.min(total),
-            total,
-            info.format.sample_rate(),
-        ))
+        let pos = match p.seek_hold {
+            Some((sent, frame)) if s.user_seeks < sent => frame,
+            _ => s.position_frames,
+        };
+        Some((pos.min(total), total, info.format.sample_rate()))
     }
 
     pub fn is_paused(&self) -> bool {
@@ -347,6 +352,7 @@ impl Ui {
             commands: None,
             status: None,
             stopping: false,
+            seek_hold: None,
         });
         self.model.last = None;
         Changes {
@@ -396,37 +402,40 @@ impl Ui {
 
     /// 在正在播放的曲目内定位到第 `frame` 帧（S1）：丢弃已入队的音频，从该帧开始；暂停状态保持；
     /// 等于或超过曲目长度时进入下一首。
-    pub fn seek(&mut self, frame: u64) {
+    /// 返回是否已发出定位命令（没有正在进行的播放时不发）。
+    pub fn seek(&mut self, frame: u64) -> bool {
         if let Some(p) = self.model.playing.as_mut()
             && !p.stopping
         {
             send(p, Command::Seek(frame));
+            let sent = p.seek_hold.map_or(0, |h| h.0);
+            p.seek_hold = Some((sent.saturating_add(1), frame));
+            return true;
         }
+        false
     }
 
-    /// 按总长度的千分比定位（进度条）。总长度未知时不做。
-    pub fn seek_permille(&mut self, permille: u32) {
-        if let Some((_, total, _)) = self.model.playing_position() {
-            let frame = u128::from(total) * u128::from(permille.min(1000)) / 1000;
-            self.seek(
-                u64::try_from(frame)
-                    .unwrap_or(u64::MAX)
-                    .min(total.saturating_sub(1)),
-            );
-        }
+    /// 按总长度的千分比定位（进度条）。总长度未知时不做。返回定位目标帧。
+    pub fn seek_permille(&mut self, permille: u32) -> Option<u64> {
+        let (_, total, _) = self.model.playing_position()?;
+        let frame = u128::from(total) * u128::from(permille.min(1000)) / 1000;
+        let frame = u64::try_from(frame)
+            .unwrap_or(u64::MAX)
+            .min(total.saturating_sub(1));
+        self.seek(frame).then_some(frame)
     }
 
     /// 相对当前位置前后移动 `seconds` 秒（键盘 ←/→），不早于曲目开头；越过结尾时进入下一首。
-    pub fn seek_by(&mut self, seconds: i64) {
-        if let Some((pos, _, rate)) = self.model.playing_position() {
-            let delta = seconds.unsigned_abs().saturating_mul(u64::from(rate));
-            let frame = if seconds < 0 {
-                pos.saturating_sub(delta)
-            } else {
-                pos.saturating_add(delta)
-            };
-            self.seek(frame);
-        }
+    /// 返回定位目标帧。
+    pub fn seek_by(&mut self, seconds: i64) -> Option<u64> {
+        let (pos, _, rate) = self.model.playing_position()?;
+        let delta = seconds.unsigned_abs().saturating_mul(u64::from(rate));
+        let frame = if seconds < 0 {
+            pos.saturating_sub(delta)
+        } else {
+            pos.saturating_add(delta)
+        };
+        self.seek(frame).then_some(frame)
     }
 
     pub fn pause(&mut self) {

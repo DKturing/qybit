@@ -464,9 +464,9 @@ fn seek_from_ui_restarts_at_target() {
     let mut ui = ui_with(b);
     ui.add_paths(vec![path]);
     assert!(until(&mut ui, 10, all_probed));
-    type Act = fn(&mut Ui);
+    type Act = fn(&mut Ui) -> Option<u64>;
     let cases: [(&str, Act, u64); 3] = [
-        ("帧", |u| u.seek(20_000), 20_000),
+        ("帧", |u| u.seek(20_000).then_some(20_000), 20_000),
         ("千分比", |u| u.seek_permille(500), 22_050),
         ("向前越过开头", |u| u.seek_by(-10), 0),
     ];
@@ -479,7 +479,13 @@ fn seek_from_ui_restarts_at_target() {
             if let Some((pos, total, rate)) = u.model.playing_position() {
                 assert_eq!((total, rate), (44_100, 44_100));
                 if !done && pos >= TENTH {
-                    act(u);
+                    assert_eq!(act(u), Some(target), "{what}");
+                    // 播放线程执行定位之前，位置已按目标帧显示（进度条不被旧快照拉回原位置）。
+                    assert_eq!(
+                        u.model.playing_position().map(|p| p.0),
+                        Some(target),
+                        "{what}"
+                    );
                     done = true;
                 } else if done && pos >= target {
                     seen_after = seen_after.max(pos);

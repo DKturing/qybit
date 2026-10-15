@@ -9,9 +9,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, CreateFontIndirectW, DeleteObject, HBRUSH, HFONT, HGDIOBJ, InvalidateRect,
+    ScreenToClient,
 };
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
@@ -25,16 +26,16 @@ use windows::Win32::UI::Controls::{
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMCOUNT, LVN_GETDISPINFOW, LVN_KEYDOWN, LVNI_SELECTED,
     LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_GRIDLINES, LVS_OWNERDATA, LVS_REPORT,
     LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, NM_DBLCLK, NMHDR, NMITEMACTIVATE, NMLVDISPINFOW,
-    NMLVKEYDOWN, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW, TB_ENDTRACK, TB_THUMBTRACK,
-    TBM_SETPOS, TBM_SETRANGEMAX, TBM_SETRANGEMIN, TBS_HORZ, TBS_NOTICKS, TRACKBAR_CLASSW,
-    WC_COMBOBOXW, WC_LISTVIEWW,
+    NMLVKEYDOWN, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW, TB_ENDTRACK, TB_PAGEDOWN, TB_PAGEUP,
+    TB_THUMBTRACK, TBM_GETCHANNELRECT, TBM_GETTHUMBRECT, TBM_SETPOS, TBM_SETRANGEMAX,
+    TBM_SETRANGEMIN, TBS_HORZ, TBS_NOTICKS, TRACKBAR_CLASSW, WC_COMBOBOXW, WC_LISTVIEWW,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
     SystemParametersInfoForDpi,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, VK_DELETE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE,
+    EnableWindow, GetKeyState, VK_DELETE, VK_LBUTTON, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE,
 };
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
@@ -46,13 +47,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BM_GETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL,
     CB_SETCURSEL, CBN_SELCHANGE, CBS_DROPDOWNLIST, CW_USEDEFAULT, CreateMenu, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_AUTOVSCROLL, ES_MULTILINE,
-    ES_READONLY, GetClientRect, GetMessageW, HMENU, IDC_ARROW, LoadCursorW, MB_ICONINFORMATION,
-    MB_OK, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW,
-    PostMessageW, PostQuitMessage, RegisterClassW, SPI_GETNONCLIENTMETRICS, SW_SHOW,
-    SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetMenu, SetWindowPos, SetWindowTextW, ShowWindow,
-    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_DPICHANGED, WM_DROPFILES, WM_HSCROLL, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSW, WS_BORDER,
-    WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    ES_READONLY, GetClientRect, GetCursorPos, GetMessageW, HMENU, IDC_ARROW, LoadCursorW,
+    MB_ICONINFORMATION, MB_OK, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, MoveWindow,
+    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassW, SPI_GETNONCLIENTMETRICS,
+    SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetMenu, SetWindowPos, SetWindowTextW,
+    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_HSCROLL, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSW,
+    WS_BORDER, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -95,13 +96,68 @@ thread_local! {
     static FONT: Cell<HFONT> = const { Cell::new(HFONT(std::ptr::null_mut())) };
     /// 状态栏是否分两栏（第二栏为保真状态；未播放时只有一栏，结论文字可用整行）。
     static TWO_PARTS: Cell<bool> = const { Cell::new(false) };
-    /// 正在拖动进度条：此间不按播放状态移动滑块（S1）。
+    /// 正在拖动或按住点击进度条（到 `TB_ENDTRACK` 为止）：此间不按播放状态移动滑块，否则松开时
+    /// 读到的是被状态快照拉回的当前位置（S1）。
     static DRAGGING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// 跨线程通知状态：主窗口句柄（整数形式）与“已投递未处理”标志（合并连续通知）。
 static MAIN: AtomicIsize = AtomicIsize::new(0);
 static PENDING: AtomicBool = AtomicBool::new(false);
+
+/// 拖动或按住进度条时在状态栏第一栏显示“松开后定位到 …”。
+fn seek_preview(h: Handles, permille: u32) {
+    let preview = APP.with(|a| {
+        a.try_borrow()
+            .ok()
+            .and_then(|g| g.as_ref()?.seek_preview(permille))
+    });
+    if let Some(t) = preview {
+        let t = wide(&t);
+        // SAFETY: 状态栏句柄有效；文本缓冲在调用期间有效。
+        unsafe {
+            SendMessageW(
+                h.status,
+                SB_SETTEXTW,
+                Some(WPARAM(0)),
+                Some(LPARAM(t.as_ptr() as isize)),
+            );
+        }
+    }
+}
+
+/// 鼠标在进度条滑轨上的位置（0–1000）。滑块中心的行程是滑轨两端各减去半个滑块宽度
+/// （`TBM_GETCHANNELRECT`、`TBM_GETTHUMBRECT`，客户区坐标）。
+fn click_position(seek: HWND) -> Option<u32> {
+    let mut pt = POINT::default();
+    let (mut channel, mut thumb) = (RECT::default(), RECT::default());
+    // SAFETY: 输出参数指向本函数的局部变量；进度条句柄有效。
+    unsafe {
+        GetCursorPos(&mut pt).ok()?;
+        if !ScreenToClient(seek, &mut pt).as_bool() {
+            return None;
+        }
+        SendMessageW(
+            seek,
+            TBM_GETCHANNELRECT,
+            None,
+            Some(LPARAM(&mut channel as *mut RECT as isize)),
+        );
+        SendMessageW(
+            seek,
+            TBM_GETTHUMBRECT,
+            None,
+            Some(LPARAM(&mut thumb as *mut RECT as isize)),
+        );
+    }
+    let half = (thumb.right - thumb.left) / 2;
+    let (start, end) = (channel.left + half, channel.right - half);
+    if end <= start {
+        return None;
+    }
+    let x = pt.x.clamp(start, end);
+    u32::try_from(i64::from(x - start) * 1000 / i64::from(end - start)).ok()
+}
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -815,8 +871,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             dispatch(Input::Notify);
             LRESULT(0)
         }
-        // 进度条（S1）：拖动时只在状态栏预览时间，松开（TB_ENDTRACK，键盘与点击滑轨也以此结束）
-        // 时按滑块位置定位。
+        // 进度条（S1）：拖动或按住滑轨时只在状态栏预览时间，松开（TB_ENDTRACK，键盘操作也以此
+        // 结束）时按滑块位置定位。点击滑轨时滑块直接移到点击处（系统默认每次只移动一页）。
         WM_HSCROLL => {
             if let Some(h) = HANDLES.get()
                 && lparam.0 == h.seek.0 as isize
@@ -824,23 +880,27 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 match u32::from(loword(wparam.0)) {
                     TB_THUMBTRACK => {
                         DRAGGING.set(true);
-                        let preview = APP.with(|a| {
-                            a.try_borrow()
-                                .ok()
-                                .and_then(|g| g.as_ref()?.seek_preview(u32::from(hiword(wparam.0))))
-                        });
-                        if let Some(t) = preview {
-                            let t = wide(&t);
-                            // SAFETY: 状态栏句柄有效；文本缓冲在调用期间有效。
+                        seek_preview(h, u32::from(hiword(wparam.0)));
+                    }
+                    TB_PAGEUP | TB_PAGEDOWN => {
+                        DRAGGING.set(true);
+                        // SAFETY: 只读查询鼠标左键状态；高位为 1 表示按下（区分点击与 PageUp/PageDown 键）。
+                        if unsafe { GetKeyState(i32::from(VK_LBUTTON.0)) } < 0
+                            && let Some(pos) = click_position(h.seek)
+                        {
+                            // SAFETY: 进度条句柄有效。
                             unsafe {
                                 SendMessageW(
-                                    h.status,
-                                    SB_SETTEXTW,
-                                    Some(WPARAM(0)),
-                                    Some(LPARAM(t.as_ptr() as isize)),
+                                    h.seek,
+                                    TBM_SETPOS,
+                                    Some(WPARAM(1)),
+                                    Some(LPARAM(pos as isize)),
                                 );
                             }
                         }
+                        // SAFETY: 进度条句柄有效；只读查询。
+                        let pos = unsafe { SendMessageW(h.seek, TBM_GETPOS, None, None) };
+                        seek_preview(h, u32::try_from(pos.0).unwrap_or(0));
                     }
                     TB_ENDTRACK => {
                         DRAGGING.set(false);

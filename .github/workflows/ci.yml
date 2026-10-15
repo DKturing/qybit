@@ -208,6 +208,9 @@ jobs:
             [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);
             [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
             [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll")] public static extern void mouse_event(uint f, int x, int y, uint d, UIntPtr e);
+            [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
             [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
           }
           "@
@@ -285,6 +288,31 @@ jobs:
           [void][W]::PostMessageW($p.MainWindowHandle, 0x0114, [IntPtr]8, $tb)
           Start-Sleep -Seconds 2; Shot $p "12-定位到一半"
           Close $p
+          # S1 定位：用真实鼠标输入点击滑轨约 3/4 处并按住 400 ms（期间状态快照照常到达），松开后应
+          # 定位到点击处（10 秒的曲目，第 441000 帧的约 75%）；不应被状态拉回原位置。
+          $p = Gui $sim "ok" "stereo44" $null
+          Cmd $p 101; Start-Sleep -Milliseconds 1500
+          $tb = [W]::GetDlgItem($p.MainWindowHandle, 207)
+          [void][W]::SetForegroundWindow($p.MainWindowHandle)
+          $r = New-Object W+RECT; [void][W]::GetWindowRect($tb, [ref]$r)
+          [void][W]::SetCursorPos([int]($r.Left + ($r.Right - $r.Left) * 0.75), [int](($r.Top + $r.Bottom) / 2))
+          Start-Sleep -Milliseconds 200
+          [W]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 400
+          $held = [int][W]::SendInt($tb, 0x0400, [IntPtr]0, [IntPtr]0)
+          [W]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+          Start-Sleep -Seconds 2; Shot $p "13-点击滑轨定位"
+          $log = Text $p.MainWindowHandle 204
+          Close $p
+          Write-Output "按住时滑块位置：$held / 1000"
+          if ($held -lt 650 -or $held -gt 850) {
+            Write-Output "真实鼠标输入未到达窗口（runner 桌面不接受模拟输入）：点击定位核对未运行"
+          } else {
+            $m = [regex]::Matches($log, "按操作定位：.*第 (\d+) 帧开始")
+            if ($m.Count -ne 1) { Write-Output "点击滑轨后应定位 1 次，实际 $($m.Count) 次"; exit 1 }
+            $f = [int64]$m[0].Groups[1].Value
+            if ($f -lt 286650 -or $f -gt 374850) { Write-Output "点击处约 75%，实际定位到第 $f 帧"; exit 1 }
+            Write-Output "点击滑轨定位到第 $f 帧（约 $([int]($f * 100 / 441000))%）"
+          }
           $p = Gui $rel $null $null @("`"$((Resolve-Path crates/qy-codec-wav/tests/fixtures/pcm16_stereo_44k.wav).Path)`"")
           Cmd $p 101; Start-Sleep -Seconds 3; Shot $p "11-真实WASAPI"
           Close $p

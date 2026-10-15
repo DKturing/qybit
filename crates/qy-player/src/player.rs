@@ -135,6 +135,9 @@ pub struct Status {
     pub channels_altered: u32,
     /// 本次播放因解码或文件错误跳过的曲目数（与报告的 `skipped` 一致）。
     pub skipped_tracks: u32,
+    /// 本次播放已执行的按操作定位次数（与报告的 `user_seeks` 一致）。界面据此判断状态快照是否已
+    /// 反映最近一次定位（S1）。
+    pub user_seeks: u32,
 }
 
 /// 播放时的实时输出、中断与控制。
@@ -390,6 +393,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
             paused_frames: pf,
             channels_altered: u32::try_from(self.report.channels_altered.len()).unwrap_or(u32::MAX),
             skipped_tracks: u32::try_from(self.report.skipped.len()).unwrap_or(u32::MAX),
+            user_seeks: self.report.user_seeks,
         };
         let changed = self.last_status.is_none_or(|(prev, at)| {
             let discrete = |s: &Status| {
@@ -402,6 +406,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                     s.underrun_events,
                     s.channels_altered,
                     s.skipped_tracks,
+                    s.user_seeks,
                 )
             };
             discrete(&prev) != discrete(&now) || at.elapsed() >= STATUS_INTERVAL
