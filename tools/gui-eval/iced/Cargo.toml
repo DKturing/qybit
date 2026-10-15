@@ -1,0 +1,15 @@
+[package]
+name = "qy-gui-eval-iced"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "GUI T1 选型样例：iced（列表、按钮、4 Hz 状态行、中文文字）"
+
+# 独立于主工作区：只用于选型测量。
+[workspace]
+
+[dependencies]
+iced = { version = "=0.14.0", features = ["tokio"] }
+
+[profile.release]
+strip = true
