@@ -30,7 +30,8 @@ use qy_codec_flac::{Capacity, FlacDecoder, FlacError, InitError};
 #[cfg(feature = "wav")]
 use qy_codec_wav::WavDecoder;
 use qy_core::{
-    DecodeError, Decoder, INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES, Progress, SourceFormat, Status,
+    DecodeError, Decoder, INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES, Progress, SeekError, SourceFormat,
+    Status,
 };
 
 /// 当前曲目使用的解码器。
@@ -595,6 +596,29 @@ impl Decoder for AutoDecoder {
     )]
     fn release(&mut self, frames: usize) {
         dispatch!(self, d => d.release(frames), ())
+    }
+
+    /// 容器解码器给出的位置从容器开头算起；文件开头跳过的 ID3v2 标签在此加回。
+    #[cfg_attr(
+        not(any(feature = "wav", feature = "flac", feature = "aiff")),
+        allow(unused_variables)
+    )]
+    fn seek(&mut self, frame: u64) -> Result<u64, SeekError> {
+        let tag = self.tag_bytes;
+        dispatch!(
+            self,
+            d => d.seek(frame).and_then(|o| o.checked_add(tag).ok_or(SeekError::PastEnd)),
+            Err(SeekError::Unsupported)
+        )
+    }
+
+    #[cfg_attr(
+        not(any(feature = "wav", feature = "flac", feature = "aiff")),
+        allow(unused_variables)
+    )]
+    fn seek_request(&mut self) -> Option<u64> {
+        let tag = self.tag_bytes;
+        dispatch!(self, d => d.seek_request().and_then(|o| o.checked_add(tag)), None)
     }
 }
 

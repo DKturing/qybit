@@ -17,7 +17,7 @@
 //! 计数，不算欠载。[`PlayControl::on_status`] 给出节流后的状态快照（界面显示用）。
 
 use std::fs::File;
-use std::io::{self, ErrorKind, Read};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,7 +52,8 @@ struct Active<B: Backend> {
 /// 曲目来源：按编号打开曲目，得到同步读取器。桌面播放用文件路径（[`play`]）；测试与基准可
 /// 提供内存数据或注入读取延迟的来源（[`play_source`]）。
 pub trait TrackSource {
-    type Reader: Read;
+    /// 读取与定位（S1）。不可定位的音源在 `seek` 中返回错误，播放器改为顺序解码到目标位置。
+    type Reader: Read + Seek;
     /// 曲目数。
     fn count(&self) -> u32;
     /// 打开第 `track` 首。
@@ -102,6 +103,9 @@ pub enum Command {
     Goto(u32),
     /// 停止：立即停止设备、丢弃队列（不排空），报告标记为已中断。
     Stop,
+    /// 在正在播放的曲目内定位到第 n 帧（源格式帧，从 0 起）；暂停状态保持，等于或超过曲目长度时
+    /// 进入下一首（S1）。
+    Seek(u64),
     /// 单声道复制到左右两路（O1，非严格选项）开启或关闭：对之后开始解码的曲目生效，正在播放与
     /// 已预读的曲目不变；之后跳曲（含跳回当前曲目）一定按新设置。
     MonoToStereo(bool),
@@ -278,6 +282,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 Command::Goto(k) if k < self.count => e.skip_to(k),
                 Command::Goto(_) => continue,
                 Command::Stop => return false,
+                Command::Seek(frame) => e.seek(frame),
                 Command::MonoToStereo(on) => e.set_channel_policy(if on {
                     ChannelPolicy::DuplicateMono
                 } else {
@@ -294,6 +299,23 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                         "已是最后一首，停止".to_string()
                     };
                     self.line(&format!("⏭ 按操作切换：丢弃已入队的音频，{what}"));
+                }
+                Command::Seek(frame) => {
+                    self.report.user_seeks += 1;
+                    let (track, _) = self.res.engine.playing_progress();
+                    let at = self
+                        .formats
+                        .iter()
+                        .rev()
+                        .find(|(t, _)| *t == track)
+                        .map_or(String::new(), |(_, f)| {
+                            let s = frame / u64::from(f.sample_rate().max(1));
+                            format!("{}:{:02}，", s / 60, s % 60)
+                        });
+                    self.line(&format!(
+                        "⇥ 按操作定位：丢弃已入队的音频，曲目 {} 从 {at}第 {frame} 帧开始",
+                        u64::from(track) + 1
+                    ));
                 }
                 Command::Pause => self.line("‖ 暂停（设备输出静音，不算欠载）"),
                 Command::Resume => self.line("▶ 继续"),
@@ -469,6 +491,34 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 request,
                 ..
             } => self.read(generation, request),
+            HostAction::Seek {
+                generation,
+                request,
+                offset,
+            } => {
+                let ok = self
+                    .file
+                    .as_mut()
+                    .is_some_and(|f| f.seek(SeekFrom::Start(offset)).is_ok());
+                self.handle(if ok {
+                    HostEvent::SeekDone {
+                        generation,
+                        request,
+                    }
+                } else {
+                    HostEvent::SeekFailed {
+                        generation,
+                        request,
+                    }
+                });
+            }
+            HostAction::SeekSequential { track } => {
+                self.line(&format!(
+                    "  曲目 {} 的音源不支持定位：按顺序解码到目标位置（结果相同，只是更慢）",
+                    u64::from(track) + 1
+                ));
+                self.report.sequential_seeks.push(track);
+            }
             HostAction::Close { .. } => {
                 self.file = None;
                 let tag = self.res.engine.decoder().skipped_tag_bytes();

@@ -5,7 +5,7 @@
 //! 当前会话的事件。
 
 use std::fs::File;
-use std::io::{self, ErrorKind, Read};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -95,6 +95,16 @@ impl Read for Limited {
             std::thread::sleep(wait);
         }
         Ok(n)
+    }
+}
+
+/// 定位后限速重新计时（定位不算读取量）。
+impl Seek for Limited {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let at = self.file.seek(pos)?;
+        self.start = Instant::now();
+        self.done = 0;
+        Ok(at)
     }
 }
 

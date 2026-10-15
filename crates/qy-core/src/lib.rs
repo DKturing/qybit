@@ -16,6 +16,13 @@
 //! 旧读取不得写入（[`Core::read_target`] 对其返回 `None`）。
 //!
 //! M0 T4 验收后 `Action`、`Event`、`Decoder` 为冻结接口，破坏性变更须先征得用户同意。
+//! S1（曲目内定位，2026-10-15 用户同意）新增 `Action::Seek`、`Event::SeekDone` /
+//! `SeekFailed`，`Decoder` 只新增带默认实现的方法。
+//!
+//! 定位（[`Core::play_at`]）：从目标帧重新开始一首曲目。打开音源、解析文件头后，核心向解码器
+//! 要目标帧的字节位置（[`Decoder::seek`]）并发出 `Seek`，宿主移动读取位置后继续读取；解码器
+//! 只输出目标帧及之后的样本。解码器不支持定位或宿主回报 `SeekFailed` 时，核心重新打开该曲目，
+//! 顺序解码并丢弃目标帧之前的样本——结果同样精确，只是更慢。
 #![no_std]
 
 pub mod engine;
@@ -63,6 +70,15 @@ pub enum DecodeError {
     CapacityExceeded,
 }
 
+/// 定位失败的原因（[`Decoder::seek`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeekError {
+    /// 解码器不支持定位，或当前码流无法定位（核心改为顺序解码并丢弃）。
+    Unsupported,
+    /// 目标帧等于或超过曲目长度（核心按播完该曲处理）。
+    PastEnd,
+}
+
 /// 推送式解码器接口（静态分发）。
 ///
 /// 实现必须 `no_std`、无 alloc，不调用 `Read/Seek`，不等待输入。
@@ -77,6 +93,20 @@ pub trait Decoder {
     fn pcm(&self) -> &[i32];
     /// 声明已取走 `frames` 帧。
     fn release(&mut self, frames: usize);
+
+    /// 定位到第 `frame` 帧（从 0 起），返回宿主应移动到的字节位置（距音源开头）。只在文件头
+    /// 解析完成、首次产出 PCM 之后由核心调用；调用后解码器丢弃未取走的样本，从该位置的数据
+    /// 继续解码，并且只输出 `frame` 及之后的样本。默认不支持。
+    fn seek(&mut self, frame: u64) -> Result<u64, SeekError> {
+        let _ = frame;
+        Err(SeekError::Unsupported)
+    }
+
+    /// 定位过程中解码器需要再跳一次（如 FLAC 无定位表时的二分查找）：返回并清除新的字节位置。
+    /// 核心在每次 `decode` 之后取一次。默认没有。
+    fn seek_request(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 /// 播放代次：每首曲目打开时与停止时递增，旧代次的回报一律拒绝。
@@ -122,6 +152,13 @@ pub enum Action {
         generation: Generation,
         frames: usize,
     },
+    /// 把音源读取位置移到距开头 `offset` 字节处，此后的 `Read` 从该处读取（S1）。
+    /// 完成后回报 `SeekDone` / `SeekFailed`（音源不可定位，如管道）。
+    Seek {
+        generation: Generation,
+        request: u32,
+        offset: u64,
+    },
     /// 关闭当前音源。
     Close { generation: Generation },
     /// 播放列表全部完成；宿主排空队列与设备中剩余音频。
@@ -158,6 +195,16 @@ pub enum Event {
         generation: Generation,
         request: u32,
     },
+    /// 读取位置已移动（S1）。
+    SeekDone {
+        generation: Generation,
+        request: u32,
+    },
+    /// 音源不可定位；核心改为重新打开并顺序解码到目标帧。
+    SeekFailed {
+        generation: Generation,
+        request: u32,
+    },
     Configured {
         generation: Generation,
     },
@@ -188,10 +235,23 @@ enum State {
     Open,
     Opening,
     Run,
-    Reading { request: u32, max: usize },
+    Reading {
+        request: u32,
+        max: usize,
+    },
+    Seek {
+        offset: u64,
+    },
+    Seeking {
+        request: u32,
+    },
+    /// 定位失败后重新打开当前曲目（先关闭已打开的音源）。
+    Reopen,
     Configure(SourceFormat),
     Configuring(SourceFormat),
-    Output { frames: usize },
+    Output {
+        frames: usize,
+    },
     EndOfTrack,
     Finish,
     Fail(Fault),
@@ -210,6 +270,14 @@ pub struct Core<D: Decoder> {
     configured: Option<SourceFormat>,
     track: u32,
     track_count: u32,
+    /// 尚未交给解码器的定位目标帧（S1）。
+    seek: Option<u64>,
+    /// 定位进行中的目标帧（`SeekFailed` 时据此改为顺序解码）。
+    seek_target: Option<u64>,
+    /// 顺序解码时还要丢弃的帧数。
+    discard: u64,
+    /// 本曲目改为顺序解码到目标帧（宿主据此报告），取走后清除。
+    sequential: bool,
 }
 
 impl<D: Decoder> Core<D> {
@@ -233,6 +301,10 @@ impl<D: Decoder> Core<D> {
             configured: None,
             track: 0,
             track_count: 0,
+            seek: None,
+            seek_target: None,
+            discard: 0,
+            sequential: false,
         })
     }
 
@@ -274,6 +346,7 @@ impl<D: Decoder> Core<D> {
     /// （调用方应先用 [`Core::stop`] 关闭音源）。
     pub fn play(&mut self, first: u32, count: u32) {
         self.reset_generation();
+        self.clear_seek();
         self.configured = None;
         self.track = first;
         self.track_count = count;
@@ -284,12 +357,44 @@ impl<D: Decoder> Core<D> {
         };
     }
 
+    /// 同 [`Core::play`]，第 `first` 首从第 `frame` 帧开始（S1 定位）。`frame` 为 0 时与
+    /// `play` 相同；等于或超过曲目长度时按播完该曲处理。
+    pub fn play_at(&mut self, first: u32, count: u32, frame: u64) {
+        self.play(first, count);
+        if frame > 0 {
+            self.seek = Some(frame);
+        }
+    }
+
+    /// 本曲目的定位改为顺序解码到目标帧（解码器不支持定位或音源不可定位）时返回 `true`，
+    /// 每次定位至多一次；取走后清除。
+    pub fn take_sequential_seek(&mut self) -> bool {
+        core::mem::take(&mut self.sequential)
+    }
+
+    fn clear_seek(&mut self) {
+        self.seek = None;
+        self.seek_target = None;
+        self.discard = 0;
+        self.sequential = false;
+    }
+
+    /// 改为顺序解码：从头重新打开当前曲目，丢弃目标帧之前的样本。
+    fn seek_sequentially(&mut self, target: u64) {
+        self.seek = None;
+        self.seek_target = None;
+        self.discard = target;
+        self.sequential = true;
+        self.state = State::Reopen;
+    }
+
     /// 停止：进入新代次，此后旧代次的回报全部拒绝；已配置输出视为失效。
     /// 音源已打开时返回 `Close`（旧代次）。
     pub fn stop(&mut self) -> Option<Action> {
         let old = self.generation;
         let was_open = self.source_open;
         self.reset_generation();
+        self.clear_seek();
         self.configured = None;
         self.state = State::Idle;
         was_open.then_some(Action::Close { generation: old })
@@ -312,8 +417,28 @@ impl<D: Decoder> Core<D> {
                 State::Idle
                 | State::Opening
                 | State::Reading { .. }
+                | State::Seeking { .. }
                 | State::Configuring(_)
                 | State::Output { .. } => return None,
+                State::Seek { offset } => {
+                    let request = self.next_request;
+                    self.next_request = self.next_request.wrapping_add(1);
+                    self.state = State::Seeking { request };
+                    return Some(Action::Seek {
+                        generation: self.generation,
+                        request,
+                        offset,
+                    });
+                }
+                State::Reopen => {
+                    self.state = State::Open;
+                    if self.source_open {
+                        self.source_open = false;
+                        return Some(Action::Close {
+                            generation: self.generation,
+                        });
+                    }
+                }
                 State::Open => {
                     self.reset_generation();
                     self.state = State::Opening;
@@ -332,6 +457,7 @@ impl<D: Decoder> Core<D> {
                 State::EndOfTrack => {
                     let generation = self.generation;
                     self.source_open = false;
+                    self.clear_seek();
                     let next = self.track.saturating_add(1);
                     if next < self.track_count {
                         self.track = next;
@@ -389,6 +515,32 @@ impl<D: Decoder> Core<D> {
         let consumed = progress.consumed.min(self.filled);
         self.input.copy_within(consumed..self.filled, 0);
         self.filled -= consumed;
+        // 解码器在定位过程中要求再跳一次（FLAC 二分）。
+        if let Some(offset) = self.decoder.seek_request() {
+            self.jump(offset);
+            return None;
+        }
+        // 文件头已解析、首次产出 PCM：把定位目标交给解码器。
+        if let (Some(target), Status::Frames(_) | Status::NeedOutput) = (self.seek, progress.status)
+        {
+            self.seek = None;
+            match self.decoder.seek(target) {
+                Ok(offset) => {
+                    self.seek_target = Some(target);
+                    self.jump(offset);
+                    return None;
+                }
+                Err(SeekError::PastEnd) => {
+                    self.state = State::EndOfTrack;
+                    return None;
+                }
+                // 已在数据开头：就地顺序解码，丢弃目标帧之前的样本。
+                Err(SeekError::Unsupported) => {
+                    self.discard = target;
+                    self.sequential = true;
+                }
+            }
+        }
         match progress.status {
             Status::Frames(_) | Status::NeedOutput => self.output_or_configure(),
             Status::NeedInput => {
@@ -414,11 +566,30 @@ impl<D: Decoder> Core<D> {
         }
     }
 
+    /// 丢弃窗口中旧位置的数据，请宿主把读取位置移到 `offset`。
+    fn jump(&mut self, offset: u64) {
+        self.filled = 0;
+        self.source_eof = false;
+        self.state = State::Seek { offset };
+    }
+
     fn output_or_configure(&mut self) -> Option<Action> {
         let Some(format) = self.decoder.format() else {
             self.state = State::Fail(Fault::Decode(DecodeError::Malformed));
             return None;
         };
+        if self.discard > 0 {
+            // 顺序定位：丢弃目标帧之前的样本（不配置输出、不送出）。
+            let frames = (self.decoder.pcm().len() / usize::from(format.channels())) as u64;
+            let n = self.discard.min(frames);
+            self.decoder
+                .release(usize::try_from(n).unwrap_or(usize::MAX));
+            self.discard -= n;
+            if self.decoder.pcm().is_empty() {
+                self.state = State::Run;
+                return None;
+            }
+        }
         if self.configured != Some(format) {
             self.state = State::Configure(format);
             return None;
@@ -457,6 +628,8 @@ impl<D: Decoder> Core<D> {
             | Event::ReadDone { generation, .. }
             | Event::ReadEof { generation, .. }
             | Event::ReadFailed { generation, .. }
+            | Event::SeekDone { generation, .. }
+            | Event::SeekFailed { generation, .. }
             | Event::Configured { generation }
             | Event::ConfigureFailed { generation }
             | Event::Output { generation, .. } => generation,
@@ -498,6 +671,18 @@ impl<D: Decoder> Core<D> {
             Event::ReadFailed { request, .. } => {
                 request_matches(request, self.state)?;
                 self.state = State::Fail(Fault::Read);
+            }
+            Event::SeekDone { request, .. } | Event::SeekFailed { request, .. } => {
+                match self.state {
+                    State::Seeking { request: r } if r == request => {}
+                    _ => return Err(CoreError::Stale),
+                }
+                if matches!(event, Event::SeekDone { .. }) {
+                    self.state = State::Run;
+                } else {
+                    let target = self.seek_target.unwrap_or(0);
+                    self.seek_sequentially(target);
+                }
             }
             Event::Configured { .. } | Event::ConfigureFailed { .. } => {
                 let State::Configuring(format) = self.state else {

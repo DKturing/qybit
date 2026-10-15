@@ -238,6 +238,10 @@ pub struct PlaybackReport<A> {
     pub interrupted: bool,
     /// 按用户操作切换曲目（上一首、下一首、跳曲）的次数；被切走的曲目没有放完。
     pub user_skips: u32,
+    /// 按操作在曲目内定位的次数（S1；定位过的曲目没有完整播放）。
+    pub user_seeks: u32,
+    /// 定位改为顺序解码的曲目（解码器不支持定位或音源不可定位；结果同样精确）。
+    pub sequential_seeks: Vec<u32>,
     pub protocol_errors: u32,
 }
 
@@ -255,6 +259,8 @@ impl<A> Default for PlaybackReport<A> {
             device_error: false,
             interrupted: false,
             user_skips: 0,
+            user_seeks: 0,
+            sequential_seeks: Vec::new(),
             protocol_errors: 0,
         }
     }
@@ -276,6 +282,7 @@ impl<A> PlaybackReport<A> {
             && self.fault.is_none()
             && !self.device_error
             && self.protocol_errors == 0
+            && self.user_seeks == 0
             && self.underrun_events() == 0
             && self.streams.iter().all(|s| {
                 s.render
@@ -568,6 +575,20 @@ impl<A: AttemptRecord> PlaybackReport<A> {
                 o,
                 "按操作切换曲目 {} 次（被切走的曲目没有放完）。",
                 self.user_skips
+            );
+        }
+        if self.user_seeks > 0 {
+            let _ = writeln!(
+                o,
+                "按操作定位 {} 次（定位过的曲目没有完整播放）。",
+                self.user_seeks
+            );
+        }
+        for track in &self.sequential_seeks {
+            let _ = writeln!(
+                o,
+                "曲目 {} 的音源不支持定位，已按顺序解码到目标位置（结果相同，只是更慢）。",
+                track + 1
             );
         }
         if self.software_path_intact() && !self.channels_altered.is_empty() {

@@ -374,6 +374,13 @@ pub enum HostAction {
         request: u32,
         max: usize,
     },
+    /// 把音源读取位置移到距开头 `offset` 字节处（S1 定位，核心动作，原样转交），回报
+    /// [`HostEvent::SeekDone`] 或 [`HostEvent::SeekFailed`]。
+    Seek {
+        generation: Generation,
+        request: u32,
+        offset: u64,
+    },
     /// 关闭音源。
     Close { generation: Generation },
     /// （[`ReusePolicy::Identical`]）为源选择设备格式，回报 [`HostEvent::DeviceSelected`] 或
@@ -402,6 +409,9 @@ pub enum HostAction {
     /// 第 `track` 首在不改样本的前提下做过的一条结构修正（W1）。在该曲目关闭时、按解码器记录的
     /// 顺序逐条给出；宿主据此在报告中写明。
     Repaired { track: u32, repair: Repair },
+    /// 第 `track` 首的定位改为顺序解码到目标帧（解码器不支持定位或音源不可定位；结果同样
+    /// 精确，只是更慢）。宿主据此在报告中写明。
+    SeekSequential { track: u32 },
     /// 第 `track` 首按 [`ChannelPolicy::DuplicateMono`] 把单声道复制到左右两路（声道布局已改变，
     /// 样本值未改变）。在设备按该曲目配置成功（新打开或续用）后给出；配置失败的曲目不给出。
     /// 宿主据此在报告中标为“已改变”。
@@ -431,6 +441,14 @@ pub enum HostEvent {
         request: u32,
     },
     ReadFailed {
+        generation: Generation,
+        request: u32,
+    },
+    SeekDone {
+        generation: Generation,
+        request: u32,
+    },
+    SeekFailed {
         generation: Generation,
         request: u32,
     },
@@ -538,8 +556,11 @@ pub struct Engine<D: Decoder + Resources, S: FrameSink> {
     open_track: Option<u32>,
     outbox: [Option<HostAction>; OUTBOX],
     out_len: usize,
-    /// 曲目边界：(曲目, 该曲目第一帧在累计入队帧中的位置)，按入队顺序。
-    marks: [(u32, u64); MARKS],
+    /// 曲目边界：(曲目, 该曲目第一帧在累计入队帧中的位置, 该帧在曲目内的帧号)，按入队顺序。
+    /// 帧号从定位目标开始（S1），否则为 0。
+    marks: [(u32, u64, u64); MARKS],
+    /// 定位后第一次入队时记入边界的 (曲目, 目标帧)。
+    seek_base: Option<(u32, u64)>,
     marks_len: usize,
     stats: EngineStats,
     channels: ChannelPolicy,
@@ -564,8 +585,9 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
             open_track: None,
             outbox: [None; OUTBOX],
             out_len: 0,
-            marks: [(0, 0); MARKS],
+            marks: [(0, 0, 0); MARKS],
             marks_len: 0,
+            seek_base: None,
             stats: EngineStats::default(),
             channels: ChannelPolicy::Strict,
             duplicating: false,
@@ -659,7 +681,7 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
             .find(|m| m.1 <= consumed)
             .or(self.marks[..self.marks_len].first())
             .map_or((self.core.track(), 0), |m| {
-                (m.0, consumed.saturating_sub(m.1))
+                (m.0, consumed.saturating_sub(m.1).saturating_add(m.2))
             })
     }
 
@@ -756,11 +778,30 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
 
     /// 播放第 `first` 首起共 `count` 首。
     pub fn play(&mut self, first: u32, count: u32) {
+        self.start(first, count, 0);
+    }
+
+    fn start(&mut self, first: u32, count: u32, frame: u64) {
         self.track_count = count;
         self.reject = None;
         self.marks_len = 0;
-        self.core.play(first, count);
+        self.seek_base = (frame > 0).then_some((first, frame));
+        self.core.play_at(first, count, frame);
         self.mode = Mode::Run;
+    }
+
+    /// 在正在播放的曲目内定位到第 `frame` 帧（S1）：丢弃已入队的音频，从该帧重新开始这首曲目，
+    /// 暂停状态保持。等于或超过曲目长度时按播完该曲处理。未在播放时忽略。
+    pub fn seek(&mut self, frame: u64) {
+        if !self.is_active() {
+            return;
+        }
+        let track = self.playing_track();
+        let count = self.track_count;
+        let paused = self.paused;
+        self.stop();
+        self.paused = paused;
+        self.start(track, count, frame);
     }
 
     /// 停止：关闭音源（旧代次的回报此后一律拒绝），停止设备并丢弃队列。
@@ -918,6 +959,20 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
                 generation,
                 request,
             }),
+            HostEvent::SeekDone {
+                generation,
+                request,
+            } => Some(Event::SeekDone {
+                generation,
+                request,
+            }),
+            HostEvent::SeekFailed {
+                generation,
+                request,
+            } => Some(Event::SeekFailed {
+                generation,
+                request,
+            }),
             _ => None,
         };
         if let Some(e) = core_event {
@@ -982,7 +1037,13 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
                 }
                 Mode::Run => {}
             }
-            let Some(action) = self.core.poll() else {
+            let polled = self.core.poll();
+            if self.core.take_sequential_seek() {
+                self.push(HostAction::SeekSequential {
+                    track: self.core.track(),
+                });
+            }
+            let Some(action) = polled else {
                 return if self.core.is_idle() {
                     Poll::Idle
                 } else {
@@ -1003,6 +1064,17 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
                         generation,
                         request,
                         max,
+                    });
+                }
+                Action::Seek {
+                    generation,
+                    request,
+                    offset,
+                } => {
+                    return Poll::Action(HostAction::Seek {
+                        generation,
+                        request,
+                        offset,
                     });
                 }
                 Action::Close { generation } => {
@@ -1124,7 +1196,11 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
             && pushed > 0
             && let Some(m) = self.marks.get_mut(self.marks_len)
         {
-            *m = (track, start);
+            let base = match self.seek_base.take() {
+                Some((t, frame)) if t == track => frame,
+                _ => 0,
+            };
+            *m = (track, start, base);
             self.marks_len += 1;
         }
         self.stats.frames_pushed += pushed as u64;

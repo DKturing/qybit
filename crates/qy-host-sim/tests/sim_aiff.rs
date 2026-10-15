@@ -95,6 +95,7 @@ fn spec(data: &[u8]) -> TrackSpec {
         data: data.to_vec(),
         open_fails: false,
         read_error_at: None,
+        unseekable: false,
     }
 }
 

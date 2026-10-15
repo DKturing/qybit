@@ -99,6 +99,7 @@ fn scenario(
                 data: f.data.clone(),
                 open_fails: false,
                 read_error_at: None,
+                unseekable: false,
             })
             .collect(),
         reads: ReadModel {

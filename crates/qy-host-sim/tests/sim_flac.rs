@@ -146,6 +146,7 @@ fn spec(data: Vec<u8>) -> TrackSpec {
         data,
         open_fails: false,
         read_error_at: None,
+        unseekable: false,
     }
 }
 

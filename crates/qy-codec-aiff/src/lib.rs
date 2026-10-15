@@ -22,7 +22,8 @@
 #![no_std]
 
 use qy_core::{
-    ChannelLayout, DecodeError, Decoder, PCM_WORK_SAMPLES, Progress, SourceFormat, Status,
+    ChannelLayout, DecodeError, Decoder, PCM_WORK_SAMPLES, Progress, SeekError, SourceFormat,
+    Status,
 };
 
 /// AIFF-C FVER 的 `timestamp`：AIFCVersion1（AIFF-C §Format Version Chunk）。
@@ -288,6 +289,10 @@ pub struct AiffDecoder {
     ssnd_seen: bool,
     fver_seen: bool,
     detail: Option<AiffDetail>,
+    /// 已消耗的总字节数（S1 定位用）。
+    offset: u64,
+    /// 第一个样本帧距源开头的位置（S1）；尚未到样本数据时为 `None`。
+    data_start: Option<u64>,
     start: usize,
     end: usize,
 }
@@ -321,6 +326,8 @@ impl AiffDecoder {
             ssnd_seen: false,
             fver_seen: false,
             detail: None,
+            offset: 0,
+            data_start: None,
             start: 0,
             end: 0,
         })
@@ -687,7 +694,10 @@ impl AiffDecoder {
                 State::Skip { remaining, data } => {
                     if remaining == 0 {
                         self.state = match data {
-                            Some((frames, after)) => State::Data { frames, after },
+                            Some((frames, after)) => {
+                                self.data_start = Some(self.offset + pos as u64);
+                                State::Data { frames, after }
+                            }
                             None => State::ChunkHeader,
                         };
                         continue;
@@ -766,6 +776,8 @@ impl Decoder for AiffDecoder {
         self.ssnd_seen = false;
         self.fver_seen = false;
         self.detail = None;
+        self.offset = 0;
+        self.data_start = None;
         self.start = 0;
         self.end = 0;
     }
@@ -786,9 +798,48 @@ impl Decoder for AiffDecoder {
             });
         }
         match self.step(input, eof) {
-            Ok(p) => Ok(p),
+            Ok(p) => {
+                self.offset += p.consumed as u64;
+                Ok(p)
+            }
             Err(e) => self.fail(e),
         }
+    }
+
+    /// 定位（S1）：字节位置 = 第一个样本帧的位置 + `frame` × 帧字节数，一次精确定位。
+    /// 帧数以 COMM 为准。
+    fn seek(&mut self, frame: u64) -> Result<u64, SeekError> {
+        let (
+            State::Data {
+                frames: left,
+                after,
+            },
+            Some(layout),
+            Some(data_start),
+        ) = (self.state, self.layout, self.data_start)
+        else {
+            return Err(SeekError::Unsupported);
+        };
+        let total = u64::from(self.frames);
+        if frame >= total {
+            return Err(SeekError::PastEnd);
+        }
+        let fb = (layout.bytes * layout.channels) as u64;
+        let read = (total - u64::from(left)) * fb;
+        let skip = frame * fb;
+        let form = (u64::from(self.form_remaining) + read)
+            .checked_sub(skip)
+            .ok_or(SeekError::PastEnd)?;
+        self.form_remaining = u32::try_from(form).map_err(|_| SeekError::PastEnd)?;
+        self.state = State::Data {
+            frames: u32::try_from(total - frame).map_err(|_| SeekError::PastEnd)?,
+            after,
+        };
+        let offset = data_start + skip;
+        self.offset = offset;
+        self.start = 0;
+        self.end = 0;
+        Ok(offset)
     }
 
     fn pcm(&self) -> &[i32] {

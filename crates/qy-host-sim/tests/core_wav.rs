@@ -107,6 +107,7 @@ fn play(core: &mut Core<WavDecoder>, data: &[u8], seed: u64) -> (Result<(), Faul
                 );
             }
             Action::Close { .. } => {}
+            Action::Seek { .. } => panic!("未定位时不应有 Seek"),
             Action::Finished { .. } => return (Ok(()), out),
             Action::Failed { fault, .. } => return (Err(fault), out),
         }

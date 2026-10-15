@@ -91,6 +91,8 @@ pub struct TrackSpec {
     pub open_fails: bool,
     /// 读取到该字节偏移（含跨越）时报告读取错误。
     pub read_error_at: Option<usize>,
+    /// 音源不可定位（如管道）：`Seek` 回报失败（S1）。
+    pub unseekable: bool,
 }
 
 /// 读取行为。
@@ -151,6 +153,8 @@ pub enum Control {
     Prev,
     Goto(u32),
     Stop,
+    /// 在正在播放的曲目内定位到第 n 帧（S1）。
+    Seek(u64),
 }
 
 /// 一次设备配置期间输出的数据。`epoch` 在每次停止重启后递增。
@@ -188,6 +192,10 @@ pub struct Report {
     pub repairs: Vec<(u32, qy_core::engine::Repair)>,
     /// 按明确开启的选项把单声道复制到左右两路的曲目（O1：声道布局已改变）。
     pub duplicated: Vec<u32>,
+    /// 定位改为顺序解码的曲目（S1：解码器不支持定位或音源不可定位）。
+    pub sequential_seeks: Vec<u32>,
+    /// 执行过的 `Seek`：(曲目, 字节位置)。
+    pub seeks: Vec<(usize, u64)>,
     /// 暂停期间设备输出的静音帧（不计欠载）。
     pub pause_silence_frames: u64,
     /// 已执行的播放控制（tick、控制）。
@@ -479,11 +487,12 @@ impl Sim<'_> {
                 Control::Prev => e.prev(),
                 Control::Goto(k) => e.skip_to(k),
                 Control::Stop => e.stop(),
+                Control::Seek(frame) => e.seek(frame),
             }
             self.run_controls(tick);
             match c {
                 Control::Pause | Control::Resume => {}
-                Control::Next | Control::Prev | Control::Goto(_) => {
+                Control::Next | Control::Prev | Control::Goto(_) | Control::Seek(_) => {
                     self.epoch += 1;
                     self.phase = Phase::Prefill;
                 }
@@ -576,6 +585,31 @@ impl Sim<'_> {
                 request,
                 max,
             } => self.issue_read(generation, request, max, tick),
+            HostAction::Seek {
+                generation,
+                request,
+                offset,
+            } => {
+                let seekable = self
+                    .open_track
+                    .and_then(|t| self.sc.tracks.get(t))
+                    .is_some_and(|t| !t.unseekable);
+                if let (true, Some(t), Ok(at)) =
+                    (seekable, self.open_track, usize::try_from(offset))
+                {
+                    self.report.seeks.push((t, offset));
+                    self.cursor = at;
+                    self.handle(HostEvent::SeekDone {
+                        generation,
+                        request,
+                    });
+                } else {
+                    self.handle(HostEvent::SeekFailed {
+                        generation,
+                        request,
+                    });
+                }
+            }
             HostAction::Close { .. } => self.open_track = None,
             HostAction::SelectDevice { source } => {
                 match choose_device_format_with(
@@ -627,6 +661,7 @@ impl Sim<'_> {
             HostAction::TrackSkipped { track, fault } => self.report.skipped.push((track, fault)),
             HostAction::Repaired { track, repair } => self.report.repairs.push((track, repair)),
             HostAction::ChannelsDuplicated { track } => self.report.duplicated.push(track),
+            HostAction::SeekSequential { track } => self.report.sequential_seeks.push(track),
             HostAction::Finished => {
                 self.report.finished = true;
                 self.phase = Phase::Done;

@@ -131,6 +131,7 @@ fn spec(fx: &Fx) -> TrackSpec {
         data: fx.data.clone(),
         open_fails: false,
         read_error_at: None,
+        unseekable: false,
     }
 }
 

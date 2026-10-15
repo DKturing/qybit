@@ -47,7 +47,8 @@
 
 use qy_core::engine::{MAX_REPAIRS, Repair};
 use qy_core::{
-    ChannelLayout, DecodeError, Decoder, PCM_WORK_SAMPLES, Progress, SourceFormat, Status,
+    ChannelLayout, DecodeError, Decoder, PCM_WORK_SAMPLES, Progress, SeekError, SourceFormat,
+    Status,
 };
 
 /// 流式写入程序的长度占位值（ffmpeg 输出到不可定位的管道时，RIFF 与 data 都写 0xFFFFFFFF；
@@ -298,6 +299,8 @@ pub struct WavDecoder {
     declared_frames: Option<u64>,
     /// 已消耗的总字节数（用于报告源的实际长度）。
     offset: u64,
+    /// data 第一个字节距源开头的位置（S1 定位）；尚未读到 data 时为 [`NONE`]。
+    data_start: u64,
     /// 已解码未取走样本：`pcm[start..end]`。
     start: usize,
     end: usize,
@@ -334,6 +337,7 @@ impl WavDecoder {
             partial_dropped: 0,
             declared_frames: None,
             offset: 0,
+            data_start: NONE,
             start: 0,
             end: 0,
         })
@@ -400,6 +404,74 @@ impl WavDecoder {
 
     pub fn channel_mask(&self) -> Option<u32> {
         self.layout.and_then(|l| l.channel_mask)
+    }
+
+    /// 刚解析完一个块头（本次调用已消耗 `pos` 字节）：是 data 时记下数据起点。
+    fn note_data_start(&mut self, pos: usize) {
+        if matches!(self.state, State::Data { .. }) && self.data_start == NONE {
+            self.data_start = self.offset + pos as u64;
+        }
+    }
+
+    /// 定位到第 `frame` 帧（S1）：字节位置 = data 起点 + `frame` × 块对齐，一次精确定位。
+    /// 只在 data 中有效；占位长度（R2）的 data 不知道总帧数，超出源末尾时读到 EOF 正常结束。
+    fn seek_to(&mut self, frame: u64) -> Result<u64, SeekError> {
+        let (
+            State::Data {
+                declared,
+                remaining,
+                tail,
+                pad,
+                to_eof,
+            },
+            Some(layout),
+        ) = (self.state, self.layout)
+        else {
+            return Err(SeekError::Unsupported);
+        };
+        if self.data_start == NONE {
+            return Err(SeekError::Unsupported);
+        }
+        let ba = layout.block_align as u64;
+        let bytes = frame.checked_mul(ba).ok_or(SeekError::PastEnd)?;
+        let offset = self
+            .data_start
+            .checked_add(bytes)
+            .ok_or(SeekError::PastEnd)?;
+        // data 中已读过的字节（RIFF 余量按其回退后再扣除目标位置之前的字节）。
+        let read = if to_eof {
+            self.data_placeholder_read
+        } else {
+            u64::from(declared - tail - remaining)
+        };
+        let remaining = if to_eof {
+            0
+        } else {
+            let full = u64::from(declared - tail);
+            if bytes >= full {
+                return Err(SeekError::PastEnd);
+            }
+            u32::try_from(full - bytes).map_err(|_| SeekError::PastEnd)?
+        };
+        if let Riff::Bounded(r) = self.riff {
+            let at_data = u64::from(r) + read;
+            let left = at_data.checked_sub(bytes).ok_or(SeekError::PastEnd)?;
+            self.riff = Riff::Bounded(u32::try_from(left).map_err(|_| SeekError::PastEnd)?);
+        }
+        if to_eof {
+            self.data_placeholder_read = bytes;
+        }
+        self.state = State::Data {
+            declared,
+            remaining,
+            tail,
+            pad,
+            to_eof,
+        };
+        self.offset = offset;
+        self.start = 0;
+        self.end = 0;
+        Ok(offset)
     }
 
     fn fail(&mut self, e: DecodeError) -> Result<Progress, DecodeError> {
@@ -701,6 +773,7 @@ impl WavDecoder {
                         }
                         self.parse_chunk_header(&avail[..8])?;
                         pos += 8;
+                        self.note_data_start(pos);
                     }
                     Riff::Open => {
                         if avail.len() < 8 {
@@ -719,6 +792,7 @@ impl WavDecoder {
                         }
                         self.parse_chunk_header(&avail[..8])?;
                         pos += 8;
+                        self.note_data_start(pos);
                     }
                 },
                 State::Fmt { size, pad } => {
@@ -883,6 +957,7 @@ impl Decoder for WavDecoder {
         self.partial_dropped = 0;
         self.declared_frames = None;
         self.offset = 0;
+        self.data_start = NONE;
         self.start = 0;
         self.end = 0;
     }
@@ -913,6 +988,10 @@ impl Decoder for WavDecoder {
 
     fn pcm(&self) -> &[i32] {
         &self.pcm[self.start..self.end]
+    }
+
+    fn seek(&mut self, frame: u64) -> Result<u64, SeekError> {
+        self.seek_to(frame)
     }
 
     fn release(&mut self, frames: usize) {

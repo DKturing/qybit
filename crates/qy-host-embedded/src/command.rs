@@ -9,6 +9,7 @@
 //! | `pause` / `resume` | 暂停 / 恢复 |
 //! | `stop` | 停止 |
 //! | `next` / `prev` | 下一首 / 上一首（相对正在播放的曲目） |
+//! | `seek <毫秒>` | 在正在播放的曲目内定位（S1；样本级精确，等于或超过长度时进入下一首） |
 //! | `status` | 状态与计数 |
 //! | `scan` | 重新扫描存储（换卡后；只在停止时有效） |
 //! | `mono-to-stereo on\|off` | 单声道 `[FC]` 复制到左右两路（非严格选项，默认关闭；对之后开始的曲目生效，见 tasks/O1.md） |
@@ -29,6 +30,8 @@ pub enum Command {
     Scan,
     /// 开启（`true`）或关闭单声道复制到左右两路（O1）。
     MonoToStereo(bool),
+    /// 在正在播放的曲目内定位到第 n 毫秒（S1）。
+    Seek(u32),
 }
 
 /// 解析错误。
@@ -94,6 +97,12 @@ pub fn parse(line: &[u8]) -> Result<Command, ParseError> {
             Some(a) if eq_ignore_case(a, b"off") => Ok(Command::MonoToStereo(false)),
             _ => Err(ParseError::BadArgument),
         };
+    }
+    if eq_ignore_case(cmd, b"seek") {
+        return arg
+            .and_then(parse_u32)
+            .map(Command::Seek)
+            .ok_or(ParseError::BadArgument);
     }
     if eq_ignore_case(cmd, b"play") {
         return match arg {
@@ -186,6 +195,10 @@ mod tests {
         assert_eq!(parse(b"rewind"), Err(ParseError::Unknown));
         assert_eq!(parse(b""), Err(ParseError::Empty));
         assert_eq!(parse(b"mono-to-stereo on"), Ok(Command::MonoToStereo(true)));
+        assert_eq!(parse(b"SEEK 90500"), Ok(Command::Seek(90_500)));
+        assert_eq!(parse(b"seek"), Err(ParseError::BadArgument));
+        assert_eq!(parse(b"seek -1"), Err(ParseError::BadArgument));
+        assert_eq!(parse(b"seek 1 2"), Err(ParseError::BadArgument));
         assert_eq!(
             parse(b"Mono-To-Stereo OFF"),
             Ok(Command::MonoToStereo(false))

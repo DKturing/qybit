@@ -90,6 +90,7 @@ fn tagged_tracks_play_bit_exact() {
                         data: d.clone(),
                         open_fails: false,
                         read_error_at: None,
+                        unseekable: false,
                     })
                     .collect(),
                 reads: ReadModel {

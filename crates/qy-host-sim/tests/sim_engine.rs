@@ -77,6 +77,7 @@ fn spec(t: &Track) -> TrackSpec {
         data: t.file.clone(),
         open_fails: false,
         read_error_at: None,
+        unseekable: false,
     }
 }
 
@@ -85,6 +86,7 @@ fn bad(data: &[u8], open_fails: bool) -> TrackSpec {
         data: data.to_vec(),
         open_fails,
         read_error_at: None,
+        unseekable: false,
     }
 }
 
@@ -342,6 +344,90 @@ fn many_short_tracks_and_next_follows_playing_track() {
                 before.len()
             );
             assert!(k >= 3, "650 ms 时应在第 4 首之后：k = {k}");
+        }
+    }
+}
+
+/// S1：播放中定位。第 1 首播到约 300 ms 时定位到第 30 000 帧：此前已播的字节是第 1 首的前缀，
+/// 定位后的输出段从目标帧起与第 1 首其余部分和第 2 首逐字节一致（无欠载）。音源不可定位时改为
+/// 顺序解码，结果相同并报告；暂停中定位保持暂停，恢复后从目标帧播放；目标超过长度时进入下一首；
+/// 每 10 ms 一次、连续 100 次定位后只播放最后一次的目标。
+#[test]
+fn seek_restarts_track_at_target_frame() {
+    let mut h = host();
+    let a = wav(44_100, 2, 16, 66_150, 40);
+    let b = wav(44_100, 2, 24, 22_050, 41);
+    let fb = 4;
+    let tail = |frame: usize| [&a.device_bytes[frame * fb..], &b.device_bytes[..]].concat();
+    for seed in SEEDS {
+        for device in DEVICES {
+            for unseekable in [false, true] {
+                let mut tracks = vec![spec(&a), spec(&b)];
+                tracks[0].unseekable = unseekable;
+                let sc = scenario(
+                    seed,
+                    device,
+                    tracks.clone(),
+                    ErrorPolicy::Stop,
+                    vec![(300, Control::Seek(30_000))],
+                );
+                let r = run(&mut h, &sc);
+                clean(&r);
+                let ctx = format!("种子 {seed} {device:?} 不可定位 {unseekable}");
+                assert!(a.device_bytes.starts_with(&epoch_bytes(&r, 0)), "{ctx}");
+                assert_eq!(epoch_bytes(&r, 1), tail(30_000), "{ctx}");
+                assert_eq!(
+                    r.sequential_seeks,
+                    if unseekable { vec![0] } else { vec![] }
+                );
+                assert_eq!(r.seeks.len(), usize::from(!unseekable), "{ctx}");
+
+                // 暂停中定位：保持暂停（静音单独计数），恢复后从目标帧播放。
+                let sc = scenario(
+                    seed,
+                    device,
+                    tracks.clone(),
+                    ErrorPolicy::Stop,
+                    vec![
+                        (250, Control::Pause),
+                        (300, Control::Seek(40_000)),
+                        (900, Control::Resume),
+                    ],
+                );
+                let r = run(&mut h, &sc);
+                clean(&r);
+                assert_eq!(epoch_bytes(&r, 1), tail(40_000), "{ctx}");
+                // 整包设备暂停时送静音包；短写设备不补零（同上面的暂停测试）。
+                assert_eq!(
+                    r.pause_silence_frames > 0,
+                    device == DeviceModel::Wasapi,
+                    "{ctx}"
+                );
+
+                // 目标超过长度：按播完该曲处理，进入下一首。
+                let sc = scenario(
+                    seed,
+                    device,
+                    tracks.clone(),
+                    ErrorPolicy::Stop,
+                    vec![(300, Control::Seek(70_000))],
+                );
+                let r = run(&mut h, &sc);
+                clean(&r);
+                assert_eq!(epoch_bytes(&r, 1), b.device_bytes, "{ctx}");
+
+                // 连续快速定位：只播放最后一次的目标。
+                let controls: Vec<_> = (0..100u64)
+                    .map(|k| (300 + 10 * k, Control::Seek(500 * k + 7)))
+                    .collect();
+                let r = run(
+                    &mut h,
+                    &scenario(seed, device, tracks, ErrorPolicy::Stop, controls),
+                );
+                clean(&r);
+                assert_eq!(r.controls_done.len(), 100, "{ctx}");
+                assert_eq!(epoch_bytes(&r, 100), tail(500 * 99 + 7), "{ctx}");
+            }
         }
     }
 }

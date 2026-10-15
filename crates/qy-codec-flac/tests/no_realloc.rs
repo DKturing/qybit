@@ -125,6 +125,7 @@ fn desktop_buffers_on_256k_stack_reuse_without_allocation() {
                         let _ = core.handle(Event::Output { generation, frames });
                     }
                     Action::Close { .. } => {}
+                    Action::Seek { .. } => panic!("未定位时不应有 Seek"),
                     Action::Finished { .. } => {
                         finished = true;
                         break;

@@ -38,6 +38,13 @@ pub trait Storage {
     fn open(&mut self, track: u32) -> Result<(), Self::Error>;
     /// 从当前曲目读取至多 `buf.len()` 字节；返回 0 表示文件结束。
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
+    /// 把读取位置移到距当前曲目开头 `offset` 字节处（S1 定位）；成功返回 `true`。不支持定位或
+    /// 位置越过文件末尾时返回 `false`，引擎改为顺序解码到目标位置（结果相同，只是更慢）。
+    /// 默认不支持。
+    fn seek(&mut self, offset: u64) -> bool {
+        let _ = offset;
+        false
+    }
     /// 关闭当前曲目（可重复调用）。
     fn close(&mut self);
     /// 重新扫描（换卡后）。返回曲目数。
@@ -276,6 +283,16 @@ impl<D: BlockDevice, T: TimeSource, const M: usize> Storage for FatStorage<D, T,
             return Err(FatError::NotOpen);
         };
         Ok(vm.read(file, buf)?)
+    }
+
+    /// `embedded-sdmmc` 按簇链从头走到目标位置（打开前已核对簇链，见 `fatcheck`）；文件大小以
+    /// 32 位表示，越过文件末尾时失败。
+    fn seek(&mut self, offset: u64) -> bool {
+        let (Some(vm), Some(file), Ok(at)) = (self.vm.as_ref(), self.file, u32::try_from(offset))
+        else {
+            return false;
+        };
+        vm.file_seek_from_start(file, at).is_ok()
     }
 
     fn close(&mut self) {

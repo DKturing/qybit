@@ -162,6 +162,7 @@ fn gen_track(rng: &mut Rng, fmt: TrackFmt, max_ms: u64) -> Track {
             data,
             open_fails: false,
             read_error_at: None,
+            unseekable: false,
         },
     }
 }

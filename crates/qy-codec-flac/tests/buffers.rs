@@ -154,10 +154,12 @@ fn structs_hold_no_block_sized_storage() {
     // W1：WavDecoder 由 128 增至 176 字节（RIFF 长度用法与声明值、源的绝对偏移、data 占位读取量、
     // RIFF 实际长度、丢弃的尾部字节数与 data 状态的尾部/声明长度字段，都是标量），
     // Core<WavDecoder> 由 232 增至 280 字节，Core 的上限相应由 256 调为 320；FlacDecoder 不变。
+    // S1：Core 加入定位状态（待定位目标、进行中的目标、顺序解码要丢弃的帧数与标志，均为标量），
+    // WavDecoder 加入 data 起点，Core<WavDecoder> 由 280 增至 352 字节，上限由 320 调为 384。
     let d = std::mem::size_of::<FlacDecoder>();
     let c = std::mem::size_of::<Core<WavDecoder>>();
     assert!(d <= 256, "FlacDecoder {d} 字节");
-    assert!(c <= 320, "Core {c} 字节");
+    assert!(c <= 384, "Core {c} 字节");
 }
 
 #[test]

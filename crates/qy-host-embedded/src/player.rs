@@ -57,6 +57,8 @@ pub enum Notice {
     Repaired { track: u32, repair: Repair },
     /// 曲目按明确开启的选项把单声道复制到左右两路（O1：声道布局已改变，样本值未改变）。
     ChannelsDuplicated { track: u32 },
+    /// 曲目的定位改为顺序解码到目标位置（S1：存储不支持定位或位置越界；结果相同，只是更慢）。
+    SeekSequential { track: u32 },
     /// 播放列表结束。
     Finished,
     /// 播放失败并停止。
@@ -362,6 +364,25 @@ where
                 request,
                 max,
             } => self.read(generation, request, max),
+            HostAction::Seek {
+                generation,
+                request,
+                offset,
+            } => {
+                let event = if self.storage.seek(offset) {
+                    HostEvent::SeekDone {
+                        generation,
+                        request,
+                    }
+                } else {
+                    HostEvent::SeekFailed {
+                        generation,
+                        request,
+                    }
+                };
+                self.handle(event);
+            }
+            HostAction::SeekSequential { track } => self.notice(Notice::SeekSequential { track }),
             HostAction::Close { .. } => {
                 self.storage.close();
                 self.open_track = None;
@@ -568,6 +589,25 @@ where
                 writeln!(w, "OK prev")
             }
             Command::Status => write_status(w, &self.status()),
+            Command::Seek(ms) => {
+                // 定位目标按正在播放的曲目的采样率换算（严格路径不重采样，源与设备采样率相同）。
+                let rate = self
+                    .engine
+                    .device_format()
+                    .map(|d| d.sample_rate())
+                    .or_else(|| {
+                        qy_core::Decoder::format(self.engine.decoder()).map(|f| f.sample_rate())
+                    });
+                match (self.engine.is_active(), rate) {
+                    (true, Some(rate)) => {
+                        let frame = u64::from(ms) * u64::from(rate) / 1000;
+                        let track = self.engine.playing_track();
+                        self.engine.seek(frame);
+                        writeln!(w, "OK seek track={track} frame={frame}")
+                    }
+                    _ => writeln!(w, "ERR seek idle"),
+                }
+            }
             Command::MonoToStereo(on) => {
                 self.set_channel_policy(if on {
                     ChannelPolicy::DuplicateMono
@@ -679,6 +719,9 @@ pub fn write_notice(w: &mut impl fmt::Write, n: &Notice) -> fmt::Result {
             w,
             "EVENT channels-altered track={track} mono[FC]->stereo[FL FR] samples-unchanged"
         ),
+        Notice::SeekSequential { track } => {
+            writeln!(w, "EVENT seek-sequential track={track} decoded-to-target")
+        }
         Notice::Finished => writeln!(w, "EVENT finished"),
         Notice::Failed { track, fault } => {
             writeln!(w, "EVENT failed track={track} fault={fault:?}")

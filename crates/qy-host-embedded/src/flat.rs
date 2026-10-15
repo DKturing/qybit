@@ -42,6 +42,8 @@ pub struct FlatStorage<R: ReadStorage> {
     tracks: &'static [FlatTrack],
     /// 当前曲目的（读取位置，结束位置）。
     open: Option<(u32, u32)>,
+    /// 当前曲目序号（定位时取曲目起点）。
+    open_track: Option<u32>,
 }
 
 fn validate(tracks: &[FlatTrack], capacity: usize) -> Result<u32, u32> {
@@ -63,6 +65,7 @@ impl<R: ReadStorage> FlatStorage<R> {
             device,
             tracks,
             open: None,
+            open_track: None,
         })
     }
 
@@ -100,6 +103,7 @@ where
             .checked_add(t.len)
             .ok_or(FlatError::OutOfRange { track })?;
         self.open = Some((t.offset, end));
+        self.open_track = Some(track);
         Ok(())
     }
 
@@ -116,6 +120,25 @@ where
         // n ≤ end − pos，不会溢出。
         self.open = Some((pos + n as u32, end));
         Ok(n)
+    }
+
+    fn seek(&mut self, offset: u64) -> bool {
+        let (Some(track), Some((_, end))) = (self.open_track, self.open) else {
+            return false;
+        };
+        let Some(t) = self.tracks.get(track as usize) else {
+            return false;
+        };
+        match u32::try_from(offset)
+            .ok()
+            .and_then(|o| t.offset.checked_add(o))
+        {
+            Some(pos) if pos <= end => {
+                self.open = Some((pos, end));
+                true
+            }
+            _ => false,
+        }
     }
 
     fn close(&mut self) {

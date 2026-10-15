@@ -341,6 +341,17 @@ impl Read for MemReader {
     }
 }
 
+/// 定位（S1）：只支持从开头算起的位置，越过末尾时停在末尾（之后读到 EOF）。
+impl std::io::Seek for MemReader {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> io::Result<u64> {
+        let std::io::SeekFrom::Start(at) = pos else {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        };
+        self.pos = usize::try_from(at).map_or(self.data.len(), |a| a.min(self.data.len()));
+        Ok(self.pos as u64)
+    }
+}
+
 impl TrackSource for MemSource {
     type Reader = MemReader;
 
