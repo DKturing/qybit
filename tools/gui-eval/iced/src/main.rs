@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, lazy, row, scrollable, text};
 use iced::{Element, Length, Subscription};
 
 #[derive(Debug, Clone)]
@@ -55,15 +55,19 @@ impl App {
             button("停止").on_press(Message::Stop)
         ]
         .spacing(6);
-        let list = column(self.rows.iter().enumerate().map(|(i, (name, len, fmt))| {
-            row![
-                text(if self.playing == Some(i) { "▶" } else { "" }).width(24),
-                text(name).width(Length::Fill),
-                text(len).width(60),
-                text(fmt).width(200),
-            ]
-            .into()
-        }));
+        // 列表只在“正在播放”变化时重建（`lazy` 按依赖值缓存），状态行刷新不重建 1000 行。
+        let rows = &self.rows;
+        let list = lazy(self.playing, move |playing| {
+            column(rows.iter().enumerate().map(|(i, (name, len, fmt))| {
+                row![
+                    text(if *playing == Some(i) { "▶" } else { "" }).width(24),
+                    text(name.clone()).width(Length::Fill),
+                    text(len.clone()).width(60),
+                    text(fmt.clone()).width(200),
+                ]
+                .into()
+            }))
+        });
         let t = self.start.elapsed().as_secs();
         let status = text(format!(
             "源 44100 Hz / 2 声道 / 16 位 → 设备 16/16 位（独占）  {}:{:02}  欠载 0",

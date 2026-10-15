@@ -55,6 +55,13 @@ jobs:
               $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
               [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
               $bmp.Save("$env:RUNNER_TEMP/${{ matrix.sample }}-$mode.png")
+              # 缩小到 1/2 写入日志（base64），便于在无法下载产物时查看渲染与中文显示。
+              $small = New-Object System.Drawing.Bitmap $bmp, ([int]($b.Width / 2)), ([int]($b.Height / 2))
+              $ms = New-Object System.IO.MemoryStream
+              $small.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+              Write-Output "SHOT-BEGIN $mode"
+              Write-Output ([Convert]::ToBase64String($ms.ToArray()))
+              Write-Output "SHOT-END $mode"
               $line = "{0}：30 秒 CPU 时间 {1:N0} ms（{2:N2}% 单核），工作集 {3:N0} MiB" -f $mode, ($c1 - $c0), (($c1 - $c0) / 300), $mem
               Stop-Process -Id $p.Id -Force
             }
