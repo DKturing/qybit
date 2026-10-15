@@ -428,6 +428,7 @@ name = "qybit-gui"
 version = "0.0.0"
 dependencies = [
  "qy-host-wasapi",
+ "qy-player",
  "qy-ui",
  "windows",
 ]

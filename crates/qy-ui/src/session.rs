@@ -5,10 +5,11 @@
 //! 当前会话的事件。
 
 use std::fs::File;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::{Duration, Instant};
 
 use qy_core::engine::ChannelPolicy;
 use qy_player::{Backend, Command, HostResources, PlayControl, Status, TrackSource, play_with};
@@ -62,27 +63,62 @@ pub(crate) struct PlayRequest {
     /// 输出设备（平台端点标识）；`None` 时由后端选择默认设备。
     pub device: Option<String>,
     pub mono_to_stereo: bool,
+    /// 故障注入：读取速率上限（字节/秒），见 [`crate::Model::read_limit`]。
+    pub read_limit: Option<u64>,
 }
 
 /// 文件路径列表。
-struct Paths<'a>(&'a [PathBuf]);
+struct Paths<'a> {
+    files: &'a [PathBuf],
+    read_limit: Option<u64>,
+}
+
+/// 音频文件读取；有速率上限时每次至多读 50 ms 的量，并按累计读取量等待（模拟慢速存储）。
+struct Limited {
+    file: File,
+    limit: Option<u64>,
+    start: Instant,
+    done: u64,
+}
+
+impl Read for Limited {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let Some(rate) = self.limit.filter(|&r| r > 0) else {
+            return self.file.read(buf);
+        };
+        let cap = usize::try_from(rate / 20).unwrap_or(usize::MAX).max(1);
+        let len = buf.len().min(cap);
+        let n = self.file.read(&mut buf[..len])?;
+        self.done = self.done.saturating_add(n as u64);
+        let due = Duration::from_secs_f64(self.done as f64 / rate as f64);
+        if let Some(wait) = due.checked_sub(self.start.elapsed()) {
+            std::thread::sleep(wait);
+        }
+        Ok(n)
+    }
+}
 
 impl TrackSource for Paths<'_> {
-    type Reader = File;
+    type Reader = Limited;
 
     fn count(&self) -> u32 {
-        u32::try_from(self.0.len()).unwrap_or(u32::MAX)
+        u32::try_from(self.files.len()).unwrap_or(u32::MAX)
     }
 
-    fn open(&mut self, track: u32) -> io::Result<File> {
-        match self.0.get(track as usize) {
-            Some(p) => File::open(p),
+    fn open(&mut self, track: u32) -> io::Result<Limited> {
+        match self.files.get(track as usize) {
+            Some(p) => Ok(Limited {
+                file: File::open(p)?,
+                limit: self.read_limit,
+                start: Instant::now(),
+                done: 0,
+            }),
             None => Err(io::Error::new(ErrorKind::NotFound, "曲目编号越界")),
         }
     }
 
     fn name(&self, track: u32) -> String {
-        self.0.get(track as usize).map_or_else(
+        self.files.get(track as usize).map_or_else(
             || format!("第 {} 首", u64::from(track) + 1),
             |p| p.display().to_string(),
         )
@@ -149,7 +185,10 @@ pub(crate) fn run<B, F>(
         let report = play_with(
             &mut backend,
             &mut res,
-            &mut Paths(&req.files),
+            &mut Paths {
+                files: &req.files,
+                read_limit: req.read_limit,
+            },
             PlayControl {
                 on_line: &mut |text: &str| {
                     send(UiEvent::Line {

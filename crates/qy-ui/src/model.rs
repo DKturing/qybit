@@ -99,6 +99,9 @@ pub struct Model {
     pub device: Option<String>,
     /// 单声道复制到左右两路（tasks/O1.md；明确开启，默认关闭，报告标为“已改变”）。
     pub mono_to_stereo: bool,
+    /// 故障注入（只供模拟设备核对与测试，默认 `None`）：播放线程读取音频文件的速率上限（字节/秒），
+    /// 低于曲目码率时产生真实的欠载。
+    pub read_limit: Option<u64>,
     /// 后台线程的致命错误。
     pub fatal: Option<String>,
     next_entry: u64,
@@ -300,6 +303,7 @@ impl Ui {
             first: u32::try_from(index).unwrap_or(u32::MAX),
             device: self.model.device.clone(),
             mono_to_stereo: self.model.mono_to_stereo,
+            read_limit: self.model.read_limit,
         };
         if let Some(tx) = &self.play_tx
             && tx.send(req).is_err()

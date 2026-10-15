@@ -380,6 +380,49 @@ fn mono_to_stereo_option_reaches_sessions() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 读取限速（故障注入，低于曲目码率）产生真实欠载：播放中状态栏写明欠载次数与缺失帧，保真行
+/// 不再是完整保真；结束结果与报告一致。
+#[test]
+fn slow_reads_show_underruns() {
+    let dir = temp("slow");
+    let files = tracks(&dir, 1, 44_100);
+    let mut ui = ui_with(clock_backend());
+    // 44.1 kHz 16 位双声道为 176 400 字节/秒，限速为其 1/4（预填 500 ms 之后必然欠载）。
+    ui.model.read_limit = Some(44_100);
+    ui.add_paths(files);
+    assert!(until(&mut ui, 10, all_probed));
+    ui.play_from(0);
+    let (mut status, mut fidelity) = (String::new(), String::new());
+    assert!(until(&mut ui, 20, |u| {
+        if u.model
+            .playing
+            .as_ref()
+            .and_then(|p| p.status)
+            .is_some_and(|s| s.underrun_events > 0)
+        {
+            status = text::status_line(&u.model);
+            fidelity = text::fidelity_line(&u.model);
+        }
+        u.model.playing.is_none()
+    }));
+    assert!(
+        status.contains("欠载 ") && status.contains("帧）"),
+        "{status} {:?}",
+        ui.model.last.as_ref().map(|o| &o.summary)
+    );
+    assert!(fidelity.starts_with("有欠载"), "{fidelity}");
+    let Some(o) = ui.model.last.clone() else {
+        panic!("无结果")
+    };
+    assert!(
+        o.underrun_events > 0 && !o.software_intact && !o.strict_intact,
+        "{}",
+        o.summary
+    );
+    assert!(o.summary.contains("欠载"), "{}", o.summary);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn text_helpers() {
     assert_eq!(text::khz(44_100), "44.1");

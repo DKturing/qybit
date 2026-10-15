@@ -129,6 +129,8 @@ pub struct Status {
     /// 本次播放累计按单声道复制（O1，声道已改变）送到设备的曲目数，与报告的
     /// `channels_altered` 一致。
     pub channels_altered: u32,
+    /// 本次播放因解码或文件错误跳过的曲目数（与报告的 `skipped` 一致）。
+    pub skipped_tracks: u32,
 }
 
 /// 播放时的实时输出、中断与控制。
@@ -339,6 +341,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
             underrun_frames: uf,
             paused_frames: pf,
             channels_altered: u32::try_from(self.report.channels_altered.len()).unwrap_or(u32::MAX),
+            skipped_tracks: u32::try_from(self.report.skipped.len()).unwrap_or(u32::MAX),
         };
         let changed = self.last_status.is_none_or(|(prev, at)| {
             let discrete = |s: &Status| {
@@ -350,6 +353,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                     s.device,
                     s.underrun_events,
                     s.channels_altered,
+                    s.skipped_tracks,
                 )
             };
             discrete(&prev) != discrete(&now) || at.elapsed() >= STATUS_INTERVAL

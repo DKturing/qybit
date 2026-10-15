@@ -12,8 +12,14 @@ publish.workspace = true
 name = "qybit-gui"
 path = "src/main.rs"
 
+[features]
+# GUI T3 界面核对：用模拟设备代替 WASAPI（真实核心、自有解码、pack 与渲染循环，只模拟设备与时间）。
+# 只在 CI 截图核对时编译，发布产物不含。
+sim = ["dep:qy-player"]
+
 [dependencies]
 qy-ui.workspace = true
+qy-player = { workspace = true, features = ["test-support"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 qy-host-wasapi.workspace = true

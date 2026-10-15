@@ -113,6 +113,12 @@ pub fn status_line(m: &Model) -> String {
         out.push_str(&format!(" → 设备 {}（独占）", device_text(d)));
     }
     out.push_str(&format!("  ·  欠载 {}", s.underrun_events));
+    if s.underrun_frames > 0 {
+        out.push_str(&format!("（缺 {} 帧）", s.underrun_frames));
+    }
+    if s.skipped_tracks > 0 {
+        out.push_str(&format!("  ·  跳过 {} 首", s.skipped_tracks));
+    }
     out
 }
 
@@ -122,6 +128,10 @@ pub fn fidelity_line(m: &Model) -> String {
         let underruns = p.status.map_or(0, |s| s.underrun_events);
         if underruns > 0 {
             return format!("有欠载 {underruns} 次：本次播放不是完整保真");
+        }
+        let skipped = p.status.map_or(0, |s| s.skipped_tracks);
+        if skipped > 0 {
+            return format!("有 {skipped} 首因错误跳过：本次播放未完整完成");
         }
         let altered = p.status.map_or(0, |s| s.channels_altered);
         if altered > 0 {

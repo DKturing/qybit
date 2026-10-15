@@ -182,6 +182,93 @@ jobs:
           [void]$p.CloseMainWindow()
           if (-not $p.WaitForExit(10000)) { Write-Output "正常关闭后 10 秒未退出"; Stop-Process -Id $p.Id -Force; exit 1 }
           Write-Output "正常关闭，退出代码 $($p.ExitCode)"
+      # GUI T3：各状态的界面截图与状态栏、日志文字。模拟设备（sim 特性，单独的目标目录，发布产物不含）
+      # 走真实核心、自有解码、pack 与渲染循环，只模拟设备与时间；最后一项用发布版的真实 WASAPI。
+      - run: cargo build --locked --release -p qybit-gui --features sim --target-dir target/sim
+      - name: 各状态截图（模拟设备 + 真实 WASAPI）
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          Add-Type @"
+          using System; using System.Runtime.InteropServices; using System.Text;
+          public static class W {
+            [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+            [DllImport("user32.dll", EntryPoint="SendMessageW")] public static extern IntPtr SendInt(IntPtr h, uint m, IntPtr w, IntPtr l);
+            [DllImport("user32.dll", EntryPoint="SendMessageW", CharSet=CharSet.Unicode)] public static extern IntPtr SendText(IntPtr h, uint m, IntPtr w, StringBuilder l);
+            [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
+            [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+          }
+          "@
+          $out = "$env:RUNNER_TEMP/gui-shots"; New-Item -ItemType Directory -Force $out | Out-Null
+          $fixtures = @(
+            "crates/qy-codec-flac/tests/fixtures/cli_16_3ch_48k.flac",
+            "crates/qy-codec-aiff/tests/fixtures/aifc_none_16_stereo.aiff",
+            "README.md"
+          ) | ForEach-Object { "`"$((Resolve-Path $_).Path)`"" }
+          function Text($h, $id) {
+            $c = [W]::GetDlgItem($h, $id)
+            $n = [int][W]::SendInt($c, 0x000E, [IntPtr]0, [IntPtr]0)
+            $sb = New-Object System.Text.StringBuilder ($n + 1)
+            [void][W]::SendText($c, 0x000D, [IntPtr]($n + 1), $sb)
+            $sb.ToString()
+          }
+          function Gui($exe, $mode, $files, $extra) {
+            $env:QY_GUI_SIM = $mode; $env:QY_GUI_SIM_FILES = $files
+            if ($extra) { $p = Start-Process -FilePath $exe -ArgumentList $extra -PassThru }
+            else { $p = Start-Process -FilePath $exe -PassThru }
+            Remove-Item Env:QY_GUI_SIM -ErrorAction SilentlyContinue
+            [void]$p.WaitForInputIdle(15000); Start-Sleep -Seconds 3; $p.Refresh()
+            if ($p.HasExited -or $p.MainWindowHandle -eq 0) { Write-Output "启动失败"; exit 1 }
+            $p
+          }
+          function Cmd($p, $id) { [void][W]::PostMessageW($p.MainWindowHandle, 0x0111, [IntPtr]$id, [IntPtr]0) }
+          function Shot($p, $name) {
+            $h = $p.MainWindowHandle; $r = New-Object W+RECT; [void][W]::GetWindowRect($h, [ref]$r)
+            $bmp = New-Object System.Drawing.Bitmap ($r.Right - $r.Left), ($r.Bottom - $r.Top)
+            $g = [System.Drawing.Graphics]::FromImage($bmp); $dc = $g.GetHdc()
+            [void][W]::PrintWindow($h, $dc, 2); $g.ReleaseHdc($dc); $g.Dispose()
+            $bmp.Save("$out/$name.png")
+            $ms = New-Object System.IO.MemoryStream; $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+            Write-Output "===== 状态 $name"
+            Write-Output "状态栏：$(Text $h 205)"
+            Write-Output "日志（最后 25 行）："
+            (Text $h 204) -split "`r`n" | Select-Object -Last 25 | ForEach-Object { Write-Output "  | $_" }
+            Write-Output "SHOT-BEGIN $name"
+            Write-Output ([Convert]::ToBase64String($ms.ToArray()))
+            Write-Output "SHOT-END $name"
+          }
+          function Close($p) {
+            [void]$p.CloseMainWindow()
+            if (-not $p.WaitForExit(10000)) { Write-Output "关闭后 10 秒未退出"; Stop-Process -Id $p.Id -Force; exit 1 }
+          }
+          $sim = (Resolve-Path target/sim/release/qybit-gui.exe).Path
+          $rel = (Resolve-Path target/release/qybit-gui.exe).Path
+          # 101 播放/暂停，102 停止，104 下一首；203 单声道复制复选框（BM_CLICK 0x00F5）。
+          $p = Gui $sim "ok" "stereo44,hires96" $fixtures
+          Shot $p "01-就绪"
+          Cmd $p 101; Start-Sleep -Seconds 2; Shot $p "02-播放中"
+          Cmd $p 101; Start-Sleep -Seconds 1; Shot $p "03-暂停"
+          Cmd $p 101; Start-Sleep -Milliseconds 500; Cmd $p 104; Start-Sleep -Seconds 2; Shot $p "04-下一首"
+          Cmd $p 102; Start-Sleep -Seconds 1; Shot $p "05-停止"
+          Close $p
+          $p = Gui $sim "ok" "mono48,stereo44" $null
+          Cmd $p 101; Start-Sleep -Seconds 2; Shot $p "06-单声道严格路径被拒"
+          [void][W]::SendInt([W]::GetDlgItem($p.MainWindowHandle, 203), 0x00F5, [IntPtr]0, [IntPtr]0)
+          Cmd $p 101; Start-Sleep -Seconds 2; Shot $p "07-单声道复制"
+          Close $p
+          $p = Gui $sim "slow" "stereo44" $null
+          Cmd $p 101; Start-Sleep -Seconds 4; Shot $p "08-欠载"
+          Close $p
+          $p = Gui $sim "lost" "stereo44" $null
+          Cmd $p 101; Start-Sleep -Seconds 4; Shot $p "09-设备失效"
+          Close $p
+          $p = Gui $sim "ok" "short" $null
+          Cmd $p 101; Start-Sleep -Seconds 4; Shot $p "10-播放完成"
+          Close $p
+          $p = Gui $rel $null $null @("`"$((Resolve-Path crates/qy-codec-wav/tests/fixtures/pcm16_stereo_44k.wav).Path)`"")
+          Cmd $p 101; Start-Sleep -Seconds 3; Shot $p "11-真实WASAPI"
+          Close $p
       - uses: actions/upload-artifact@v4
         with:
           name: qybit-windows
@@ -189,6 +276,10 @@ jobs:
             target/release/qybit-gui.exe
             target/release/qybit.exe
             ${{ runner.temp }}/qybit-gui.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qybit-gui-shots
+          path: ${{ runner.temp }}/gui-shots
 
   # M2 T4 B 层：snd-aloop 内核虚拟声卡回环。runner 不能加载内核模块时明确标记为未运行，
   # A 层（file 插件，见通用模块测试）的结果不能代替 B 层。

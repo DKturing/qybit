@@ -57,6 +57,7 @@ use super::app::{
     ID_PREV, ID_REMOVE, ID_STOP, IDC_DEVICE, IDC_LIST, IDC_LOG, IDC_MONO, IDC_STATUS, Input, Op,
     about_text,
 };
+use super::sim::Sim;
 
 /// 后台线程有新事件（`PostMessageW` 投递，跨线程安全）。
 const WM_QY_NOTIFY: u32 = WM_APP + 1;
@@ -123,31 +124,26 @@ pub fn run() -> ExitCode {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).is_ok()
     };
+    let sim = Sim::from_env();
     // 端点枚举使用多线程套间：放在单独的线程中完成。
-    let (default, endpoints) = std::thread::spawn(|| {
-        (
-            qy_host_wasapi::endpoints::default_render_endpoint().ok(),
-            qy_host_wasapi::endpoints::list_render_endpoints().unwrap_or_default(),
-        )
-    })
-    .join()
-    .unwrap_or_default();
-    let code = match create() {
+    let (default, endpoints) = match &sim {
+        Some(s) => (Some(s.endpoint()), Vec::new()),
+        None => std::thread::spawn(|| {
+            (
+                qy_host_wasapi::endpoints::default_render_endpoint().ok(),
+                qy_host_wasapi::endpoints::list_render_endpoints().unwrap_or_default(),
+            )
+        })
+        .join()
+        .unwrap_or_default(),
+    };
+    let title = sim.as_ref().map_or_else(|| "QyBit".to_string(), Sim::title);
+    let code = match create(&title) {
         Some(h) => {
-            let ui = qy_ui::Ui::new(
-                |device: Option<&str>| -> Result<qy_host_wasapi::wasapi::WasapiBackend, String> {
-                    let id = match device {
-                        Some(d) => d.to_string(),
-                        None => {
-                            qy_host_wasapi::endpoints::default_render_endpoint()
-                                .map_err(|e| format!("找不到默认输出设备（{e}）"))?
-                                .id
-                        }
-                    };
-                    Ok(qy_host_wasapi::wasapi::WasapiBackend::new(id))
-                },
-                Arc::new(notify),
-            );
+            let (ui, sim_files) = match &sim {
+                Some(s) => (s.ui(Arc::new(notify)), s.files()),
+                None => (wasapi_ui(), Vec::new()),
+            };
             let app = App::new(ui, default, endpoints);
             fill_devices(&h, &app.device_names());
             let ops = app.initial();
@@ -156,7 +152,8 @@ pub fn run() -> ExitCode {
                 exec(op);
             }
             // 命令行给出的文件与文件夹（如“打开方式”）加入播放列表。
-            let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+            let mut args = sim_files;
+            args.extend(std::env::args_os().skip(1).map(PathBuf::from));
             if !args.is_empty() {
                 dispatch(Input::Paths(args));
             }
@@ -172,6 +169,24 @@ pub fn run() -> ExitCode {
     code
 }
 
+/// WASAPI 独占输出的界面模型（播放线程中按设备标识创建后端）。
+fn wasapi_ui() -> qy_ui::Ui {
+    qy_ui::Ui::new(
+        |device: Option<&str>| -> Result<qy_host_wasapi::wasapi::WasapiBackend, String> {
+            let id = match device {
+                Some(d) => d.to_string(),
+                None => {
+                    qy_host_wasapi::endpoints::default_render_endpoint()
+                        .map_err(|e| format!("找不到默认输出设备（{e}）"))?
+                        .id
+                }
+            };
+            Ok(qy_host_wasapi::wasapi::WasapiBackend::new(id))
+        },
+        Arc::new(notify),
+    )
+}
+
 fn message_loop() {
     let mut msg = MSG::default();
     // SAFETY: 标准消息循环；msg 为本地变量。
@@ -184,7 +199,8 @@ fn message_loop() {
 }
 
 /// 创建主窗口、菜单与控件。
-fn create() -> Option<Handles> {
+fn create(title: &str) -> Option<Handles> {
+    let title = wide(title);
     // SAFETY: 窗口类与窗口创建；所有参数为本地有效值或系统返回的句柄。
     unsafe {
         let icc = INITCOMMONCONTROLSEX {
@@ -208,7 +224,7 @@ fn create() -> Option<Handles> {
         let main = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             class,
-            w!("QyBit"),
+            PCWSTR(title.as_ptr()),
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
