@@ -133,9 +133,62 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
-      - run: cargo clippy --locked -p qy-host-wasapi -p qybit --all-targets -- -D warnings
+      - run: cargo clippy --locked -p qy-host-wasapi -p qybit -p qybit-gui --all-targets -- -D warnings
       - run: cargo build --locked -p qy-host-wasapi -p qybit
-      - run: cargo test --locked -p qy-host-wasapi -p qybit
+      - run: cargo test --locked -p qy-host-wasapi -p qybit -p qybit-gui
+
+  # GUI（tasks/GUI.md）：release 构建 Windows 原生控件前端，带夹具启动、截图核对显示，测空闲 CPU，
+  # 按正常关闭（WM_CLOSE）退出以核对后台线程结束；上传 exe。runner 没有音频设备，不播放。
+  gui-windows:
+    name: GUI (Windows 原生)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: cargo build --locked --release -p qybit-gui -p qybit
+      - name: 启动、截图、空闲 CPU 与正常关闭
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $exe = (Resolve-Path target/release/qybit-gui.exe).Path
+          $files = @(
+            "crates/qy-codec-wav/tests/fixtures/pcm16_stereo_44k.wav",
+            "crates/qy-codec-flac/tests/fixtures/cli_16_3ch_48k.flac",
+            "crates/qy-codec-aiff/tests/fixtures/aifc_none_16_stereo.aiff",
+            "README.md"
+          ) | ForEach-Object { (Resolve-Path $_).Path }
+          $p = Start-Process -FilePath $exe -ArgumentList ($files | ForEach-Object { "`"$_`"" }) -PassThru
+          Start-Sleep -Seconds 5
+          if ($p.HasExited) { Write-Output "启动后退出（代码 $($p.ExitCode)）"; exit 1 }
+          $p.Refresh(); $c0 = $p.TotalProcessorTime.TotalMilliseconds
+          Start-Sleep -Seconds 20
+          $p.Refresh(); $c1 = $p.TotalProcessorTime.TotalMilliseconds
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$env:RUNNER_TEMP/qybit-gui.png")
+          $small = New-Object System.Drawing.Bitmap $bmp, ([int]($b.Width / 2)), ([int]($b.Height / 2))
+          $ms = New-Object System.IO.MemoryStream
+          $small.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+          Write-Output "SHOT-BEGIN gui"
+          Write-Output ([Convert]::ToBase64String($ms.ToArray()))
+          Write-Output "SHOT-END gui"
+          $size = (Get-Item $exe).Length / 1MB
+          $line = "qybit-gui.exe {0:N2} MiB；空闲 20 秒 CPU {1:N0} ms；工作集 {2:N0} MiB" -f $size, ($c1 - $c0), ($p.WorkingSet64 / 1MB)
+          Write-Output $line
+          "### GUI`n- $line" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          [void]$p.CloseMainWindow()
+          if (-not $p.WaitForExit(10000)) { Write-Output "正常关闭后 10 秒未退出"; Stop-Process -Id $p.Id -Force; exit 1 }
+          Write-Output "正常关闭，退出代码 $($p.ExitCode)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qybit-windows
+          path: |
+            target/release/qybit-gui.exe
+            target/release/qybit.exe
+            ${{ runner.temp }}/qybit-gui.png
 
   # M2 T4 B 层：snd-aloop 内核虚拟声卡回环。runner 不能加载内核模块时明确标记为未运行，
   # A 层（file 插件，见通用模块测试）的结果不能代替 B 层。

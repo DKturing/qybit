@@ -15,6 +15,7 @@ members = [
     "crates/qy-host-alsa",
     "crates/qy-host-embedded",
     "crates/qybit",
+    "crates/qybit-gui",
     "tools/qy-gen-fixtures",
     "tools/qy-fat-image",
     "tools/qy-bench",

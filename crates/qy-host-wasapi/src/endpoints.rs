@@ -11,7 +11,7 @@ use windows::Win32::Devices::FunctionDiscovery::{
 use windows::Win32::Foundation::{ERROR_SUCCESS, PROPERTYKEY};
 use windows::Win32::Media::Audio::{
     DEVICE_STATE_ACTIVE, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
-    PKEY_AudioEndpoint_PhysicalSpeakers, eRender,
+    PKEY_AudioEndpoint_PhysicalSpeakers, eMultimedia, eRender,
 };
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToBSTR};
 use windows::Win32::System::Com::{
@@ -135,6 +135,16 @@ pub fn list_render_endpoints() -> windows::core::Result<Vec<EndpointInfo>> {
         }
         Ok(out)
     }
+}
+
+/// 系统默认的渲染端点（多媒体角色，即一般播放音乐时使用的默认设备）。没有活动的输出设备时
+/// 返回错误。
+pub fn default_render_endpoint() -> windows::core::Result<EndpointInfo> {
+    let _com = ComGuard::new()?;
+    let e = enumerator()?;
+    // SAFETY: 接口由 windows crate 管理引用计数，均在 `_com` 析构前释放。
+    let device = unsafe { e.GetDefaultAudioEndpoint(eRender, eMultimedia)? };
+    info(&device)
 }
 
 /// 列出活动渲染端点的 ID 字符串。
