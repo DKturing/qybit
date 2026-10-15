@@ -1,0 +1,77 @@
+# GUI T1 选型测量（tasks/GUI.md）：三个最小样例在 Windows 上的全新 release 编译时间、exe 大小、
+# 空闲 CPU（窗口打开不操作 30 秒；分 4 Hz 刷新状态行与完全静止两种），并截图核对中文显示；
+# 第二轮：Windows 原生控件与 Slint 同场比较（第一轮 egui/iced/Slint 的结果见 docs/gui-t1-selection.md）。
+# 只在手动触发或样例改动时运行。
+name: GUI 选型测量
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - tools/gui-eval/**
+      - .github/workflows/gui-eval.yml
+
+jobs:
+  windows:
+    name: Windows (${{ matrix.sample }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [win32, slint]
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: tools/gui-eval/${{ matrix.sample }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - name: 预取依赖（不计入编译时间）
+        run: cargo fetch --locked
+      - name: 全新 release 编译
+        run: |
+          $t = Measure-Command { cargo build --release --locked --offline | Out-Default }
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $exe = Get-ChildItem target/release/*.exe | Select-Object -First 1
+          $line = "编译 {0:N0} 秒，exe {1:N2} MiB" -f $t.TotalSeconds, ($exe.Length / 1MB)
+          Write-Output $line
+          "### ${{ matrix.sample }}`n- $line" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+      - name: 空闲 CPU 与截图
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $exe = (Get-ChildItem target/release/*.exe | Select-Object -First 1).FullName
+          foreach ($mode in @('tick', 'static')) {
+            if ($mode -eq 'static') { $env:QY_EVAL_STATIC = '1' } else { Remove-Item Env:QY_EVAL_STATIC -ErrorAction SilentlyContinue }
+            $p = Start-Process -FilePath $exe -PassThru
+            Start-Sleep -Seconds 5
+            if ($p.HasExited) {
+              $line = "${mode}：程序退出（代码 $($p.ExitCode)），未测得"
+            } else {
+              $p.Refresh(); $c0 = $p.TotalProcessorTime.TotalMilliseconds
+              Start-Sleep -Seconds 30
+              $p.Refresh(); $c1 = $p.TotalProcessorTime.TotalMilliseconds
+              $mem = $p.WorkingSet64 / 1MB
+              $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+              $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+              [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+              $bmp.Save("$env:RUNNER_TEMP/${{ matrix.sample }}-$mode.png")
+              # 缩小到 1/2 写入日志（base64），便于在无法下载产物时查看渲染与中文显示。
+              $small = New-Object System.Drawing.Bitmap $bmp, ([int]($b.Width / 2)), ([int]($b.Height / 2))
+              $ms = New-Object System.IO.MemoryStream
+              $small.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+              Write-Output "SHOT-BEGIN $mode"
+              Write-Output ([Convert]::ToBase64String($ms.ToArray()))
+              Write-Output "SHOT-END $mode"
+              $line = "{0}：30 秒 CPU 时间 {1:N0} ms（{2:N2}% 单核），工作集 {3:N0} MiB" -f $mode, ($c1 - $c0), (($c1 - $c0) / 300), $mem
+              Stop-Process -Id $p.Id -Force
+            }
+            Write-Output $line
+            "- $line" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-eval-${{ matrix.sample }}-screens
+          path: ${{ runner.temp }}/*.png
+          if-no-files-found: warn
+
