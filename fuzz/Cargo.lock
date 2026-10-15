@@ -286,6 +286,7 @@ dependencies = [
  "qy-fat-image",
  "qy-host-embedded",
  "qy-host-sim",
+ "qy-pcm-format",
 ]
 
 [[package]]

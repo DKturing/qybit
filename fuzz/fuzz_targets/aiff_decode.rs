@@ -53,7 +53,11 @@ fn run(
                     Status::NeedInput => {
                         assert!(!eof, "EOF 后不得返回 NeedInput");
                         // 任一结构所需的最大连续输入（COMM 278 字节或一帧）远小于核心最小窗口。
-                        assert!(window.len() < 8192, "缺输入时窗口已有 {} 字节", window.len());
+                        assert!(
+                            window.len() < 8192,
+                            "缺输入时窗口已有 {} 字节",
+                            window.len()
+                        );
                         let n = chunk().clamp(1, data.len() - fed);
                         window.extend_from_slice(&data[fed..fed + n]);
                         fed += n;
@@ -113,6 +117,9 @@ fuzz_target!(|input: &[u8]| {
     );
     assert_eq!(one, chunked);
     if let Some(d) = one.1 {
-        assert_eq!(d.category(), chunked.1.map_or(d.category(), |x| x.category()));
+        assert_eq!(
+            d.category(),
+            chunked.1.map_or(d.category(), |x| x.category())
+        );
     }
 });

@@ -79,7 +79,9 @@ fn run(
         wav: dec.wav_detail(),
         aiff: dec.aiff_detail(),
         magic: dec.unrecognized().map(|u| u.magic),
-        repairs: (0..dec.repair_count()).filter_map(|i| dec.repair(i)).collect(),
+        repairs: (0..dec.repair_count())
+            .filter_map(|i| dec.repair(i))
+            .collect(),
         skipped: dec.skipped_tag_bytes(),
     }
 }
