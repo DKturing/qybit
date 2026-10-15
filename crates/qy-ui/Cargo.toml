@@ -1,0 +1,21 @@
+[package]
+name = "qy-ui"
+description = "QyBit 界面模型（GUI T2）：播放列表、控制命令、状态与显示文字、后台文件头读取；与平台无关，Windows 原生与 Linux GTK 前端共用"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+qy-core.workspace = true
+qy-codec-auto.workspace = true
+qy-codec-flac.workspace = true
+qy-player.workspace = true
+
+[dev-dependencies]
+qy-player = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

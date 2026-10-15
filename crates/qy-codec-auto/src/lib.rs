@@ -310,6 +310,19 @@ impl AutoDecoder {
         }
     }
 
+    /// 当前曲目文件头声明的总帧数（不可信，只用于显示时长）；未知时为 `None`。
+    pub fn declared_frames(&self) -> Option<u64> {
+        match (self.codec, &self.stream) {
+            #[cfg(feature = "wav")]
+            (Codec::Wav, Stream::Wav(w)) => w.declared_frames(),
+            #[cfg(feature = "aiff")]
+            (Codec::Aiff, Stream::Aiff(a)) => a.declared_frames(),
+            #[cfg(feature = "flac")]
+            (Codec::Flac, _) => self.flac.as_ref().and_then(FlacDecoder::declared_frames),
+            _ => None,
+        }
+    }
+
     /// 流式 PCM 工作区（WAV / AIFF 共用）的容量，样本数；未提供时为 0。
     pub fn stream_capacity(&self) -> usize {
         self.stream.capacity()

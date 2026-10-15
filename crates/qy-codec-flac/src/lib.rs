@@ -368,6 +368,13 @@ impl FlacDecoder {
         self.retry_at
     }
 
+    /// STREAMINFO 声明的总帧数（RFC 9639 §8.2 “total samples in stream”，每声道样本数）；
+    /// 未声明（0）或尚未读到 STREAMINFO 时为 `None`。来自不可信的文件头，只用于显示时长。
+    pub fn declared_frames(&self) -> Option<u64> {
+        self.info
+            .and_then(|i| (i.total_samples != 0).then_some(i.total_samples))
+    }
+
     #[cfg(any(test, feature = "test-metrics"))]
     pub fn metrics(&self) -> Metrics {
         self.metrics

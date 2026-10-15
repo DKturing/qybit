@@ -134,6 +134,8 @@ pub struct PlayControl<'a> {
     pub stop: Option<&'a AtomicBool>,
     /// 控制命令（非阻塞读取；发送端断开不影响播放）。
     pub commands: Option<&'a Receiver<Command>>,
+    /// 从第几首开始播放（从 0 起；超出列表时直接结束）。上一首/跳曲仍可回到之前的曲目。
+    pub first: u32,
     /// 状态快照：状态变化时立即调用，播放中至多每 [`STATUS_INTERVAL`] 调用一次，结束时调用
     /// 一次（`active` 为假）。回调在生产端线程执行，应很快返回（如存入共享状态并通知界面）。
     pub on_status: Option<&'a mut dyn FnMut(&Status)>,
@@ -183,6 +185,7 @@ pub fn play_source<B: Backend, S: TrackSource>(
             on_line: &mut |_| {},
             stop: None,
             commands: None,
+            first: 0,
             on_status: None,
         },
     )
@@ -199,7 +202,7 @@ pub fn play_with<'a, B: Backend, S: TrackSource>(
     // 清理上一次播放可能残留的状态（旧代次），丢弃其控制动作。
     res.engine.stop();
     while res.engine.take_control().is_some() {}
-    res.engine.play(0, count);
+    res.engine.play(ctl.first, count);
     let mut p = Player {
         backend,
         res,
@@ -954,6 +957,7 @@ mod tests {
                 on_line: &mut |l: &str| lines.push(l.to_string()),
                 stop: None,
                 commands: None,
+                first: 0,
                 on_status: None,
             },
         );
@@ -987,6 +991,7 @@ mod tests {
                 },
                 stop: Some(&stop),
                 commands: None,
+                first: 0,
                 on_status: None,
             },
         );
@@ -1024,6 +1029,7 @@ mod tests {
                 on_line: &mut |l: &str| lines.push(l.to_string()),
                 stop: None,
                 commands: None,
+                first: 0,
                 on_status: None,
             },
         );
@@ -1078,6 +1084,7 @@ mod tests {
                     on_line: &mut |l: &str| lines.push(l.to_string()),
                     stop: None,
                     commands: None,
+                    first: 0,
                     on_status: None,
                 },
             );
@@ -1146,6 +1153,7 @@ mod tests {
                 on_line: &mut |l: &str| lines.push(l.to_string()),
                 stop: None,
                 commands: None,
+                first: 0,
                 on_status: None,
             },
         );
@@ -1462,6 +1470,7 @@ mod tests {
                 on_line: &mut |_| {},
                 stop: None,
                 commands: Some(&rx),
+                first: 0,
                 on_status: Some(&mut |s: &Status| {
                     seen.push(*s);
                     on(s, &tx);

@@ -300,6 +300,7 @@ fn play_live<B: qy_player::Backend>(
             },
             stop,
             commands: None,
+            first: 0,
             on_status: None,
         },
     );

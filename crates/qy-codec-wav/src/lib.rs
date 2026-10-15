@@ -294,6 +294,8 @@ pub struct WavDecoder {
     riff_actual: u64,
     /// 丢弃的不足一帧的尾部字节数（R4）；0 表示没有丢弃。
     partial_dropped: u32,
+    /// data 声明的完整帧数（长度为占位值或尚未读到 data 时为 `None`）。
+    declared_frames: Option<u64>,
     /// 已消耗的总字节数（用于报告源的实际长度）。
     offset: u64,
     /// 已解码未取走样本：`pcm[start..end]`。
@@ -330,6 +332,7 @@ impl WavDecoder {
             data_placeholder_read: NONE,
             riff_actual: NONE,
             partial_dropped: 0,
+            declared_frames: None,
             offset: 0,
             start: 0,
             end: 0,
@@ -389,6 +392,12 @@ impl WavDecoder {
     }
 
     /// EXTENSIBLE 的声道掩码；格式码 1 或头部未解析时为 `None`。
+    /// 文件头声明的总帧数（data 长度 ÷ 块对齐，不足一帧的尾部不计）。长度为占位值或尚未读到
+    /// data 时为 `None`。来自不可信的文件头，只用于显示时长；源比声明短时实际帧数更少。
+    pub fn declared_frames(&self) -> Option<u64> {
+        self.declared_frames
+    }
+
     pub fn channel_mask(&self) -> Option<u32> {
         self.layout.and_then(|l| l.channel_mask)
     }
@@ -518,6 +527,7 @@ impl WavDecoder {
                     // R4：不足一帧的尾部在完整帧之后丢弃。
                     let tail = u32::try_from(size as usize % layout.block_align)
                         .map_err(|_| DecodeError::Malformed)?;
+                    self.declared_frames = Some(u64::from(size - tail) / layout.block_align as u64);
                     State::Data {
                         declared: size,
                         remaining: size - tail,
@@ -871,6 +881,7 @@ impl Decoder for WavDecoder {
         self.data_placeholder_read = NONE;
         self.riff_actual = NONE;
         self.partial_dropped = 0;
+        self.declared_frames = None;
         self.offset = 0;
         self.start = 0;
         self.end = 0;

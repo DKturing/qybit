@@ -402,6 +402,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "qy-ui"
+version = "0.0.0"
+dependencies = [
+ "qy-codec-auto",
+ "qy-codec-flac",
+ "qy-core",
+ "qy-player",
+]
+
+[[package]]
 name = "qybit"
 version = "0.0.0"
 dependencies = [

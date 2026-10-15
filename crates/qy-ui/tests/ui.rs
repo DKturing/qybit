@@ -1,0 +1,314 @@
+//! GUI T2：界面模型在假后端上的完整会话（真实核心、自有解码、pack 与渲染循环，只模拟设备），
+//! 以及文件头读取与文件夹扫描。期望值来自夹具的独立参考（.meta / .expect）与测试自己写入的 WAV。
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use qy_player::signal::write_test_wav;
+use qy_player::testing::{FakeBackend, FakeDevice};
+use qy_ui::probe::{Prober, scan_folder};
+use qy_ui::{Kind, Probe, Ui, text};
+
+const ALL: [(u8, u8); 4] = [(16, 16), (24, 24), (32, 24), (32, 32)];
+
+fn root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+fn temp(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("qybit-ui-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    if let Err(e) = std::fs::create_dir_all(&d) {
+        panic!("{e}");
+    }
+    d
+}
+
+/// 写入 `n` 首 44.1 kHz 双声道 16 位、各 `frames` 帧的 WAV。
+fn tracks(dir: &Path, n: usize, frames: u64) -> Vec<PathBuf> {
+    (0..n)
+        .map(|k| {
+            let p = dir.join(format!("{k:02}.wav"));
+            if let Err(e) = write_test_wav(&p, 44_100, 2, 16, frames) {
+                panic!("{e}");
+            }
+            p
+        })
+        .collect()
+}
+
+fn ui_with(backend: FakeBackend) -> Ui {
+    Ui::new(
+        move |_device: Option<&str>| Ok(backend.clone()),
+        Arc::new(|| {}),
+    )
+}
+
+fn clock_backend() -> FakeBackend {
+    let mut b = FakeBackend::new(&ALL);
+    b.device = FakeDevice::Clock;
+    b
+}
+
+/// 处理事件直到 `done` 成立，至多 `secs` 秒。
+fn until(ui: &mut Ui, secs: u64, mut done: impl FnMut(&mut Ui) -> bool) -> bool {
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(secs) {
+        ui.wait(Duration::from_millis(20));
+        if done(ui) {
+            return true;
+        }
+    }
+    false
+}
+
+fn all_probed(ui: &mut Ui) -> bool {
+    ui.model.entries.iter().all(|e| e.probe != Probe::Pending)
+}
+
+const TENTH: u64 = 4_410;
+
+/// 文件头读取：格式与声明的帧数与独立参考一致；无法识别的文件给出原因。
+#[test]
+fn probe_reads_format_and_declared_frames() {
+    let mut p = match Prober::new() {
+        Ok(p) => p,
+        Err(e) => panic!("{e}"),
+    };
+    // FLAC：参考来自 .meta（flac 命令行生成时记录）。
+    let flac = p.probe(&root().join("qy-codec-flac/tests/fixtures/cli_16_3ch_48k.flac"));
+    let Ok(info) = flac else { panic!("{flac:?}") };
+    assert_eq!(info.kind, Kind::Flac);
+    assert_eq!(
+        (
+            info.format.sample_rate(),
+            info.format.channels(),
+            info.format.bits()
+        ),
+        (48_000, 3, 16)
+    );
+    assert_eq!(info.frames, Some(6000));
+    assert_eq!(text::format_column(&info), "FLAC 48 kHz 16 位 3 声道");
+
+    // AIFF-C：.expect 的样本总数 = 帧数 × 声道数。
+    let aiff = root().join("qy-codec-aiff/tests/fixtures/aifc_none_16_stereo");
+    let expect = std::fs::read_to_string(aiff.with_extension("expect")).unwrap_or_default();
+    let samples: u64 = expect
+        .lines()
+        .find_map(|l| l.strip_prefix("samples "))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+    let r = p.probe(&aiff.with_extension("aiff"));
+    let Ok(info) = r else { panic!("{r:?}") };
+    assert_eq!(info.kind, Kind::Aiff);
+    assert_eq!(info.frames.map(|f| f * 2), Some(samples));
+
+    // WAV：测试自己写入的文件。
+    let dir = temp("probe");
+    let w = tracks(&dir, 1, 88_200);
+    let r = p.probe(&w[0]);
+    let Ok(info) = r else { panic!("{r:?}") };
+    assert_eq!((info.kind, info.frames), (Kind::Wav, Some(88_200)));
+    assert_eq!(text::columns(&Probe::Ready(info), "00.wav")[1], "0:02");
+
+    // 无法识别与不存在的文件。
+    let bad = dir.join("bad.wav");
+    let _ = std::fs::write(&bad, b"not audio at all");
+    let r = p.probe(&bad);
+    assert!(r.as_ref().is_err_and(|e| e.contains("无法识别")), "{r:?}");
+    assert!(p.probe(&dir.join("missing.wav")).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 文件夹扫描：递归、只收音频扩展名（不区分大小写）、按路径排序。
+#[test]
+fn folder_scan_is_recursive_filtered_and_sorted() {
+    let dir = temp("scan");
+    let sub = dir.join("b");
+    let _ = std::fs::create_dir_all(&sub);
+    for f in ["z.flac", "a.WAV", "notes.txt", "b/c.aiff", "b/d.mp3"] {
+        let _ = std::fs::write(dir.join(f), b"x");
+    }
+    let found = scan_folder(&dir);
+    let names: Vec<String> = found
+        .iter()
+        .filter_map(|p| p.strip_prefix(&dir).ok())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    assert_eq!(names, ["a.WAV", "b/c.aiff", "z.flac"]);
+
+    // 经界面加入文件夹：在读取线程扫描，结果加入列表并读取文件头（内容无效时为“无法播放”）。
+    let mut ui = ui_with(clock_backend());
+    ui.add_paths(vec![dir.clone()]);
+    assert!(until(&mut ui, 10, |u| u.model.entries.len() == 3 && all_probed(u)));
+    assert!(
+        ui.model
+            .entries
+            .iter()
+            .all(|e| matches!(e.probe, Probe::Failed(_)))
+    );
+    drop(ui);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 完整会话与控制：播放、暂停、恢复、下一首、按列表跳曲，结束后报告无欠载；暂停期间状态
+/// 显示暂停；正在播放的标记跟随曲目。
+#[test]
+fn session_controls_follow_engine_rules() {
+    let dir = temp("ctl");
+    let files = tracks(&dir, 4, 13_230);
+    let mut ui = ui_with(clock_backend());
+    ui.add_paths(files);
+    assert!(until(&mut ui, 10, all_probed));
+    ui.play_from(0);
+    assert_eq!(text::status_line(&ui.model), "正在打开…");
+    let mut stage = 0;
+    let mut saw_paused = false;
+    let ok = until(&mut ui, 30, |u| {
+        let Some(s) = u.model.playing.as_ref().and_then(|p| p.status) else {
+            return u.model.playing.is_none();
+        };
+        saw_paused |= s.paused && text::status_line(&u.model).starts_with('⏸');
+        match stage {
+            0 if s.track == 0 && s.position_frames >= TENTH => {
+                u.pause();
+                stage = 1;
+            }
+            1 if s.paused && s.paused_frames >= TENTH => {
+                u.resume();
+                stage = 2;
+            }
+            2 if !s.paused && s.position_frames >= 2 * TENTH => {
+                u.next();
+                stage = 3;
+            }
+            3 if s.track == 1 && s.position_frames >= TENTH => {
+                assert_eq!(u.model.playing_entry(), Some(u.model.entries[1].id));
+                u.play_from(3);
+                stage = 4;
+            }
+            _ => {}
+        }
+        false
+    });
+    assert!(ok, "会话未结束");
+    assert_eq!(stage, 4);
+    assert!(saw_paused);
+    let Some(o) = ui.model.last.clone() else {
+        panic!("无结果")
+    };
+    assert!(
+        o.finished && o.underrun_events == 0 && o.user_skips == 2,
+        "{}",
+        o.summary
+    );
+    assert!(o.summary.contains("暂停：送出静音"), "{}", o.summary);
+    assert_eq!(text::outcome_line(&o), "播放完成（有曲目被切走，没有放完）");
+    assert!(ui.model.log.iter().any(|l| l.contains("▶ 曲目 1/4")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 界面线程卡顿（两次各 1 秒不处理事件）不影响播放：无欠载，严格路径完整。
+#[test]
+fn ui_stall_does_not_cause_underrun() {
+    let dir = temp("stall");
+    let files = tracks(&dir, 2, 66_150);
+    let mut ui = ui_with(clock_backend());
+    ui.add_paths(files);
+    assert!(until(&mut ui, 10, all_probed));
+    ui.play_from(0);
+    std::thread::sleep(Duration::from_secs(1));
+    ui.pump();
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(until(&mut ui, 30, |u| u.model.playing.is_none()));
+    let Some(o) = ui.model.last.clone() else {
+        panic!("无结果")
+    };
+    assert!(o.strict_intact && o.underrun_events == 0, "{}", o.summary);
+    assert!(text::status_line(&ui.model).starts_with("播放完成：严格路径"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 停止后立即开始新会话：旧会话的状态与结束报告不显示为当前状态；停止的会话标记为中断。
+#[test]
+fn stop_then_new_session_ignores_stale_events() {
+    let dir = temp("stale");
+    let files = tracks(&dir, 2, 22_050);
+    let mut ui = ui_with(clock_backend());
+    ui.add_paths(files);
+    assert!(until(&mut ui, 10, all_probed));
+    ui.play_from(0);
+    assert!(until(&mut ui, 10, |u| u
+        .model
+        .playing
+        .as_ref()
+        .and_then(|p| p.status)
+        .is_some_and(|s| s.position_frames >= TENTH)));
+    ui.stop();
+    ui.model.entries.remove(0);
+    ui.play_from(0);
+    let session = ui.model.playing.as_ref().map(|p| p.session);
+    assert!(until(&mut ui, 30, |u| u.model.playing.is_none()));
+    let Some(o) = ui.model.last.clone() else {
+        panic!("无结果")
+    };
+    assert!(o.strict_intact, "新会话应完整：{}", o.summary);
+    assert_eq!(session, Some(1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 输出设备失效与设备不可用：结束报告给出原因，界面回到非播放状态。
+#[test]
+fn device_failures_are_reported() {
+    let dir = temp("dev");
+    let files = tracks(&dir, 1, 22_050);
+    let mut b = FakeBackend::new(&ALL);
+    b.invalidate = Some((0, 5));
+    let mut ui = ui_with(b);
+    ui.add_paths(files.clone());
+    ui.play_from(0);
+    assert!(until(&mut ui, 30, |u| u.model.playing.is_none()));
+    let o = ui.model.last.clone();
+    assert!(o.as_ref().is_some_and(|o| o.device_error), "{o:?}");
+    assert_eq!(text::status_line(&ui.model), "输出设备错误：播放已停止");
+
+    let mut ui = Ui::new(
+        |_d: Option<&str>| -> Result<FakeBackend, String> { Err("找不到设备".into()) },
+        Arc::new(|| {}),
+    );
+    ui.add_paths(files);
+    ui.play_from(0);
+    assert!(until(&mut ui, 10, |u| u.model.playing.is_none()));
+    assert_eq!(
+        text::status_line(&ui.model),
+        "错误：无法使用输出设备：找不到设备"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 播放中关闭界面：后台线程停止并退出，不挂起。
+#[test]
+fn dropping_ui_while_playing_stops_threads() {
+    let dir = temp("drop");
+    let files = tracks(&dir, 1, 441_000);
+    let mut ui = ui_with(clock_backend());
+    ui.add_paths(files);
+    ui.play_from(0);
+    let t0 = Instant::now();
+    drop(ui);
+    assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn text_helpers() {
+    assert_eq!(text::khz(44_100), "44.1");
+    assert_eq!(text::khz(48_000), "48");
+    assert_eq!(text::khz(22_050), "22.05");
+    assert_eq!(text::khz(352_800), "352.8");
+    assert_eq!(text::clock(59), "0:59");
+    assert_eq!(text::clock(3_725), "1:02:05");
+    assert_eq!(text::duration(441_000, 44_100), "0:10");
+    assert_eq!(text::duration(1, 0), "");
+}

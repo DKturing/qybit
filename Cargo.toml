@@ -10,6 +10,7 @@ members = [
     "crates/qy-pcm-format",
     "crates/qy-host-sim",
     "crates/qy-player",
+    "crates/qy-ui",
     "crates/qy-host-wasapi",
     "crates/qy-host-alsa",
     "crates/qy-host-embedded",
@@ -36,6 +37,7 @@ qy-codec-auto = { path = "crates/qy-codec-auto" }
 qy-pcm-format = { path = "crates/qy-pcm-format" }
 qy-host-sim = { path = "crates/qy-host-sim" }
 qy-player = { path = "crates/qy-player" }
+qy-ui = { path = "crates/qy-ui" }
 qy-host-wasapi = { path = "crates/qy-host-wasapi" }
 qy-host-alsa = { path = "crates/qy-host-alsa" }
 # 成熟 SPSC 环形队列：存放已 pack 的完整设备帧字节（AGENTS §2，不自行编写无锁缓冲）。

@@ -343,6 +343,12 @@ impl AiffDecoder {
     }
 
     /// 形式类型（FORM 头解析之后有效）。
+    /// COMM 声明的总帧数（`numSampleFrames`）；尚未读到 COMM 时为 `None`。来自不可信的文件头，
+    /// 只用于显示时长。
+    pub fn declared_frames(&self) -> Option<u64> {
+        self.comm_seen.then_some(u64::from(self.frames))
+    }
+
     pub fn form(&self) -> Form {
         self.form
     }
