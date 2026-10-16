@@ -11,8 +11,8 @@
 | Microsoft Learn `WAVEFORMATEX`（mmreg.h）：`WAVE_FORMAT_IEEE_FLOAT`、`nBlockAlign`、`cbSize` | F3 浮点 WAV 识别 | `MicrosoftDocs/sdk-api` 分支 `docs`，`sdk-api-src/content/mmreg/ns-mmreg-waveformatex.md`（2026-10-15 取得） | SHA-256 `6277cc630d2632a7abace70ae405399f14b76c56dba15943bb834363b9dc305b` |
 | Microsoft Learn `WAVEFORMATEXTENSIBLE`：`KSDATAFORMAT_SUBTYPE_IEEE_FLOAT` 与格式码 3 的对应 | F3 EXTENSIBLE 浮点、WASAPI 浮点协商 | 同上，`ns-mmreg-waveformatextensible.md` | SHA-256 `7965c8d27febd36549bf145567b5eeb51c39c4170d0f6f9a95954983157370cd` |
 | alsa-lib `include/pcm.h`：`SND_PCM_FORMAT_FLOAT_LE`（14）、`FLOAT64_LE`（16）及大端码 | F3 ALSA 浮点格式 | `alsa-project/alsa-lib` 标签 `v1.2.14` | SHA-256 `e60b398dde8a09b815ebc90ced65a370dedc34c6601894e8f084456c9c72dded` |
-| IEEE 754-2019（binary32 / binary64） | F3 位模式与转换 | **未取得**（需要原文，请用户提供）；实现按通行定义，与 Rust `from_bits` 及 ffmpeg 交叉核对 | — |
-| IBM/Microsoft《Multimedia Programming Interface and Data Specifications 1.0》（1991）RIFF WAVE 部分 | F3 非 PCM 格式的 `fact` chunk | **未取得**（取原文时被代理拒绝，403，请用户提供）；`fact` 规则按任务卡执行 | — |
+| IEEE Std 754-2019《IEEE Standard for Floating-Point Arithmetic》（Techstreet 红线版，含 2008 版以来的修改标记） | F3 位模式（§3.4 编码、Table 3.5 参数）与舍入（§4.3.1 roundTiesToEven） | 用户提供的 PDF，45 页，只含到 §5.1 左右；§5.8（浮点转整数）与 §6.2（NaN）不在其中 | SHA-256 `2a7472bd3b4bf20215163692461798c3687758cf8091783c68f6933389b6302e` |
+| IBM/Microsoft《Multimedia Programming Interface and Data Specifications 1.0》，1991-08 | RIFF 结构、WAVE（§3 “Waveform Audio File Format”）、`fact` chunk（3-26 页） | 用户提供的 PDF，97 页 | SHA-256 `d2340df3978259b366cbd5acaff049bb3fe81d0d345335a946ee25e4f8b167fa` |
 | ID3v2.4.0 结构规范 §3.1 | ID3v2 标签跳过 | id3.org（通过 RFC 9639 的引用核对出处） | — |
 
 **核对记录**：
@@ -20,3 +20,16 @@
 - **AIFF 1.3**：修订历史为 1.1（1988-01-21）、1.2（1988-06-17）、1.3（1989-01-04）。
 - **AIFF-C**：正文只定义 `NONE`、`ACE2`、`ACE8`、`MAC3`、`MAC6` 五种压缩类型；`sowt`、`twos`、`raw `、`fl32` 等是之后由其他文档引入的扩展。
 - **Microsoft `WAVEFORMATEX`（F3）**：文档写“`wBitsPerSample` should be set to 32”（格式码 3），只给出 32 位；64 位浮点按任务卡 §2 接受。`WAVEFORMATEXTENSIBLE` 下 `wBitsPerSample` 为容器位宽，可以是 8 的任意倍数；ffmpeg 6.1 写出的 64 位浮点 WAV 即为 EXTENSIBLE（容器 64 位、子格式 IEEE_FLOAT，2026-10-15 核对）。
+- **IEEE 754-2019（F3）**：§3.4 的编码规则与实现一致，逐项核对如下。
+  - 偏置指数 E = 2^w − 1 时，T ≠ 0 为 NaN，T = 0 为 ±∞；
+  - 1 ≤ E ≤ 2^w − 2 为正规数，值为 (−1)^S × 2^(E−bias) × (1 + 2^(1−p) × T)；
+  - E = 0 时，值为 (−1)^S × 2^emin × (0 + 2^(1−p) × T)，emin = 1 − bias，包括 ±0 与次正规数；
+  - Table 3.5 的参数：binary32 为 w = 8、t = 23、bias = 127；binary64 为 w = 11、t = 52、bias = 1023；
+  - §4.3.1 roundTiesToEven 与转换的舍入规则一致：两个最近值等距时取最低位为偶数者。
+  - 转换中“乘以 2^(V−1) 再舍入、限幅”是本项目的定义（任务卡 §4），不是 §5.8 的 convertToInteger 运算本身，两者的舍入方向相同。
+  - 这份 PDF 不含 §5.8 与 §6.2，相关条款没有逐字核对。
+- **RIFF 1991（F3）**：
+  - 原文的 `fact` 规则（3-26 页）是：“The fact chunk is required if the waveform data is contained in a wavl LIST chunk and for all compressed audio formats. The chunk is not required for PCM files using the data chunk format.”；
+  - 原文定义的格式类别只有 `WAVE_FORMAT_PCM`（0x0001）和 IBM 的三种专有格式，没有 `WAVE_FORMAT_IEEE_FLOAT`（0x0003）；
+  - 因此任务卡 §0 写的“非 PCM 格式需要 `fact`”在 1991 原文中没有依据：原文只要求压缩格式有 `fact`，而 IEEE 浮点不是压缩格式；
+  - 当前实现按任务卡对浮点 WAV 要求 `fact`，比原文严格。是否放宽待用户决定（见 [f3-float.md](f3-float.md) §7）。

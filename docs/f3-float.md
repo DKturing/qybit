@@ -155,8 +155,8 @@ WASAPI 与 ALSA 真机上的浮点独占播放、MCU 实物都未运行（见 §
   - WASAPI 独占浮点（端点是否接受 `IEEE_FLOAT` 取决于驱动）与开启转换后的整数回退；
   - ALSA 真机的 `FLOAT_LE`；
   - MCU 实物。
-- **规范原文未取得**：IEEE 754-2019 与 RIFF 1991（《Multimedia Programming Interface and Data Specifications 1.0》）。
-  - `fact` 规则按任务卡执行；binary32 / binary64 的编码按通行定义实现，并与 Rust `f32::from_bits` / `f64::from_bits` 及 ffmpeg 交叉核对；
-  - 请用户提供原文后补核。
+- **规范原文核对**（用户 2026-10-16 提供，见 [specs.md](specs.md)）：
+  - IEEE 754-2019 §3.4 的编码规则、Table 3.5 的参数与 §4.3.1 roundTiesToEven 都与实现一致；所给 PDF 不含 §5.8 与 §6.2；
+  - RIFF 1991 原文只要求压缩格式（以及 `wavl` LIST）有 `fact`，也没有定义格式码 3。所以“浮点 WAV 必须有 `fact`”是任务卡的规定，比原文严格，原文中没有依据。当前实现仍按任务卡拒绝缺少 `fact` 的浮点 WAV，是否放宽待用户决定。
 - **`fact` 无容错**：缺少或不一致一律拒绝，以后按真实样例逐条加。
 - **AIFF-C 的 `fl32` / `fl64`**：照旧按“规范之外的扩展”拒绝（任务卡 §8 决定 1）。
