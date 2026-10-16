@@ -32,9 +32,10 @@ fn main() -> ExitCode {
             out,
             rate,
             bits,
+            float,
             seconds,
             freq,
-        }) => report(diag::tone(&out, rate, bits, seconds, freq)),
+        }) => report(diag::tone(&out, rate, bits, float, seconds, freq)),
         Ok(cmd) => run(cmd),
     }
 }

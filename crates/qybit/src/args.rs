@@ -10,8 +10,9 @@ pub const USAGE: &str = "\
   qybit matrix --device <设备> [--out <目录>]
                                              运行设备格式矩阵，写出 JSON/CSV 报告
   qybit decode <输入> <输出.wav>              诊断：自有解码 + pack 写成标准 WAV，可用任何播放器试听
-  qybit tone <输出.wav> [--rate 44100] [--bits 16|24|32] [--seconds 5] [--freq 1000]
-                                             诊断：写一个正弦测试音 WAV
+  qybit tone <输出.wav|.aiff> [--rate 44100] [--bits 16|24|32 | --float 32|64] [--seconds 5] [--freq 1000]
+                                             诊断：写一个双声道正弦测试音（约 −12 dBFS）；输出文件扩展名为
+                                             .aif/.aiff 时写 AIFF（整数），否则写 WAV；--float 写 IEEE 浮点 WAV
   qybit --version | --help
 
 设备：Windows 为 WASAPI 端点 ID（独占模式）；Linux 为 ALSA hw:卡,设备 或 hw:CARD=名称,DEV=n
@@ -56,7 +57,10 @@ pub enum Command {
     Tone {
         out: PathBuf,
         rate: u32,
+        /// 整数位数 16 / 24 / 32；`float` 时为浮点位宽 32 / 64。
         bits: u8,
+        /// 写 IEEE 浮点 WAV（F3）。
+        float: bool,
         seconds: f64,
         freq: f64,
     },
@@ -89,6 +93,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 _ => return Err("tone 需要输出文件：qybit tone <输出.wav>".into()),
             };
             let (mut rate, mut bits, mut seconds, mut freq) = (44_100u32, 16u8, 5.0f64, 1000.0f64);
+            let (mut float, mut int_bits) = (false, false);
             while let Some(a) = it.next() {
                 let v = value(&mut it, a)?;
                 let bad = || format!("{a} 的值无效：{v}");
@@ -100,7 +105,16 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                             "24" => 24,
                             "32" => 32,
                             _ => return Err(bad()),
-                        }
+                        };
+                        int_bits = true;
+                    }
+                    "--float" => {
+                        bits = match v.as_str() {
+                            "32" => 32,
+                            "64" => 64,
+                            _ => return Err(bad()),
+                        };
+                        float = true;
                     }
                     "--seconds" => {
                         seconds = v
@@ -119,10 +133,14 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                     x => return Err(format!("未知参数：{x}")),
                 }
             }
+            if float && int_bits {
+                return Err("--bits 与 --float 只能选一个".into());
+            }
             Ok(Command::Tone {
                 out,
                 rate,
                 bits,
+                float,
                 seconds,
                 freq,
             })
@@ -311,10 +329,24 @@ mod tests {
                 out: "t.wav".into(),
                 rate: 48_000,
                 bits: 24,
+                float: false,
                 seconds: 5.0,
                 freq: 1000.0
             })
         );
+        assert_eq!(
+            p(&["tone", "f.wav", "--float", "64"]),
+            Ok(Command::Tone {
+                out: "f.wav".into(),
+                rate: 44_100,
+                bits: 64,
+                float: true,
+                seconds: 5.0,
+                freq: 1000.0
+            })
+        );
+        assert!(p(&["tone", "f.wav", "--float", "16"]).is_err());
+        assert!(p(&["tone", "f.wav", "--float", "32", "--bits", "16"]).is_err());
         assert!(p(&["tone", "t.wav", "--bits", "20"]).is_err());
         assert!(p(&["tone"]).is_err());
     }
