@@ -9,7 +9,7 @@ use std::time::Duration;
 use qy_core::Fault;
 use qy_core::engine::EngineFault;
 use qy_player::report::{AttemptRecord, fault_text};
-use qy_player::{Backend, Command, PlaybackReport, Status};
+use qy_player::{Backend, Command, CommandSender, PlaybackReport, Status};
 
 use crate::probe::{self, Probe, ProbeRequest};
 use crate::session::{self, Notify, PlayRequest, UiEvent};
@@ -93,7 +93,7 @@ pub struct Playing {
     pub entries: Vec<u64>,
     /// 会话开始前收到的命令（会话开始后按顺序发出）。
     pending: Vec<Command>,
-    commands: Option<Sender<Command>>,
+    commands: Option<CommandSender>,
     /// 最近的状态快照。
     pub status: Option<Status>,
     /// 已请求停止。

@@ -259,6 +259,8 @@ pub struct PlaybackReport<A> {
     /// 定位改为顺序解码的曲目（解码器不支持定位或音源不可定位；结果同样精确）。
     pub sequential_seeks: Vec<u32>,
     pub protocol_errors: u32,
+    /// 生产端休眠后被唤醒的次数（L1：渲染线程、命令或到期唤醒；含操作系统的虚假唤醒）。
+    pub producer_wakeups: u64,
 }
 
 impl<A> Default for PlaybackReport<A> {
@@ -280,6 +282,7 @@ impl<A> Default for PlaybackReport<A> {
             user_seeks: 0,
             sequential_seeks: Vec::new(),
             protocol_errors: 0,
+            producer_wakeups: 0,
         }
     }
 }

@@ -66,7 +66,7 @@ pub fn render<A: PacketApi, P: ThreadPriority>(
     ctl: &RenderControl,
     cfg: PacketConfig,
 ) -> RenderReport {
-    with_priority(priority, |report| {
+    with_priority(priority, ctl, |report| {
         let mut l = Loop {
             api,
             consumer,
@@ -136,7 +136,9 @@ impl<A: PacketApi> Loop<'_, A> {
                     .watermark
                     .observe(self.consumer.available_frames() as u64);
             }
-            self.consumer.pop_frames(buf).unwrap_or(0)
+            let got = self.consumer.pop_frames(buf).unwrap_or(0);
+            self.ctl.space_freed(self.consumer.available_frames());
+            got
         } else {
             0
         };

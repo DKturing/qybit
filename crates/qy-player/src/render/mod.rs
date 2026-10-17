@@ -43,6 +43,57 @@ pub struct RenderControl {
     pub underrun_frames: AtomicU64,
     /// 本流的预填帧数（生产端在启动渲染前写入），用于水位统计的低水位线（R1）。
     pub prefill_frames: AtomicU64,
+    /// 生产端线程（L1）：渲染循环在生产端等待空间、队列降到 [`Self::wake_below_frames`] 以下时，
+    /// 以及循环结束时唤醒它（`Thread::unpark`，不阻塞、不分配）。`None` 时不唤醒。
+    pub producer: Option<std::thread::Thread>,
+    /// 生产端正在等待队列空间（L1）：生产端置位后休眠；渲染循环清除并唤醒，每次等待至多唤醒一次。
+    pub space_wanted: AtomicBool,
+    /// 唤醒生产端的队列帧数阈值（L1，生产端在启动渲染前写入）。
+    pub wake_below_frames: AtomicU64,
+    /// 渲染循环已结束（L1）：结束时先置位再唤醒生产端，生产端据此不再等待。
+    pub ended: AtomicBool,
+}
+
+impl RenderControl {
+    /// 由生产端线程创建：渲染循环按 [`Self::space_freed`] 与结束时唤醒该线程。
+    pub fn for_producer(producer: std::thread::Thread) -> Self {
+        Self {
+            producer: Some(producer),
+            ..Self::default()
+        }
+    }
+
+    /// 渲染循环取数后调用（L1）：队列只剩 `queued` 帧、不超过阈值且生产端在等待空间时唤醒它。
+    /// 未在等待时只有两次原子读。
+    pub fn space_freed(&self, queued: usize) {
+        if queued as u64 <= self.wake_below_frames.load(Ordering::Relaxed)
+            && self.space_wanted.load(Ordering::Relaxed)
+            && self.space_wanted.swap(false, Ordering::AcqRel)
+        {
+            self.wake();
+        }
+    }
+
+    /// 渲染循环结束（L1）：置位后唤醒生产端。
+    fn end(&self) {
+        self.ended.store(true, Ordering::Release);
+        self.wake();
+    }
+
+    fn wake(&self) {
+        if let Some(t) = &self.producer {
+            t.unpark();
+        }
+    }
+}
+
+/// 渲染循环结束时（含 panic 展开）通知生产端。
+struct EndGuard<'a>(&'a RenderControl);
+
+impl Drop for EndGuard<'_> {
+    fn drop(&mut self) {
+        self.0.end();
+    }
 }
 
 /// 平台 API 操作。
@@ -211,8 +262,10 @@ impl RenderReport {
 /// 注册优先级、运行循环、撤销优先级（正常、停止、错误路径都撤销）。
 fn with_priority<P: ThreadPriority>(
     priority: &mut P,
+    ctl: &RenderControl,
     run: impl FnOnce(&mut RenderReport) -> RenderEnd,
 ) -> RenderReport {
+    let _end = EndGuard(ctl);
     let registered = priority.register();
     let mut report = RenderReport::new(PriorityRecord {
         label: priority.label(),

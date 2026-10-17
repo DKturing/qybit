@@ -94,7 +94,7 @@ pub fn render<A: WriteApi, P: ThreadPriority>(
     ctl: &RenderControl,
     cfg: WriteConfig,
 ) -> RenderReport {
-    with_priority(priority, |report| {
+    with_priority(priority, ctl, |report| {
         let mut l = Loop {
             api,
             consumer,
@@ -276,6 +276,9 @@ impl<A: WriteApi> Loop<'_, A> {
         }
         if left == 0 {
             out.full = true;
+        }
+        if out.frames > 0 {
+            self.ctl.space_freed(self.consumer.available_frames());
         }
         Ok(out)
     }

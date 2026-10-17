@@ -8,11 +8,14 @@ use std::fs::File;
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use qy_core::engine::{ChannelPolicy, FloatPolicy};
-use qy_player::{Backend, Command, HostResources, PlayControl, Status, TrackSource, play_with};
+use qy_player::{
+    Backend, CommandSender, HostResources, PlayControl, Status, TrackSource, command_channel,
+    play_with,
+};
 
 use crate::model::Outcome;
 use crate::probe::TrackInfo;
@@ -35,7 +38,7 @@ pub enum UiEvent {
     /// 会话开始：此后的控制命令经 `commands` 发送。
     Started {
         session: u64,
-        commands: Sender<Command>,
+        commands: CommandSender,
     },
     Status {
         session: u64,
@@ -182,7 +185,7 @@ pub(crate) fn run<B, F>(
                 continue;
             }
         };
-        let (tx, rx) = channel();
+        let (tx, rx) = command_channel();
         if !send(UiEvent::Started {
             session,
             commands: tx,

@@ -15,13 +15,19 @@
 //! 播放控制（GUI T2）：[`PlayControl::commands`] 接收暂停、恢复、上一首、下一首、跳曲与停止，
 //! 转交引擎执行（规则在引擎中，CLI 与 GUI 共用）；暂停时渲染线程送静音、不取队列，静音单独
 //! 计数，不算欠载。[`PlayControl::on_status`] 给出节流后的状态快照（界面显示用）。
+//!
+//! 按事件等待（L1）：生产端不轮询。队列满时休眠，渲染线程取数使队列降到一半时唤醒它；排空时
+//! 渲染线程结束即唤醒；命令经 [`command_channel`] 发送时唤醒；播放中有状态回调时按快照间隔醒来。
+//! 暂停时只等命令（另有 1 s 安全网）；有停止标志（Ctrl+C）时每 100 ms 查看一次。
 
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, SendError, Sender, TryRecvError, channel};
+use std::sync::{Mutex, PoisonError};
+use std::thread::Thread;
 use std::time::{Duration, Instant};
 
 use qy_core::engine::{ChannelPolicy, FloatPolicy, HostAction, HostEvent, Poll, Wait};
@@ -114,6 +120,56 @@ pub enum Command {
     FloatToInt(bool),
 }
 
+/// 建立控制命令通道（L1）。发送端发出命令后唤醒正在等待的生产端，命令不靠轮询送达。
+pub fn command_channel() -> (CommandSender, CommandReceiver) {
+    let (tx, rx) = channel();
+    let producer = Arc::new(Mutex::new(None));
+    (
+        CommandSender {
+            tx,
+            producer: Arc::clone(&producer),
+        },
+        CommandReceiver { rx, producer },
+    )
+}
+
+/// 控制命令发送端（可克隆，跨线程使用）。
+#[derive(Debug, Clone)]
+pub struct CommandSender {
+    tx: Sender<Command>,
+    producer: Arc<Mutex<Option<Thread>>>,
+}
+
+impl CommandSender {
+    /// 发送命令并唤醒生产端（生产端尚未开始播放时，命令留在通道中，开始时读取）。接收端已丢弃时
+    /// 返回错误。
+    pub fn send(&self, cmd: Command) -> Result<(), SendError<Command>> {
+        self.tx.send(cmd)?;
+        let guard = self.producer.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(t) = guard.as_ref() {
+            t.unpark();
+        }
+        Ok(())
+    }
+}
+
+/// 控制命令接收端：交给 [`PlayControl::commands`]，播放期间登记生产端线程以便发送端唤醒。
+#[derive(Debug)]
+pub struct CommandReceiver {
+    rx: Receiver<Command>,
+    producer: Arc<Mutex<Option<Thread>>>,
+}
+
+impl CommandReceiver {
+    fn register(&self, thread: Option<Thread>) {
+        *self.producer.lock().unwrap_or_else(PoisonError::into_inner) = thread;
+    }
+
+    fn try_recv(&self) -> Result<Command, TryRecvError> {
+        self.rx.try_recv()
+    }
+}
+
 /// 播放状态快照（界面显示用；生产端线程生成，不涉及渲染线程的实时路径）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Status {
@@ -144,6 +200,8 @@ pub struct Status {
     /// 本次播放已执行的按操作定位次数（与报告的 `user_seeks` 一致）。界面据此判断状态快照是否已
     /// 反映最近一次定位（S1）。
     pub user_seeks: u32,
+    /// 本次播放生产端被唤醒的次数（L1，与报告的 `producer_wakeups` 一致；不触发快照）。
+    pub producer_wakeups: u64,
 }
 
 /// 播放时的实时输出、中断与控制。
@@ -153,8 +211,8 @@ pub struct PlayControl<'a> {
     pub on_line: &'a mut dyn FnMut(&str),
     /// 置位后停止播放：立即停止设备、丢弃队列（不排空），报告照常返回并标记为已中断。
     pub stop: Option<&'a AtomicBool>,
-    /// 控制命令（非阻塞读取；发送端断开不影响播放）。
-    pub commands: Option<&'a Receiver<Command>>,
+    /// 控制命令（[`command_channel`]；非阻塞读取，发送时唤醒生产端；发送端断开不影响播放）。
+    pub commands: Option<&'a CommandReceiver>,
     /// 从第几首开始播放（从 0 起；超出列表时直接结束）。上一首/跳曲仍可回到之前的曲目。
     pub first: u32,
     /// 状态快照：状态变化时立即调用，播放中至多每 [`STATUS_INTERVAL`] 调用一次，结束时调用
@@ -165,8 +223,12 @@ pub struct PlayControl<'a> {
 /// 播放中状态快照的最小间隔。
 pub const STATUS_INTERVAL: Duration = Duration::from_millis(100);
 
-/// 生产端等待队列空间时的休眠间隔。
-const FULL_QUEUE_SLEEP: Duration = Duration::from_millis(2);
+/// 生产端休眠的安全网（L1）：正常路径由渲染线程或命令唤醒，不靠超时。
+const PARK_SAFETY: Duration = Duration::from_secs(1);
+
+/// 有停止标志（[`PlayControl::stop`]，如 Ctrl+C）时的查看间隔：标志由信号处理置位，不能安全地
+/// 从那里唤醒生产端，故按此间隔查看。
+const STOP_POLL: Duration = Duration::from_millis(100);
 
 struct Player<'a, B: Backend, S: TrackSource> {
     backend: &'a mut B,
@@ -240,7 +302,13 @@ pub fn play_with<'a, B: Backend, S: TrackSource>(
         draining: false,
         formats: std::collections::VecDeque::new(),
     };
+    if let Some(rx) = p.ctl.commands {
+        rx.register(Some(std::thread::current()));
+    }
     p.run();
+    if let Some(rx) = p.ctl.commands {
+        rx.register(None);
+    }
     p.status(true);
     p.report
 }
@@ -412,6 +480,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
             skipped_tracks: u32::try_from(self.report.skipped.len()).unwrap_or(u32::MAX),
             samples_altered: u32::try_from(self.report.samples_altered.len()).unwrap_or(u32::MAX),
             user_seeks: self.report.user_seeks,
+            producer_wakeups: self.report.producer_wakeups,
         };
         let changed = self.last_status.is_none_or(|(prev, at)| {
             let discrete = |s: &Status| {
@@ -735,7 +804,11 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                     format,
                     plan: None,
                     ctl: {
-                        let ctl = RenderControl::default();
+                        let ctl = RenderControl::for_producer(std::thread::current());
+                        // L1：队列降到一半时唤醒生产端，填满后再等（重配置后队列为空）。
+                        let capacity = self.res.engine.sink().free_frames() as u64;
+                        ctl.wake_below_frames
+                            .store(capacity / 2, std::sync::atomic::Ordering::Release);
                         let prefill = self
                             .res
                             .engine
@@ -771,36 +844,61 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
         }
     }
 
-    /// 排空中：渲染线程结束后回收流并回报 `DeviceDrained`，否则短暂休眠。
+    /// 排空中：渲染线程结束后回收流并回报 `DeviceDrained`，否则休眠到渲染线程结束（它结束时
+    /// 唤醒生产端）、命令到达或状态到期。
     fn poll_drain(&mut self) {
-        let done = match self.active.as_ref().map(|a| &a.stream) {
-            Some(Stream::Running(r)) => r.is_finished(),
-            _ => true,
+        let done = match &self.active {
+            Some(a) => match &a.stream {
+                Stream::Running(r) => r.is_finished() || a.ctl.ended.load(Ordering::Acquire),
+                Stream::Pending(_) => true,
+            },
+            None => true,
         };
         if done {
             self.finish_stream(false);
             self.handle(HostEvent::DeviceDrained);
         } else {
-            std::thread::sleep(FULL_QUEUE_SLEEP);
+            self.park();
         }
     }
 
-    /// 队列满：启动尚未开始的流，或休眠等待渲染线程取走数据。
-    /// 渲染线程已结束（出错）时返回 false。
+    /// 队列满：启动尚未开始的流，或休眠到渲染线程取走数据使队列降到一半（L1）、命令到达或状态
+    /// 到期；暂停时不取队列，只等命令。渲染线程已结束（出错）时返回 false。
     fn wait_for_space(&mut self) -> bool {
         // 暂停时尚未启动的流在恢复之前不启动（引擎恢复时发出 StartDevice）。
         if !self.res.engine.is_paused() {
             self.start_if_pending();
         }
-        match self.active.as_ref().map(|a| &a.stream) {
-            Some(Stream::Running(r)) if r.is_finished() => {
+        if let Some(a) = &self.active {
+            if let Stream::Running(r) = &a.stream
+                && (r.is_finished() || a.ctl.ended.load(Ordering::Acquire))
+            {
                 self.report.device_error = true;
-                false
+                return false;
             }
-            _ => {
-                std::thread::sleep(FULL_QUEUE_SLEEP);
-                true
-            }
+            // 先登记再休眠：渲染线程在两者之间取走数据时，它的唤醒使下一次休眠立即返回。
+            a.ctl.space_wanted.store(true, Ordering::SeqCst);
+        }
+        self.park();
+        true
+    }
+
+    /// 休眠到被唤醒（渲染线程、命令发送端）或到期（L1）。到期时间：安全网 [`PARK_SAFETY`]；
+    /// 有停止标志时 [`STOP_POLL`]；播放中（未暂停）且有状态回调时为下一次状态快照的时刻。
+    fn park(&mut self) {
+        let mut timeout = PARK_SAFETY;
+        if self.ctl.stop.is_some() {
+            timeout = timeout.min(STOP_POLL);
+        }
+        if self.ctl.on_status.is_some() && !self.res.engine.is_paused() {
+            let due = self.last_status.map_or(Duration::ZERO, |(_, at)| {
+                STATUS_INTERVAL.saturating_sub(at.elapsed())
+            });
+            timeout = timeout.min(due);
+        }
+        if !timeout.is_zero() {
+            std::thread::park_timeout(timeout);
+            self.report.producer_wakeups += 1;
         }
     }
 
@@ -1758,6 +1856,161 @@ mod tests {
         }
     }
 
+    // —— L1：生产端按事件等待 ——
+
+    /// 带收到时刻的状态快照（控制线程读取）。
+    type Seen = Arc<Mutex<Vec<(Instant, Status)>>>;
+
+    /// 等待 `since` 之后第一张满足 `f` 的快照，返回从 `since` 起的时间与该快照（5 s 内没有时为
+    /// `None`）。
+    fn await_status(
+        seen: &Seen,
+        since: Instant,
+        f: impl Fn(&Status) -> bool,
+    ) -> Option<(Duration, Status)> {
+        let deadline = since + Duration::from_secs(5);
+        loop {
+            let hit = seen
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .find(|(at, s)| *at >= since && f(s))
+                .map(|(at, s)| (at.duration_since(since), *s));
+            if hit.is_some() || Instant::now() > deadline {
+                return hit;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// 命令在生产端休眠时到达（按真实时间消费的设备）：暂停后生产端不轮询，暂停 1 s 内只醒来
+    /// 安全网与恢复命令那几次（原先每 2 ms 一次，约 500 次）；恢复命令由发送端唤醒，不等安全网
+    /// 超时。之后暂停中停止同样立即生效，播放返回。
+    #[test]
+    fn commands_wake_parked_producer() {
+        let dir = track_dir("l1cmd");
+        let (path, _) = distinct_track(&dir, 21, 88_200);
+        let files = [path];
+        let Ok(mut res) = HostResources::new() else {
+            panic!("res");
+        };
+        let mut b = backend(&ALL, FakeDevice::Clock);
+        let (tx, rx) = command_channel();
+        let seen: Seen = Arc::default();
+        let stop_sent: Arc<Mutex<Option<Instant>>> = Arc::default();
+        let (report, measured) = std::thread::scope(|scope| {
+            let control = scope.spawn(|| {
+                let (seen, tx) = (&seen, &tx);
+                await_status(seen, Instant::now(), |s| s.position_frames >= TENTH)?;
+                let t = Instant::now();
+                tx.send(Command::Pause).ok()?;
+                let (pause, at_pause) = await_status(seen, t, |s| s.paused)?;
+                std::thread::sleep(Duration::from_secs(1));
+                let t = Instant::now();
+                tx.send(Command::Resume).ok()?;
+                let (resume, at_resume) = await_status(seen, t, |s| !s.paused)?;
+                let wakes = at_resume.producer_wakeups - at_pause.producer_wakeups;
+                let t = Instant::now();
+                tx.send(Command::Pause).ok()?;
+                await_status(seen, t, |s| s.paused)?;
+                std::thread::sleep(Duration::from_millis(300));
+                *stop_sent.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+                tx.send(Command::Stop).ok()?;
+                Some((pause, resume, wakes))
+            });
+            let report = play_with(
+                &mut b,
+                &mut res,
+                &mut Files(&files),
+                PlayControl {
+                    on_line: &mut |_| {},
+                    stop: None,
+                    commands: Some(&rx),
+                    first: 0,
+                    on_status: Some(&mut |s: &Status| {
+                        seen.lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push((Instant::now(), *s));
+                    }),
+                },
+            );
+            let returned = Instant::now();
+            (report, control.join().ok().flatten().map(|m| (m, returned)))
+        });
+        let Some(((pause, resume, wakes), returned)) = measured else {
+            panic!("控制线程未完成：{}", report.summary());
+        };
+        let stop = stop_sent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .map(|t| returned.duration_since(t));
+        assert!(report.interrupted, "{}", report.summary());
+        assert!(wakes <= 3, "暂停 1 s 内醒来 {wakes} 次");
+        // 不靠超时：远小于安全网 1 s。
+        for (what, d) in [
+            ("暂停", Some(pause)),
+            ("恢复", Some(resume)),
+            ("暂停中停止", stop),
+        ] {
+            assert!(
+                d.is_some_and(|d| d < Duration::from_millis(300)),
+                "{what}：{d:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 渲染线程结束时唤醒生产端：排空完成（曲目播完）与设备出错（生产端正在等队列空间）时，
+    /// 播放都在渲染线程结束后立即返回，不等安全网超时；播放中生产端只在队列降到一半时醒来。
+    #[test]
+    fn render_end_wakes_parked_producer() {
+        let dir = track_dir("l1end");
+        // 0.3 s 曲目：排空后返回（原先 2 ms 轮询，现在由渲染线程结束唤醒）。
+        let (short, data) = distinct_track(&dir, 22, 13_230);
+        let mut b = backend(&ALL, FakeDevice::Clock);
+        let t = Instant::now();
+        let r = play(&mut b, &mut res_or_panic(), &[short]);
+        let took = t.elapsed();
+        assert!(r.finished, "{}", r.summary());
+        check_output(&b.outputs()[0], &data);
+        assert!(took < Duration::from_millis(900), "{took:?}");
+
+        // 2 s、768 kHz / 32 位双声道：队列（3 072 000 字节）只容纳 0.5 s，生产端填满后休眠，
+        // 队列降到一半才醒来。
+        let long = dir.join("long768.wav");
+        assert!(crate::signal::write_test_wav(&long, 768_000, 2, 32, 1_536_000).is_ok());
+        let data = data_chunk(&std::fs::read(&long).unwrap_or_default());
+        let mut b = backend(&ALL, FakeDevice::Clock);
+        let r = play(&mut b, &mut res_or_panic(), std::slice::from_ref(&long));
+        assert!(r.finished, "{}", r.summary());
+        let outs = b.outputs();
+        check_output(&outs[0], &data);
+        // 唤醒及时：没有欠载（只靠 1 s 安全网时 0.5 s 的队列会取空）。
+        assert_eq!(outs[0].report.underrun_events, 0, "{}", r.summary());
+        assert!(
+            r.producer_wakeups > 0 && r.producer_wakeups < 40,
+            "2 s 播放醒来 {} 次",
+            r.producer_wakeups
+        );
+
+        // 设备在第 20 包失效（约 0.2 s）：生产端此时在等空间，渲染线程结束即唤醒它。
+        let mut b = backend(&ALL, FakeDevice::Clock);
+        b.invalidate = Some((0, 20));
+        let t = Instant::now();
+        let r = play(&mut b, &mut res_or_panic(), &[long]);
+        let took = t.elapsed();
+        assert!(r.device_error && !r.finished, "{}", r.summary());
+        assert!(took < Duration::from_millis(900), "{took:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn res_or_panic() -> HostResources {
+        let Ok(res) = HostResources::new() else {
+            panic!("res");
+        };
+        res
+    }
+
     // —— GUI T2：播放控制命令 ——
 
     /// 44.1 kHz 双声道 16 位、每个样本不同（`salt` 区分曲目）的 WAV；返回路径与 data 字节。
@@ -1802,12 +2055,12 @@ mod tests {
     fn run_ctl<N: Negotiator<Attempt = TestAttempt>>(
         backend: &mut FakeBackend<N>,
         files: &[PathBuf],
-        mut on: impl FnMut(&Status, &std::sync::mpsc::Sender<Command>),
+        mut on: impl FnMut(&Status, &CommandSender),
     ) -> (PlaybackReport<TestAttempt>, Vec<FakeOutput>, Vec<Status>) {
         let Ok(mut res) = HostResources::new() else {
             panic!("res");
         };
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = command_channel();
         let mut seen = Vec::new();
         let report = play_with(
             backend,
@@ -1878,7 +2131,7 @@ mod tests {
     fn run_source<S: TrackSource>(
         backend: &mut FakeBackend,
         source: &mut S,
-        mut on: impl FnMut(&Status, &std::sync::mpsc::Sender<Command>),
+        mut on: impl FnMut(&Status, &CommandSender),
     ) -> (
         PlaybackReport<TestAttempt>,
         Vec<FakeOutput>,
@@ -1888,7 +2141,7 @@ mod tests {
         let Ok(mut res) = HostResources::new() else {
             panic!("res");
         };
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = command_channel();
         let (mut seen, mut lines) = (Vec::new(), Vec::new());
         let report = play_with(
             backend,
@@ -1919,7 +2172,7 @@ mod tests {
         for seekable in [true, false] {
             let mut b = backend(&ALL, FakeDevice::Clock);
             let mut sent = false;
-            let on = |s: &Status, tx: &std::sync::mpsc::Sender<Command>| {
+            let on = |s: &Status, tx: &CommandSender| {
                 if !sent && s.position_frames >= TENTH {
                     sent = tx.send(Command::Seek(target)).is_ok();
                 }
