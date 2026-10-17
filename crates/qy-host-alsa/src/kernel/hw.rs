@@ -337,10 +337,7 @@ mod tests {
             b.checked_mul(2)
                 .is_none_or(|d| d > isize::MAX as usize - 4096)
         );
-        if usize::BITS == 64 {
-            assert_eq!(b, 1 << 62);
-        } else {
-            assert_eq!(b, 1 << 30);
-        }
+        // 64 位为 2^62，32 位为 2^30（4096 = 2^12 加倍到 LONG_MAX − 4096 以内的最大值）。
+        assert_eq!(b, 1usize << (usize::BITS - 2));
     }
 }

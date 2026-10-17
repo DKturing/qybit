@@ -160,12 +160,18 @@ pub fn device_bytes(samples: &[i32], n: u8, format: AlsaFormat) -> Vec<u8> {
     out
 }
 
-/// 报告目录：`QYBIT_REPORT_DIR`，默认 `target/qybit-report`。
+/// 报告目录：`QYBIT_REPORT_DIR`，默认 `target/qybit-report`；源码树不在本机时（CI 构件中的静态
+/// 测试程序拿到别的机器上运行）为当前目录下的 `qybit-report`。
 pub fn report_dir() -> PathBuf {
     std::env::var("QYBIT_REPORT_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/qybit-report")
+            let tree = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            if tree.is_dir() {
+                tree.join("../../target/qybit-report")
+            } else {
+                PathBuf::from("qybit-report")
+            }
         })
 }
 

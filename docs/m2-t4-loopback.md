@@ -1,5 +1,7 @@
 # M2 T4：两层数字回环记录
 
+> A1 更新（2026-10-17）：播放与回录改为直接使用内核 ALSA 接口；A 层只在 `--features alsa-lib` 下编译运行；B 层首次运行（QEMU 虚拟机 + snd-aloop），并在尾部加静音垫片以避开 snd-aloop 排空时的缺陷。见 [a1-kernel-alsa.md](a1-kernel-alsa.md)。
+
 实现：
 - `crates/qy-host-alsa/src/loopback.rs`：同步对齐、逐字节比对、报告；
 - `src/linux/capture.rs`：snd-aloop 回录线程；

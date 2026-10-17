@@ -500,38 +500,95 @@ jobs:
           name: qybit-gui-shots
           path: ${{ runner.temp }}/gui-shots
 
-  # M2 T4 B 层：snd-aloop 内核虚拟声卡回环。runner 不能加载内核模块时明确标记为未运行，
-  # A 层（file 插件，见通用模块测试）的结果不能代替 B 层。
-  loopback-aloop:
-    name: 回环 B 层 (snd-aloop)
+  # A1：Linux 版按架构编译为完全静态的 musl 程序（.cargo/config.toml：rust-lld + musl 自带启动文件），
+  # 核对 ELF 没有解释器与动态库依赖；其他架构在 qemu-user 下运行单元测试与 qybit --version（不涉及
+  # 声卡）。测试用 release 构建并保留溢出检查与 debug 断言（仿真较慢，按真实时间消费的假设备在 debug
+  # 构建下会欠载）。程序作为构件上传。
+  linux-static:
+    name: Linux 静态程序 (${{ matrix.target }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, arch: x86_64, runner: "" }
+          - { target: aarch64-unknown-linux-musl, arch: aarch64, runner: qemu-aarch64-static }
+          - { target: armv7-unknown-linux-musleabihf, arch: armv7, runner: qemu-arm-static }
+          - { target: loongarch64-unknown-linux-musl, arch: loongarch64, runner: qemu-loongarch64-static }
+          - { target: riscv64gc-unknown-linux-musl, arch: riscv64, runner: qemu-riscv64-static }
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "true"
+      CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: "true"
     steps:
       - uses: actions/checkout@v4
-      - run: rustup show
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-      - name: 加载 snd-aloop
-        id: aloop
+      - run: rustup show && rustup target add ${{ matrix.target }}
+      - if: matrix.runner != ''
+        run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      - name: 构建
         run: |
-          if sudo apt-get install -y "linux-modules-extra-$(uname -r)" && sudo modprobe snd-aloop; then
-            sudo chmod a+rw /dev/snd/*
-            cat /proc/asound/cards
-            echo "loaded=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning title=B 层未运行::runner 不支持加载 snd-aloop 内核模块，B 层未运行（A 层结果不能代替 B 层）"
-            echo "loaded=false" >> "$GITHUB_OUTPUT"
+          cargo build --locked --release -p qybit --target ${{ matrix.target }}
+          mkdir -p "$RUNNER_TEMP/out" && cp target/${{ matrix.target }}/release/qybit "$RUNNER_TEMP/out/"
+      - name: 核对为静态程序
+        run: |
+          f=target/${{ matrix.target }}/release/qybit
+          file "$f"
+          if readelf -lW "$f" | grep -q INTERP; then echo "::error::有程序解释器（动态链接）"; exit 1; fi
+          if readelf -dW "$f" | grep -q NEEDED; then echo "::error::依赖动态库"; readelf -dW "$f"; exit 1; fi
+          echo "${{ matrix.target }}：$(stat -c %s "$f") 字节，无解释器、无动态库依赖" >> "$GITHUB_STEP_SUMMARY"
+      - name: 运行 qybit --version
+        run: ${{ matrix.runner }} target/${{ matrix.target }}/release/qybit --version
+      - name: 单元测试
+        run: |
+          if [ -n "${{ matrix.runner }}" ]; then
+            t=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
+            export "CARGO_TARGET_${t}_RUNNER=${{ matrix.runner }}"
           fi
-      - name: B 层回环矩阵
-        if: steps.aloop.outputs.loaded == 'true'
-        run: cargo test --locked -p qy-host-alsa --test loopback_aloop -- --ignored --nocapture --test-threads=1
-      - name: 上传回环报告
-        if: always() && steps.aloop.outputs.loaded == 'true'
+          cargo test --locked --release --target ${{ matrix.target }} \
+            -p qy-core -p qy-codec-wav -p qy-codec-flac -p qy-codec-aiff -p qy-codec-auto \
+            -p qy-pcm-format -p qy-player -p qy-host-alsa -p qybit
+      # B 层回环测试程序（静态，自带测试曲目生成）随构件发布，供用户在能加载 snd-aloop 的机器上运行。
+      - name: 收集回环测试程序
+        run: cp "$(ls -t target/${{ matrix.target }}/release/deps/loopback_aloop-* | grep -v '\.d$' | head -1)" "$RUNNER_TEMP/out/qybit-loopback-aloop"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qybit-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+
+  # M2 T4 B 层与 A1 内核路径：GitHub runner 不能加载内核模块，在 QEMU 虚拟机（Ubuntu 通用内核 +
+  # snd-aloop）中运行 musl 静态测试程序（scripts/aloop-vm.sh）：设备枚举、内核直连单元测试、设备矩阵
+  # 与播放、逐字节回环。aarch64 虚拟机另经 32 位兼容层运行 armv7 程序。虚拟回环不证明真实 DAC。
+  loopback-aloop:
+    name: 回环 B 层 (QEMU ${{ matrix.arch }} + snd-aloop)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, targets: x86_64-unknown-linux-musl, qemu: qemu-system-x86 }
+          - { arch: aarch64, targets: aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf, qemu: qemu-system-arm }
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show && rustup target add ${{ matrix.targets }}
+      - run: sudo apt-get update && sudo apt-get install -y ${{ matrix.qemu }} cpio zstd
+      - name: 允许使用 KVM（runner 提供时）
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+            sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          fi
+          ls -l /dev/kvm || echo "没有 /dev/kvm：软件仿真"
+      - name: 虚拟机测试
+        run: scripts/aloop-vm.sh
+        env:
+          QYBIT_VM_ARCH: ${{ matrix.arch }}
+      - name: 上传报告
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qybit-alsa-loopback-snd-aloop
-          path: target/qybit-report/
-      - name: 记录未运行
-        if: steps.aloop.outputs.loaded != 'true'
-        run: echo "回环 B 层（snd-aloop）：未运行（runner 不支持内核模块）。本地运行见 scripts/aloop-loopback.sh。" >> "$GITHUB_STEP_SUMMARY"
+          name: qybit-alsa-vm-${{ matrix.arch }}
+          path: target/qybit-report/vm-${{ matrix.arch }}/
 
   # fuzz 冒烟（各 60 秒）：解码以夹具为初始语料；损坏文件系统（R1 §4）以 FAT16/FAT32 基础镜像的
   # 空补丁为初始语料。正式 10 分钟记录见 docs/m0-t2-wav.md、docs/m1-t3-integration.md 与 docs/r1-reliability.md。

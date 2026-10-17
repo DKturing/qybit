@@ -2,3 +2,25 @@
 # 不依赖 VC++ 可再发行组件包，只导入系统 DLL（CI 的 gui-windows 作业用 dumpbin 列出并记录）。
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# A1：Linux 版按架构编译为完全静态的 musl 程序（不依赖任何系统库，可在该架构的任意发行版上运行）。
+# 用工具链自带的 rust-lld 与 musl 启动文件链接，不需要交叉 C 工具链。
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "link-self-contained=yes", "-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "link-self-contained=yes", "-C", "target-feature=+crt-static"]
+
+[target.armv7-unknown-linux-musleabihf]
+linker = "rust-lld"
+rustflags = ["-C", "link-self-contained=yes", "-C", "target-feature=+crt-static"]
+
+[target.loongarch64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "link-self-contained=yes", "-C", "target-feature=+crt-static"]
+
+[target.riscv64gc-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "link-self-contained=yes", "-C", "target-feature=+crt-static"]

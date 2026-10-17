@@ -14,8 +14,9 @@ use super::kernel_pcm::KernelPcm;
 use crate::kernel::abi::STREAM_CAPTURE;
 use crate::pcm::{Pcm, PcmError, errno};
 
-/// 回录缓冲的周期数。
-const CAPTURE_PERIODS: u32 = 8;
+/// 回录缓冲的周期数（32 个周期，10 ms 周期时为 320 ms）。回录端只用于核对，缓冲取大一些，
+/// 在软件仿真等慢环境中也不溢出；不影响播放端的参数与数据。
+const CAPTURE_PERIODS: u32 = 32;
 
 /// 运行中的回录。
 pub struct Capture {
