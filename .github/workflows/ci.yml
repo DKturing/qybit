@@ -245,6 +245,12 @@ jobs:
               string s = Encoding.Unicode.GetString(back, 88, 1024);
               int z = s.IndexOf((char)0); return z >= 0 ? s.Substring(0, z) : s;
             }
+            // 状态栏第 part 栏的文字（SB_GETTEXTW 0x040D，lparam 为该进程中的缓冲）。
+            public static string PartText(IntPtr status, int pid, int part) {
+              byte[] back = Remote(pid, status, 0x040D, part, new byte[0], 1024, -1);
+              string s = Encoding.Unicode.GetString(back, 0, 1024);
+              int z = s.IndexOf((char)0); return z >= 0 ? s.Substring(0, z) : s;
+            }
             public static RECT ItemRect(IntPtr list, int pid, int row) {
               byte[] back = Remote(pid, list, 0x100E, row, new byte[16], 0, -1);
               RECT r; r.Left = BitConverter.ToInt32(back, 0); r.Top = BitConverter.ToInt32(back, 4);
@@ -284,7 +290,7 @@ jobs:
             $ms = New-Object System.IO.MemoryStream; $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
             Write-Output "===== 状态 $name"
             Write-Output "状态栏：$(Text $h 205)"
-            Write-Output "采样率指示灯：$(Text $h 212)"
+            Write-Output "采样率指示灯：$(LampText $p)"
             Write-Output "音量：$(Text $h 209)"
             Write-Output "日志（最后 25 行）："
             (Text $h 204) -split "`r`n" | Select-Object -Last 25 | ForEach-Object { Write-Output "  | $_" }
@@ -292,9 +298,10 @@ jobs:
             Write-Output ([Convert]::ToBase64String($ms.ToArray()))
             Write-Output "SHOT-END $name"
           }
-          # GUI T6：采样率指示灯的文字（212）应为 $want。
+          # GUI T6：采样率指示灯在状态栏（205）右下角的第 2 栏，文字应为 $want。
+          function LampText($p) { [W]::PartText([W]::GetDlgItem($p.MainWindowHandle, 205), $p.Id, 2) }
           function Lamp($p, $want) {
-            $got = Text $p.MainWindowHandle 212
+            $got = LampText $p
             if ($got -ne $want) { Write-Output "采样率指示灯应为“$want”，实际“$got”"; exit 1 }
           }
           function Close($p) {

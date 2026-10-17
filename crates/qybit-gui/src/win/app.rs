@@ -48,9 +48,6 @@ pub const IDC_SEEK: u16 = 207;
 /// 设备硬件音量（GUI T5）：滑块范围 0–100 与读数标签。
 pub const IDC_VOLUME: u16 = 208;
 pub const IDC_VOLUME_LABEL: u16 = 209;
-/// 采样率指示灯与文字（GUI T6）。
-pub const IDC_RATE_LAMP: u16 = 211;
-pub const IDC_RATE: u16 = 212;
 
 /// 播放列表的列：标题与宽度（96 DPI 下的像素）。
 pub const COLUMNS: [(&str, i32); 5] = [

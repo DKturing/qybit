@@ -312,14 +312,22 @@ mod tests {
             device: Some("bad\nid".into()),
             ..Settings::default()
         };
+        // 不是 UTF-8 的路径：Unix 上的非法字节，Windows 上的孤立代理项。
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
             s.files
                 .push(PathBuf::from(std::ffi::OsStr::from_bytes(b"/\xFF.wav")));
         }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            s.files.push(PathBuf::from(std::ffi::OsString::from_wide(&[
+                0x43, 0x3A, 0xD800,
+            ])));
+        }
         let (text, skipped) = s.to_text();
-        assert_eq!(skipped, if cfg!(unix) { 2 } else { 1 });
+        assert_eq!(skipped, 2);
         let p = Settings::parse(&text);
         assert_eq!(p.settings.files, vec![PathBuf::from("/ok.flac")]);
         assert_eq!(p.settings.device, None);

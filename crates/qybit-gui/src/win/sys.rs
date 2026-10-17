@@ -12,8 +12,9 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_BTNFACE, CreateFontIndirectW, DeleteObject, GetSysColorBrush, HBRUSH, HDC, HFONT,
-    HGDIOBJ, InvalidateRect, ScreenToClient, SetBkMode, SetTextColor, TRANSPARENT,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, COLOR_BTNFACE, CreateBitmap, CreateDIBSection,
+    CreateFontIndirectW, DIB_RGB_COLORS, DeleteObject, HBRUSH, HFONT, HGDIOBJ, InvalidateRect,
+    ScreenToClient,
 };
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
@@ -31,14 +32,14 @@ use windows::Win32::UI::Controls::{
     LVN_BEGINDRAG, LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_KEYDOWN, LVNI_SELECTED,
     LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_GRIDLINES, LVS_OWNERDATA, LVS_REPORT,
     LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, NM_DBLCLK, NMHDR, NMITEMACTIVATE, NMLISTVIEW,
-    NMLVDISPINFOW, NMLVKEYDOWN, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW, TB_ENDTRACK,
-    TB_PAGEDOWN, TB_PAGEUP, TB_THUMBTRACK, TBM_GETCHANNELRECT, TBM_GETTHUMBRECT, TBM_SETPOS,
-    TBM_SETRANGEMAX, TBM_SETRANGEMIN, TBS_HORZ, TBS_NOTICKS, TRACKBAR_CLASSW, WC_COMBOBOXW,
-    WC_LISTVIEWW,
+    NMLVDISPINFOW, NMLVKEYDOWN, SB_SETICON, SB_SETPARTS, SB_SETTEXTW, STATUSCLASSNAMEW,
+    TB_ENDTRACK, TB_PAGEDOWN, TB_PAGEUP, TB_THUMBTRACK, TBM_GETCHANNELRECT, TBM_GETTHUMBRECT,
+    TBM_SETPOS, TBM_SETRANGEMAX, TBM_SETRANGEMIN, TBS_HORZ, TBS_NOTICKS, TRACKBAR_CLASSW,
+    WC_COMBOBOXW, WC_LISTVIEWW,
 };
 use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
-    SystemParametersInfoForDpi,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, GetSystemMetricsForDpi,
+    SetProcessDpiAwarenessContext, SystemParametersInfoForDpi,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, MOD_NOREPEAT, RegisterHotKey, ReleaseCapture, SetCapture,
@@ -55,19 +56,20 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BM_GETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL,
     CB_RESETCONTENT, CB_SETCURSEL, CBN_DROPDOWN, CBN_SELCHANGE, CBS_DROPDOWNLIST, CW_USEDEFAULT,
-    CheckMenuItem, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GetClientRect, GetCursorPos,
-    GetMenu, GetMessageW, GetWindowPlacement, GetWindowRect, HMENU, IDC_ARROW, IDC_SIZENS,
-    IsIconic, KillTimer, LoadCursorW, MB_ICONINFORMATION, MB_OK, MF_BYCOMMAND, MF_CHECKED,
-    MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MessageBoxW, MoveWindow,
-    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassW, SPI_GETNONCLIENTMETRICS,
-    SW_HIDE, SW_SHOW, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
-    SetCursor, SetMenu, SetTimer, SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow,
-    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WM_ACTIVATE, WM_APP,
-    WM_APPCOMMAND, WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DPICHANGED, WM_DROPFILES, WM_ENDSESSION, WM_HOTKEY, WM_HSCROLL, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NOTIFY, WM_SETCURSOR, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSW,
-    WS_BORDER, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CheckMenuItem, CreateIconIndirect, CreateMenu, CreatePopupMenu, CreateWindowExW,
+    DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, ES_AUTOVSCROLL, ES_MULTILINE,
+    ES_READONLY, GetClientRect, GetCursorPos, GetMenu, GetMessageW, GetWindowPlacement,
+    GetWindowRect, HICON, HMENU, ICONINFO, IDC_ARROW, IDC_SIZENS, IsIconic, KillTimer, LoadCursorW,
+    MB_ICONINFORMATION, MB_OK, MF_BYCOMMAND, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    MF_UNCHECKED, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage,
+    RegisterClassW, SM_CXSMICON, SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SW_SHOWMAXIMIZED,
+    SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetCursor, SetMenu, SetTimer,
+    SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WM_ACTIVATE, WM_APP, WM_APPCOMMAND,
+    WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES,
+    WM_ENDSESSION, WM_HOTKEY, WM_HSCROLL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NOTIFY,
+    WM_SETCURSOR, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD, WS_EX_CLIENTEDGE,
+    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -75,9 +77,8 @@ use super::app::{
     App, COLUMNS, ID_ABOUT, ID_ADD_FILES, ID_ADD_FOLDER, ID_CLEAR, ID_CLEAR_LOG, ID_EXIT, ID_LAST,
     ID_MEDIA_KEYS, ID_MOVE_DOWN, ID_MOVE_UP, ID_NEXT, ID_PLAY, ID_PREV, ID_REMEMBER, ID_REMOVE,
     ID_SORT_ADDED, ID_SORT_FORMAT, ID_SORT_LENGTH, ID_SORT_NAME, ID_STOP, ID_TOGGLE_LOG,
-    IDC_DEVICE, IDC_FLOAT, IDC_FORMAT, IDC_LIST, IDC_LOG, IDC_MONO, IDC_RATE, IDC_RATE_LAMP,
-    IDC_SEEK, IDC_STATUS, IDC_VOLUME, IDC_VOLUME_LABEL, Input, Media, Op, VolumeView, about_text,
-    column_key,
+    IDC_DEVICE, IDC_FLOAT, IDC_FORMAT, IDC_LIST, IDC_LOG, IDC_MONO, IDC_SEEK, IDC_STATUS,
+    IDC_VOLUME, IDC_VOLUME_LABEL, Input, Media, Op, VolumeView, about_text, column_key,
 };
 use super::sim::Sim;
 use qy_host_wasapi::endpoints::EndpointInfo;
@@ -154,9 +155,6 @@ struct Handles {
     seek: HWND,
     volume: HWND,
     volume_label: HWND,
-    /// 采样率指示灯（“●”，颜色表示状态）与文字（GUI T6）。
-    rate_lamp: HWND,
-    rate: HWND,
 }
 
 thread_local! {
@@ -184,8 +182,9 @@ thread_local! {
     static SPLIT: Cell<(i32, i32)> = const { Cell::new((0, 0)) };
     /// 正在拖动分隔条。
     static SPLITTING: Cell<bool> = const { Cell::new(false) };
-    /// 采样率指示灯的状态与上一次的文字（GUI T6）。
+    /// 采样率指示灯的状态、上一次的文字与四种状态的图标（GUI T6）。
     static LAMP: Cell<RateLamp> = const { Cell::new(RateLamp::Off) };
+    static LAMP_ICONS: RefCell<Vec<Option<HICON>>> = const { RefCell::new(Vec::new()) };
     static RATE_TEXT: RefCell<String> = const { RefCell::new(String::new()) };
     /// 正在拖动的行（GUI T6）；`None` 为没有在拖动。
     static DRAG_ROWS: RefCell<Option<Vec<usize>>> = const { RefCell::new(None) };
@@ -696,20 +695,6 @@ fn create(title: &str, window: Option<Window>) -> Option<Handles> {
                 0,
                 IDC_VOLUME_LABEL,
             )?,
-            rate_lamp: child(
-                w!("STATIC"),
-                w!("●"),
-                WINDOW_STYLE(SS_LEFT | SS_NOPREFIX),
-                0,
-                IDC_RATE_LAMP,
-            )?,
-            rate: child(
-                w!("STATIC"),
-                w!(""),
-                WINDOW_STYLE(SS_LEFT | SS_ENDELLIPSIS | SS_NOPREFIX),
-                0,
-                IDC_RATE,
-            )?,
         };
         SendMessageW(h.volume, TBM_SETRANGEMIN, Some(WPARAM(0)), Some(LPARAM(0)));
         SendMessageW(
@@ -747,6 +732,7 @@ fn create(title: &str, window: Option<Window>) -> Option<Handles> {
             );
         }
         apply_dpi(&h);
+        rebuild_lamp_icons(&h);
         DragAcceptFiles(main, true);
         // 上次保存的位置：系统在该位置完全不在任何显示器上时会自动移到可见处
         // （Microsoft Learn《SetWindowPlacement》）。
@@ -866,8 +852,6 @@ fn apply_dpi(h: &Handles) {
             h.status,
             h.format,
             h.volume_label,
-            h.rate_lamp,
-            h.rate,
         ];
         for c in all {
             SendMessageW(
@@ -938,15 +922,11 @@ fn layout(h: &Handles) {
             fmt_h - s(4),
             true,
         );
-        // 格式行左侧：采样率指示灯与文字（GUI T6），其后是源与设备格式。
-        let _ = MoveWindow(h.rate_lamp, s(8), fmt_y + s(4), s(14), fmt_h - s(4), true);
-        let _ = MoveWindow(h.rate, s(24), fmt_y + s(4), s(150), fmt_h - s(4), true);
-        let fmt_x = s(180);
         let _ = MoveWindow(
             h.format,
-            fmt_x,
+            s(8),
             fmt_y + s(4),
-            (label_x - s(8) - fmt_x).max(0),
+            (label_x - s(16)).max(0),
             fmt_h - s(4),
             true,
         );
@@ -974,18 +954,126 @@ fn layout(h: &Handles) {
     }
 }
 
-/// 状态栏分栏：两栏时各占一半，一栏时占整行。
+/// 状态栏分栏：右下角固定宽度的一栏是采样率指示灯（GUI T6，第 2 栏）；其余宽度在有保真状态
+/// 时由播放状态（第 0 栏）与保真状态（第 1 栏）各占一半，没有时第 1 栏宽度为 0。
 fn set_parts(h: &Handles, two: bool) {
     // SAFETY: 句柄有效；rc 与 parts 为本地变量，SB_SETPARTS 调用期间有效。
     unsafe {
         let mut rc = RECT::default();
         let _ = GetClientRect(h.status, &mut rc);
-        let parts: &[i32] = if two { &[rc.right / 2, -1] } else { &[-1] };
+        let dpi = GetDpiForWindow(h.main).max(96) as i32;
+        let lamp = (rc.right - 190 * dpi / 96).max(0);
+        let first = if two { lamp / 2 } else { lamp };
+        let parts = [first, lamp, -1];
         SendMessageW(
             h.status,
             SB_SETPARTS,
             Some(WPARAM(parts.len())),
             Some(LPARAM(parts.as_ptr() as isize)),
+        );
+    }
+}
+
+/// 状态栏中采样率指示灯所在的栏。
+const LAMP_PART: usize = 2;
+
+/// 指示灯的圆点图标（GUI T6）：小图标尺寸、按 DPI，抗锯齿的实心圆，32 位带透明度。
+fn lamp_icon(color: COLORREF, dpi: u32) -> Option<HICON> {
+    // SAFETY: 只读查询系统度量。
+    let size = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi) }.clamp(8, 64);
+    let n = size as usize;
+    let (r, g, b) = (
+        color.0 & 0xFF,
+        (color.0 >> 8) & 0xFF,
+        (color.0 >> 16) & 0xFF,
+    );
+    let c = (size as f32 - 1.0) / 2.0;
+    let radius = size as f32 * 0.36;
+    let pixels: Vec<u32> = (0..n * n)
+        .map(|i| {
+            let (x, y) = ((i % n) as f32 - c, (i / n) as f32 - c);
+            let a = (radius + 0.5 - (x * x + y * y).sqrt()).clamp(0.0, 1.0);
+            ((a * 255.0) as u32) << 24 | r << 16 | g << 8 | b
+        })
+        .collect();
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: size,
+            biHeight: -size,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // 单色掩码全为 0（显示由颜色位图的透明度决定）；每行按 2 字节对齐。
+    let mask_bits = vec![0u8; n.div_ceil(16) * 2 * n];
+    // SAFETY: DIB 节的像素缓冲由系统分配，按 n×n 个 32 位像素写入；掩码数据在调用期间有效；
+    // 图标创建后两个位图即可删除（图标保留自己的副本）。
+    unsafe {
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let color_bmp = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+        if bits.is_null() {
+            let _ = DeleteObject(HGDIOBJ(color_bmp.0));
+            return None;
+        }
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast::<u32>(), n * n);
+        let mask = CreateBitmap(size, size, 1, 1, Some(mask_bits.as_ptr().cast()));
+        let info = ICONINFO {
+            fIcon: true.into(),
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: mask,
+            hbmColor: color_bmp,
+        };
+        let icon = CreateIconIndirect(&info).ok();
+        let _ = DeleteObject(HGDIOBJ(color_bmp.0));
+        let _ = DeleteObject(HGDIOBJ(mask.0));
+        icon
+    }
+}
+
+/// 按窗口 DPI 重建四种状态的图标并重设当前状态的图标（旧图标销毁）。
+fn rebuild_lamp_icons(h: &Handles) {
+    // SAFETY: 只读查询窗口 DPI。
+    let dpi = unsafe { GetDpiForWindow(h.main) }.max(96);
+    let fresh: Vec<Option<HICON>> = [
+        RateLamp::Off,
+        RateLamp::Opening,
+        RateLamp::Native,
+        RateLamp::Rejected,
+    ]
+    .into_iter()
+    .map(|l| lamp_icon(lamp_color(l), dpi))
+    .collect();
+    let old = LAMP_ICONS.replace(fresh);
+    show_lamp_icon(h);
+    for icon in old.into_iter().flatten() {
+        // SAFETY: 销毁本前端创建、已不再显示的图标。
+        unsafe {
+            let _ = DestroyIcon(icon);
+        }
+    }
+}
+
+/// 设定状态栏指示灯栏的图标。
+fn show_lamp_icon(h: &Handles) {
+    let k = match LAMP.get() {
+        RateLamp::Off => 0,
+        RateLamp::Opening => 1,
+        RateLamp::Native => 2,
+        RateLamp::Rejected | RateLamp::Mismatch => 3,
+    };
+    let icon = LAMP_ICONS.with_borrow(|v| v.get(k).copied().flatten());
+    // SAFETY: 状态栏句柄有效；图标由本前端持有，销毁前已替换。
+    unsafe {
+        SendMessageW(
+            h.status,
+            SB_SETICON,
+            Some(WPARAM(LAMP_PART)),
+            Some(LPARAM(icon.map_or(0, |i| i.0 as isize))),
         );
     }
 }
@@ -1432,7 +1520,9 @@ fn exec(op: Op) {
             let _ = PostMessageW(Some(h.main), WM_CLOSE, WPARAM(0), LPARAM(0));
         },
         Op::Rate { lamp, text } => {
-            LAMP.set(lamp);
+            if LAMP.replace(lamp) != lamp {
+                show_lamp_icon(&h);
+            }
             let changed = RATE_TEXT.with_borrow_mut(|t| {
                 let changed = *t != text;
                 if changed {
@@ -1443,11 +1533,13 @@ fn exec(op: Op) {
             if changed {
                 let t = wide(&text);
                 unsafe {
-                    let _ = SetWindowTextW(h.rate, PCWSTR(t.as_ptr()));
+                    SendMessageW(
+                        h.status,
+                        SB_SETTEXTW,
+                        Some(WPARAM(LAMP_PART)),
+                        Some(LPARAM(t.as_ptr() as isize)),
+                    );
                 }
-            }
-            unsafe {
-                let _ = InvalidateRect(Some(h.rate_lamp), None, true);
             }
         }
         Op::Select(rows) => {
@@ -1721,20 +1813,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             LRESULT(0)
         }
-        // 采样率指示灯的颜色（GUI T6）：只为指示灯设置文字颜色，背景与窗口相同。
-        WM_CTLCOLORSTATIC
-            if HANDLES
-                .get()
-                .is_some_and(|h| lparam.0 == h.rate_lamp.0 as isize) =>
-        {
-            // SAFETY: wparam 是系统给出的该控件的设备上下文；系统颜色画刷无需释放。
-            unsafe {
-                let hdc = HDC(wparam.0 as *mut _);
-                SetTextColor(hdc, lamp_color(LAMP.get()));
-                SetBkMode(hdc, TRANSPARENT);
-                LRESULT(GetSysColorBrush(COLOR_BTNFACE).0 as isize)
-            }
-        }
         // 键盘媒体键（GUI T6）：窗口在前台时经 WM_APPCOMMAND（焦点控件的默认处理转给父窗口），
         // 窗口不在前台时经全局热键 WM_HOTKEY。
         WM_APPCOMMAND => match app_command(lparam) {
@@ -1792,6 +1870,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             if let Some(h) = HANDLES.get() {
                 apply_dpi(&h);
+                rebuild_lamp_icons(&h);
             }
             LRESULT(0)
         }
@@ -2011,6 +2090,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             let app = APP.with_borrow_mut(Option::take);
             drop(app);
             let font = FONT.replace(HFONT(std::ptr::null_mut()));
+            for icon in LAMP_ICONS.take().into_iter().flatten() {
+                // SAFETY: 销毁本前端创建的图标（状态栏已随窗口销毁）。
+                unsafe {
+                    let _ = DestroyIcon(icon);
+                }
+            }
             // SAFETY: 删除本前端创建的字体（控件已随窗口销毁）；结束消息循环。
             unsafe {
                 if !font.0.is_null() {
