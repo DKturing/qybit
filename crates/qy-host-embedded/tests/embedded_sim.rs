@@ -697,7 +697,7 @@ fn resource_plan_reasons() {
                 fault: EngineFault::Capability(CapabilityError::DecodeUnit {
                     frames: 16_384,
                     max: 4_608,
-                    unit: qy_codec_flac::BLOCK,
+                    unit: &qy_codec_flac::BLOCK,
                 })
             },
             Notice::Skipped {
@@ -705,7 +705,7 @@ fn resource_plan_reasons() {
                 fault: EngineFault::Capability(CapabilityError::InputUnit {
                     bytes: 30_000,
                     window: 28_244,
-                    unit: qy_codec_flac::FRAME,
+                    unit: &qy_codec_flac::FRAME,
                 })
             },
             Notice::Skipped {
@@ -733,7 +733,7 @@ fn resource_plan_reasons() {
         CapabilityError::DecodeUnit {
             frames: 16_384,
             max: 4_608,
-            unit: qy_codec_flac::BLOCK,
+            unit: &qy_codec_flac::BLOCK,
         }
         .to_string(),
         "FLAC 最大块 16384 帧超出本机配置的 4608 帧"
@@ -742,7 +742,7 @@ fn resource_plan_reasons() {
         CapabilityError::InputUnit {
             bytes: 30_000,
             window: 28_244,
-            unit: qy_codec_flac::FRAME,
+            unit: &qy_codec_flac::FRAME,
         }
         .to_string(),
         "FLAC 声明的最大帧 30000 字节超出本机输入窗口 28244 字节"

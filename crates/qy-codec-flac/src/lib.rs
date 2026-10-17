@@ -485,7 +485,7 @@ impl FlacDecoder {
             self.rejection = Some(CapabilityError::DecodeUnit {
                 frames: u32::from(max_block),
                 max: sat(self.cap.max_block),
-                unit: BLOCK,
+                unit: &BLOCK,
             });
             return Err(FlacError::BlockTooLarge);
         }
@@ -493,7 +493,7 @@ impl FlacDecoder {
             self.rejection = Some(CapabilityError::InputUnit {
                 bytes: max_frame,
                 window: sat(self.cap.input_window),
-                unit: FRAME,
+                unit: &FRAME,
             });
             return Err(FlacError::FrameTooLarge);
         }
@@ -1201,8 +1201,8 @@ impl Resources for FlacDecoder {
             unit_frames_capacity: sat(self.cap.max_block),
             max_unit_bytes: info.max_frame,
             window: sat(self.cap.input_window),
-            decode_unit: BLOCK,
-            input_unit: FRAME,
+            decode_unit: &BLOCK,
+            input_unit: &FRAME,
         })
     }
 }

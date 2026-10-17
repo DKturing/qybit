@@ -149,7 +149,7 @@ fn declared_max_frame_beyond_window() {
         Some(CapabilityError::InputUnit {
             bytes: window + 1,
             window,
-            unit: qy_codec_flac::FRAME,
+            unit: &qy_codec_flac::FRAME,
         })
     );
     info[7..10].copy_from_slice(&[0, 0, 0]);

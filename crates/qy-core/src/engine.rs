@@ -15,12 +15,13 @@
 use core::fmt;
 
 use crate::{
-    Action, Core, CoreError, Decoder, DeviceFormat, Event, Fault, Generation, Pcm, SampleEncoding,
-    SourceFormat,
+    Action, Core, CoreError, Decoder, DeviceFormat, Event, Fault, Generation, SourceFormat,
 };
-use qy_pcm_format::convert::{ConvertError, float_to_int};
 use qy_pcm_format::frames_for_millis;
-use qy_pcm_format::pack::ChannelMode;
+
+mod options;
+pub use options::{ChannelPolicy, FloatPolicy, FloatReport};
+use options::{Fallback, Next, Options, Pushed};
 
 /// 浮点转整数的统计（F3）。
 pub use qy_pcm_format::convert::ConvertStats;
@@ -104,13 +105,13 @@ pub enum CapabilityError {
     DecodeUnit {
         frames: u32,
         max: u32,
-        unit: Unit,
+        unit: &'static Unit,
     },
     /// 文件头声明的最大输入单元（字节）超出本机输入窗口（R1；B1 起与格式无关，FLAC 为“帧”）。
     InputUnit {
         bytes: u32,
         window: u32,
-        unit: Unit,
+        unit: &'static Unit,
     },
     /// 开启了浮点转整数，设备也不接受源的浮点格式，但本机配置没有转换工作区（F3；如 Embedded
     /// Lite）。
@@ -325,9 +326,9 @@ pub struct DecoderDemand {
     /// 声明的最大输入单元（字节，0 表示未声明）与本机输入窗口。
     pub max_unit_bytes: u32,
     pub window: u32,
-    /// 两种单元在报告中的叫法。
-    pub decode_unit: Unit,
-    pub input_unit: Unit,
+    /// 两种单元在报告中的叫法（引用：错误与需求中只多一个指针）。
+    pub decode_unit: &'static Unit,
+    pub input_unit: &'static Unit,
 }
 
 /// 播放计划（R1）：当前源在本机上的资源安排，供宿主报告。
@@ -394,44 +395,6 @@ pub enum ReusePolicy {
     Accepts,
     /// 宿主为每个源选择设备格式（[`HostAction::SelectDevice`]），与当前格式完全相同时才继续使用。
     Identical,
-}
-
-/// 声道策略（AGENTS §3：严格路径之外只允许任务卡定义、明确开启并在报告中标注的选项）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ChannelPolicy {
-    /// 严格路径：设备格式与源的扬声器位置相同（默认）。
-    #[default]
-    Strict,
-    /// 明确开启（tasks/O1.md）：单声道 `[FC]` 的源按立体声 `[FL FR]` 打开设备，每个样本原样复制到
-    /// 左右两路；样本值不变、不混音。每首这样处理的曲目都发出 [`HostAction::ChannelsDuplicated`]。
-    DuplicateMono,
-}
-
-/// 浮点源的策略（F3，AGENTS §3）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FloatPolicy {
-    /// 严格路径：浮点源只送到接受同一浮点格式的设备（按位复制），否则按设备不支持拒绝（默认）。
-    #[default]
-    Strict,
-    /// 明确开启（tasks/F3.md §4）：设备不接受源的浮点格式时，依次按 32、24、16 位整数协商，把样本
-    /// 转换为设备有效位 V 的整数（样本已改变）。每首这样处理的曲目发出
-    /// [`HostAction::FloatConverted`]；需要宿主经 [`Engine::set_convert_workspace`] 提供工作区。
-    ToInt,
-}
-
-/// 浮点转整数回退时依次请求的整数位数（设备支持的有效位最大者优先）。
-const FLOAT_FALLBACK_BITS: [u8; 3] = [32, 24, 16];
-
-/// 一首浮点曲目的统计（F3，报告用）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FloatReport {
-    pub encoding: SampleEncoding,
-    /// 转换成的整数位数（明确开启的浮点转整数）；`None` 为严格路径按位输出。
-    pub converted_to: Option<u8>,
-    /// 严格路径按位输出的 NaN 与无穷样本数（原样保留）。
-    pub nonfinite: u64,
-    /// 转换统计（只在转换时有）。
-    pub convert: ConvertStats,
 }
 
 /// 曲目出错时的策略。
@@ -650,124 +613,6 @@ const OUTBOX: usize = 6;
 /// 队列中同时可记录的曲目边界数。队列里的曲目更多时引擎暂停解码，等设备播完旧曲目。
 const MARKS: usize = 8;
 
-/// 一次入队的结果。
-enum Pushed {
-    Frames {
-        frames: usize,
-        stats: ConvertStats,
-        nonfinite: u64,
-    },
-    /// 转换遇到非有限样本：之前的 `frames` 帧已入队（统计为 `stats`）。
-    NonFinite {
-        frames: usize,
-        stats: ConvertStats,
-    },
-    Error,
-}
-
-/// 严格路径按位输出的浮点样本中 NaN 与无穷的个数（前 `frames` 帧；指数位全 1）。
-fn count_nonfinite<M: qy_pcm_format::pack::Fidelity>(pcm: &Pcm<'_, M>, frames: usize) -> u64 {
-    let f = pcm.format();
-    let words = f.encoding().words();
-    let n = frames * f.words_per_frame();
-    let samples = pcm.samples().get(..n).unwrap_or_default();
-    match f.encoding() {
-        SampleEncoding::Int => 0,
-        SampleEncoding::Float32 => samples
-            .iter()
-            .filter(|&&w| (w as u32) & 0x7F80_0000 == 0x7F80_0000)
-            .count() as u64,
-        SampleEncoding::Float64 => samples
-            .chunks_exact(words)
-            .filter(|w| (w[1] as u32) & 0x7FF0_0000 == 0x7FF0_0000)
-            .count() as u64,
-    }
-}
-
-/// `pcm` 的前 `frames` 帧转为 `bits` 位整数，写入 `ws`。
-fn convert_prefix<'w>(
-    pcm: &Pcm<'_, crate::Exact>,
-    frames: usize,
-    bits: u8,
-    ws: &'w mut [i32],
-    stats: &mut ConvertStats,
-) -> Result<Pcm<'w, qy_pcm_format::pack::Altered>, ConvertError> {
-    let format = pcm.format();
-    let prefix = pcm
-        .samples()
-        .get(..frames * format.words_per_frame())
-        .unwrap_or_default();
-    let prefix = Pcm::exact(prefix, format).map_err(|_| ConvertError::Format)?;
-    float_to_int(&prefix, bits, ws, stats)
-}
-
-/// 浮点转整数（明确开启，F3）后入队。一次转换的帧数受工作区容量限制；统计只计入实际入队的帧。
-/// 遇到非有限样本时先入队它之前的完整帧，再报告。
-fn convert_push<S: FrameSink>(
-    pcm: &Pcm<'_, crate::Exact>,
-    bits: u8,
-    ws: Option<&mut [i32]>,
-    sink: &mut S,
-    dev: &DeviceFormat,
-    mode: ChannelMode,
-    scratch: &mut [u8],
-) -> Pushed {
-    let Some(ws) = ws else {
-        return Pushed::Error;
-    };
-    let channels = usize::from(pcm.format().channels()).max(1);
-    let mut stats = ConvertStats::default();
-    let (converted, pushed, nonfinite) =
-        match convert_prefix(pcm, pcm.frames(), bits, ws, &mut stats) {
-            Ok(alt) => {
-                let n = alt.frames();
-                match sink.push(&alt, dev, mode, scratch) {
-                    Ok(p) => (n, p, false),
-                    Err(_) => return Pushed::Error,
-                }
-            }
-            Err(ConvertError::NonFinite { index }) => {
-                let limit = index / channels;
-                stats = ConvertStats::default();
-                if limit == 0 {
-                    (0, 0, true)
-                } else {
-                    match convert_prefix(pcm, limit, bits, ws, &mut stats) {
-                        Ok(alt) => match sink.push(&alt, dev, mode, scratch) {
-                            Ok(p) => (limit, p, true),
-                            Err(_) => return Pushed::Error,
-                        },
-                        Err(_) => return Pushed::Error,
-                    }
-                }
-            }
-            Err(ConvertError::Format) => return Pushed::Error,
-        };
-    if pushed < converted {
-        // 队列放不下全部：只按实际入队的前缀统计，非有限样本留到下次再遇到时报告。
-        stats = ConvertStats::default();
-        if pushed > 0 && convert_prefix(pcm, pushed, bits, ws, &mut stats).is_err() {
-            return Pushed::Error;
-        }
-        return Pushed::Frames {
-            frames: pushed,
-            stats,
-            nonfinite: 0,
-        };
-    }
-    if nonfinite {
-        return Pushed::NonFinite {
-            frames: pushed,
-            stats,
-        };
-    }
-    Pushed::Frames {
-        frames: pushed,
-        stats,
-        nonfinite: 0,
-    }
-}
-
 /// 播放引擎。
 pub struct Engine<D: Decoder + Resources, S: FrameSink> {
     core: Core<D>,
@@ -790,24 +635,8 @@ pub struct Engine<D: Decoder + Resources, S: FrameSink> {
     seek_base: Option<(u32, u64)>,
     marks_len: usize,
     stats: EngineStats,
-    channels: ChannelPolicy,
-    /// 当前曲目配置时是否按 [`ChannelPolicy::DuplicateMono`] 复制声道。按曲目锁定：播放中改变
-    /// 策略只影响之后配置的曲目，已打开的设备流不会改用另一种 pack。
-    duplicating: bool,
-    floats: FloatPolicy,
-    /// 浮点转整数的工作区（宿主启动时提供；没有时不能转换）。
-    convert_ws: Option<&'static mut [i32]>,
-    /// 当前配置把浮点转为几位整数（配置时锁定）；`None` 为不转换。
-    converting: Option<u8>,
-    /// 正在配置的源格式（声道策略之后）与浮点回退阶段（0 为源浮点格式，k 为
-    /// `FLOAT_FALLBACK_BITS[k − 1]` 位整数）。
-    configuring: Option<SourceFormat>,
-    float_stage: u8,
-    /// 当前设备不接受、已改为转换的浮点源格式（同格式的后续曲目据此续用设备）。只在一次播放
-    /// 期间有效：停止与重新开始时清除（下一次播放可能是另一台设备）。
-    rejected_float: Option<SourceFormat>,
-    /// 当前输出曲目的浮点统计（第一次入队时开始，关闭时给出）。
-    float_track: Option<(u32, FloatReport)>,
+    /// 明确开启的选项（单声道复制、浮点转整数）的全部状态（B1，见 `options`）。
+    options: Options,
     /// 当前曲目已入队的帧在曲目内的位置（定位后从目标帧算起；报告非有限样本的位置用）。
     track_frame: u64,
     /// 已为其报告过“第一次入队”的曲目（声道复制与浮点转换按曲目各报告一次）。
@@ -834,15 +663,7 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
             marks_len: 0,
             seek_base: None,
             stats: EngineStats::default(),
-            channels: ChannelPolicy::Strict,
-            duplicating: false,
-            floats: FloatPolicy::Strict,
-            convert_ws: None,
-            converting: None,
-            configuring: None,
-            float_stage: 0,
-            rejected_float: None,
-            float_track: None,
+            options: Options::new(),
             track_frame: 0,
             announced: None,
         }
@@ -850,43 +671,31 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
 
     /// 设置浮点策略（默认 [`FloatPolicy::Strict`]）。对之后配置的曲目生效；正在播放的曲目不变。
     pub fn set_float_policy(&mut self, policy: FloatPolicy) {
-        self.floats = policy;
+        self.options.set_float_policy(policy);
     }
 
     pub fn float_policy(&self) -> FloatPolicy {
-        self.floats
+        self.options.float_policy()
     }
 
     /// 提供浮点转整数的工作区（宿主启动时一次性提供，换曲与重置复用）。没有工作区时开启
     /// [`FloatPolicy::ToInt`] 也不能转换，按 [`CapabilityError::ConvertWorkspace`] 拒绝。
     pub fn set_convert_workspace(&mut self, ws: &'static mut [i32]) {
-        self.convert_ws = Some(ws);
+        self.options.set_convert_workspace(ws);
     }
 
     /// 当前配置把浮点转为几位整数（打开设备时宿主据此在协商记录中写明）。
     pub fn converting(&self) -> Option<u8> {
-        self.converting
+        self.options.converting()
     }
 
     /// 设置声道策略（默认 [`ChannelPolicy::Strict`]）。对之后配置的曲目生效；正在播放的曲目不变。
     pub fn set_channel_policy(&mut self, policy: ChannelPolicy) {
-        self.channels = policy;
+        self.options.set_channel_policy(policy);
     }
 
     pub fn channel_policy(&self) -> ChannelPolicy {
-        self.channels
-    }
-
-    /// 按声道策略交给能力检查与设备协商的源格式：开启单声道复制且源为 `[FC]` 时为同采样率、
-    /// 同位数的 `[FL FR]`，否则为源格式本身。
-    fn presented(&self, source: SourceFormat) -> SourceFormat {
-        if self.channels == ChannelPolicy::DuplicateMono
-            && source.layout() == crate::ChannelLayout::MONO
-            && let Ok(f) = source.relayout(crate::ChannelLayout::STEREO)
-        {
-            return f;
-        }
-        source
+        self.options.channel_policy()
     }
 
     pub fn core(&self) -> &Core<D> {
@@ -1063,7 +872,7 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
     fn start(&mut self, first: u32, count: u32, frame: u64) {
         self.track_count = count;
         self.reject = None;
-        self.rejected_float = None;
+        self.options.new_session();
         self.marks_len = 0;
         self.track_frame = frame;
         self.announced = None;
@@ -1097,7 +906,7 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
         }
         self.paused = false;
         self.reject = None;
-        self.rejected_float = None;
+        self.options.new_session();
         self.mode = Mode::Idle;
     }
 
@@ -1286,8 +1095,13 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
             (HostEvent::DeviceUnsupported, Mode::WaitSelect { generation, .. })
             | (HostEvent::DeviceOpenFailed, Mode::WaitOpen { generation }) => {
                 self.mode = Mode::Run;
-                if !self.float_fallback(generation) {
-                    self.core_handle(Event::ConfigureFailed { generation });
+                match self.options.fallback() {
+                    Fallback::Retry(laid) => self.request_device(generation, laid),
+                    Fallback::Reject(e) => {
+                        self.reject = Some(EngineFault::Capability(e));
+                        self.core_handle(Event::ConfigureFailed { generation });
+                    }
+                    Fallback::None => self.core_handle(Event::ConfigureFailed { generation }),
                 }
             }
             (HostEvent::DeviceOpened { format }, Mode::WaitOpen { generation }) => {
@@ -1389,77 +1203,24 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
     /// （[`Engine::announce`]）：相同格式的相邻曲目不重新配置，但每首都要报告；配置失败的曲目没有
     /// 输出，不报告。
     fn configured(&mut self, generation: Generation) {
-        self.converting = match (self.configuring, self.device) {
-            (Some(src), Some(d))
-                if src.encoding().is_float() && !d.format.encoding().is_float() =>
-            {
-                Some(d.format.valid_bits())
-            }
-            _ => None,
-        };
-        self.configuring = None;
+        self.options.configured(self.device.map(|d| d.format));
         self.core_handle(Event::Configured { generation });
-    }
-
-    /// 浮点源被设备拒绝（选择或打开失败）时，按 [`FloatPolicy::ToInt`] 改请求下一档整数格式。
-    /// 返回是否已发出新的请求；否则调用方按配置失败处理。
-    fn float_fallback(&mut self, generation: Generation) -> bool {
-        let Some(laid) = self.configuring else {
-            return false;
-        };
-        if !laid.encoding().is_float()
-            || self.floats != FloatPolicy::ToInt
-            || usize::from(self.float_stage) >= FLOAT_FALLBACK_BITS.len()
-        {
-            return false;
-        }
-        if self.convert_ws.is_none() {
-            self.reject = Some(EngineFault::Capability(CapabilityError::ConvertWorkspace));
-            return false;
-        }
-        if self.float_stage == 0 {
-            self.rejected_float = Some(laid);
-        }
-        self.float_stage += 1;
-        self.request_device(generation, laid);
-        true
-    }
-
-    /// 当前回退阶段请求的源格式：阶段 0 为源格式本身（声道策略之后），其后为同采样率、同布局的
-    /// `FLOAT_FALLBACK_BITS` 位整数。
-    fn presentation(&self, laid: SourceFormat) -> Option<SourceFormat> {
-        match self.float_stage {
-            0 => Some(laid),
-            k => {
-                let bits = *FLOAT_FALLBACK_BITS.get(usize::from(k) - 1)?;
-                laid.with_encoding(SampleEncoding::Int, bits).ok()
-            }
-        }
     }
 
     /// 当前曲目是否按 [`ChannelPolicy::DuplicateMono`] 配置（打开设备时宿主据此在协商记录中写明
     /// 源的实际格式）。
     pub fn duplicating(&self) -> bool {
-        self.duplicating
+        self.options.duplicating()
     }
 
     fn on_configure(&mut self, generation: Generation, actual: SourceFormat) {
-        let laid = self.presented(actual);
-        self.duplicating = laid.layout() != actual.layout();
-        self.float_stage = 0;
-        self.configuring = Some(laid);
-        // F3：同一浮点格式此前被当前设备拒绝、已改为转换：续用当前整数设备，不再重新协商。
-        if laid.encoding().is_float()
-            && self.floats == FloatPolicy::ToInt
-            && self.cfg.reuse == ReusePolicy::Accepts
-            && self.rejected_float == Some(laid)
-            && self.convert_ws.is_some()
-            && let Some(d) = self.device
-            && !d.format.encoding().is_float()
-            && let Ok(int) = laid.with_encoding(SampleEncoding::Int, d.format.valid_bits())
-            && d.format.accepts(&int)
-            && self.cfg.caps.check(&int).is_ok()
-        {
+        let laid = self.options.begin(actual);
+        if self.options.reuse_converted(
+            laid,
+            self.device.map(|d| d.format),
+            self.cfg.reuse,
+            &self.cfg.caps,
+        ) {
             self.configured(generation);
             return;
         }
@@ -1469,40 +1230,20 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
     /// 为当前回退阶段的源格式检查能力，并续用、选择或打开设备。
     fn request_device(&mut self, generation: Generation, laid: SourceFormat) {
         let source = loop {
-            let Some(source) = self.presentation(laid) else {
+            let Some(source) = self.options.presentation(laid) else {
                 self.core_handle(Event::ConfigureFailed { generation });
                 return;
             };
             match self.cfg.caps.check(&source) {
                 Ok(()) => break source,
-                // 回退的整数格式超出本机能力（如 Embedded Full 只到 24 位）：试下一档。
-                Err(_)
-                    if self.float_stage > 0
-                        && usize::from(self.float_stage) < FLOAT_FALLBACK_BITS.len() =>
-                {
-                    self.float_stage += 1;
-                }
-                // 浮点源本身超出本机能力（如按浮点宽度估计的队列放不下），而已明确开启转换：
-                // 转换后的整数可能放得下，从第一档整数起试；没有转换工作区时按资源不足拒绝。
-                Err(_)
-                    if self.float_stage == 0
-                        && laid.encoding().is_float()
-                        && self.floats == FloatPolicy::ToInt =>
-                {
-                    if self.convert_ws.is_none() {
-                        self.reject =
-                            Some(EngineFault::Capability(CapabilityError::ConvertWorkspace));
+                Err(e) => match self.options.check_failed(laid, e) {
+                    Next::Retry => {}
+                    Next::Reject(e) => {
+                        self.reject = Some(EngineFault::Capability(e));
                         self.core_handle(Event::ConfigureFailed { generation });
                         return;
                     }
-                    self.rejected_float = Some(laid);
-                    self.float_stage = 1;
-                }
-                Err(e) => {
-                    self.reject = Some(EngineFault::Capability(e));
-                    self.core_handle(Event::ConfigureFailed { generation });
-                    return;
-                }
+                },
             }
         };
         if let Some(d) = self.device
@@ -1556,35 +1297,11 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
             return None;
         };
         let start = self.stats.frames_pushed;
-        // 单声道复制（O1）只用于配置时已按策略复制的曲目（源 [FC]、设备 [FL FR]）；其余一律严格 pack。
-        let mode = if self.duplicating
-            && pcm.format().layout() == crate::ChannelLayout::MONO
-            && dev.format.layout() == crate::ChannelLayout::STEREO
-        {
-            ChannelMode::DuplicateMono
-        } else {
-            ChannelMode::Exact
-        };
         let source = pcm.format();
-        let outcome = match self.converting {
-            Some(bits) => convert_push(
-                &pcm,
-                bits,
-                self.convert_ws.as_deref_mut(),
-                &mut self.sink,
-                &dev.format,
-                mode,
-                self.scratch,
-            ),
-            None => match self.sink.push(&pcm, &dev.format, mode, self.scratch) {
-                Ok(n) => Pushed::Frames {
-                    frames: n,
-                    stats: ConvertStats::default(),
-                    nonfinite: count_nonfinite(&pcm, n),
-                },
-                Err(_) => Pushed::Error,
-            },
-        };
+        let mode = self.options.pack_mode(source, dev.format);
+        let outcome = self
+            .options
+            .push(&pcm, &mut self.sink, &dev.format, mode, self.scratch);
         let (pushed, stats, nonfinite, stop_at) = match outcome {
             Pushed::Frames {
                 frames,
@@ -1604,10 +1321,7 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
         };
         if pushed > 0 {
             self.announce(track, source);
-            if let Some((_, r)) = self.float_track.as_mut() {
-                r.nonfinite += nonfinite;
-                r.convert.add(&stats);
-            }
+            self.options.add_stats(nonfinite, &stats);
         }
         self.track_frame = self.track_frame.saturating_add(pushed as u64);
         if new_track
@@ -1641,33 +1355,23 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
             return;
         }
         self.announced = Some(track);
-        if self.duplicating {
+        let a = self.options.first_output(track, source);
+        if a.duplicated {
             self.stats.duplicated_tracks += 1;
             self.push(HostAction::ChannelsDuplicated { track });
         }
-        if source.encoding().is_float() {
-            if let Some(bits) = self.converting {
-                self.stats.converted_tracks += 1;
-                self.push(HostAction::FloatConverted { track, bits });
-            }
-            if self.float_track.is_none_or(|(t, _)| t != track) {
-                self.report_float();
-                self.float_track = Some((
-                    track,
-                    FloatReport {
-                        encoding: source.encoding(),
-                        converted_to: self.converting,
-                        nonfinite: 0,
-                        convert: ConvertStats::default(),
-                    },
-                ));
-            }
+        if let Some(bits) = a.converted {
+            self.stats.converted_tracks += 1;
+            self.push(HostAction::FloatConverted { track, bits });
+        }
+        if let Some((track, report)) = a.finished {
+            self.push(HostAction::FloatStats { track, report });
         }
     }
 
     /// 给出当前浮点曲目的统计（关闭、停止或定位时）。
     fn report_float(&mut self) {
-        if let Some((track, report)) = self.float_track.take() {
+        if let Some((track, report)) = self.options.take_float_report() {
             self.push(HostAction::FloatStats { track, report });
         }
     }
@@ -1801,11 +1505,11 @@ mod tests {
             unit_frames_capacity: 65_535,
             max_unit_bytes: 0,
             window: 1_048_576,
-            decode_unit: Unit {
+            decode_unit: &Unit {
                 codec: "TST",
                 name: "块",
             },
-            input_unit: Unit {
+            input_unit: &Unit {
                 codec: "TST",
                 name: "帧",
             },
@@ -1833,8 +1537,8 @@ mod tests {
         assert!(text.contains("设备 44100 Hz / 2 声道 / 32-24 位"), "{text}");
         assert!(text.ends_with("最大帧 18000/1048576 字节"), "{text}");
         plan.decoder = Some(DecoderDemand {
-            decode_unit: Unit::DECODE,
-            input_unit: Unit::INPUT,
+            decode_unit: &Unit::DECODE,
+            input_unit: &Unit::INPUT,
             ..demand
         });
         let text = format!("{plan}");
@@ -1848,11 +1552,11 @@ mod tests {
     #[test]
     fn unit_capability_text() {
         use std::string::ToString;
-        let block = Unit {
+        let block = &Unit {
             codec: "TST",
             name: "块",
         };
-        let frame = Unit {
+        let frame = &Unit {
             codec: "TST",
             name: "帧",
         };
@@ -1874,7 +1578,7 @@ mod tests {
         let g = CapabilityError::InputUnit {
             bytes: 40_000,
             window: 28_244,
-            unit: Unit::INPUT,
+            unit: &Unit::INPUT,
         };
         assert_eq!(
             g.to_string(),
