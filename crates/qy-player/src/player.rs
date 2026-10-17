@@ -875,7 +875,7 @@ mod tests {
         check_calls, check_write_calls, data_chunk, ffmpeg_reference, fixture, fixture_path,
         flac_fixture_path, place,
     };
-    use qy_core::engine::EngineFault;
+    use qy_core::engine::{CapabilityError, EngineFault};
     use qy_core::{DecodeError, Fault, SampleEncoding};
 
     const ALL: [(u8, u8); 4] = [(16, 16), (24, 24), (32, 24), (32, 32)];
@@ -1272,6 +1272,50 @@ mod tests {
             let want = std::fs::read(fixture_path("float/f32_stereo_44k_tag3.ffmpeg32.s32le"))
                 .unwrap_or_default();
             check_output(&outs[0], &want);
+        }
+    }
+
+    /// B1：不含浮点转换工作区的配置（`convert_samples` 为 0）照常播放整数曲目；开启转换后浮点曲目在
+    /// 只接受整数的设备上按“没有转换工作区”拒绝，不打开设备。
+    #[test]
+    fn profile_without_convert_workspace() {
+        let profile = qy_codec_auto::profile::DESKTOP_WAV.with_convert(0);
+        assert_eq!(profile.budget().convert, 0);
+        let int = "pcm16_stereo_44k.wav";
+        let files = [
+            fixture_path(int),
+            fixture_path("float/f32_stereo_44k_tag3.wav"),
+        ];
+        for device in DEVICES {
+            let Ok(mut res) = HostResources::with_profile(profile) else {
+                panic!("res");
+            };
+            res.engine.set_float_policy(FloatPolicy::ToInt);
+            let mut b = backend(&ALL, device);
+            let r = play_with(
+                &mut b,
+                &mut res,
+                &mut Files(&files),
+                PlayControl {
+                    on_line: &mut |_: &str| {},
+                    stop: None,
+                    commands: None,
+                    first: 0,
+                    on_status: None,
+                },
+            );
+            assert_eq!(
+                r.fault,
+                Some((
+                    1,
+                    EngineFault::Capability(CapabilityError::ConvertWorkspace)
+                )),
+                "{}",
+                r.summary()
+            );
+            let outs = b.outputs();
+            assert_eq!(outs.len(), 1);
+            check_output(&outs[0], &data_chunk(&fixture(int)));
         }
     }
 

@@ -353,6 +353,8 @@ mod desktop_wav {
         assert_eq!((b.flac_workspace, b.flac_pcm), (0, 0));
         assert_eq!(b.queue, 3_072_000);
         assert_eq!(b.convert, 32_768);
+        // 核心最小输入窗口 + 流式 PCM + pack 暂存区 + 转换工作区 + 队列。
+        assert_eq!(b.total, 8_192 + 32_768 + 32_768 + 32_768 + 3_072_000);
         #[cfg(feature = "flac")]
         assert_eq!(DESKTOP_WAV.flac_capacity(), None);
         assert_eq!(DESKTOP_WAV.caps.max_channels, qy_core::MAX_CHANNELS);

@@ -49,7 +49,7 @@ pub struct Capabilities {
 
 /// 解码器所说的“单元”在报告中的名称（B1）：核心只按资源表达（解码单元的帧数、输入单元的字节数），
 /// 具体格式的叫法由解码器给出，例如 FLAC 的解码单元是“块”、输入单元是“帧”。核心不认识任何格式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Unit {
     /// 格式名（如 `"FLAC"`）；空串表示不写格式名。
     pub codec: &'static str,
@@ -68,6 +68,18 @@ impl Unit {
         codec: "",
         name: "输入单元",
     };
+}
+
+/// 手写 `Debug`：两个名称按原文写出，不经 `str` 的转义格式化。派生的 `Debug` 会把转义与 Unicode
+/// 表一并链接进来（MCU 演示实测约 3.7 KB 代码，B1）。
+impl fmt::Debug for Unit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Unit {{ codec: \"{}\", name: \"{}\" }}",
+            self.codec, self.name
+        )
+    }
 }
 
 impl fmt::Display for Unit {
