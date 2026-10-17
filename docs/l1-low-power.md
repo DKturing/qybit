@@ -113,7 +113,7 @@
 
 **桌面（CI Windows）**
 
-`.github/workflows/measure.yml` 手动运行，只测改动后，结果见 §6。改动前没有在 Windows 上测量。
+`.github/workflows/measure.yml` 手动运行，只测改动后：暂停时 1.0 次 / s、播放时约 9.4 次 / s，命令响应 ≤ 10.2 ms，无欠载。完整数值见 §6。改动前没有在 Windows 上测量。
 
 **MCU**
 
@@ -138,7 +138,19 @@
 ## 6. 验证、未运行与限制
 
 - **Miri**（nightly-2026-10-12，`-Zmiri-disable-isolation -Zmiri-ignore-leaks`，同 M2 T5）：`render::tests::producer_is_woken_once_per_wait_and_at_end` 与 `command_sender_wakes_registered_producer` 通过，没有报告未定义行为或死锁。依赖真实时间的测试（假设备按 10 ms 一包）不在 Miri 下运行。
-- **Windows 测量**：手动工作流 `measure.yml` 运行中（每个状态 30 s），结果出来后补记于此。
+- **Windows 测量**（只测改动后）：手动工作流 `measure.yml`，GitHub Actions `windows-latest`，提交 `2a388bf`，每个状态 30 s。数值只对该 runner 成立。
+
+  | 状态 | CPU（ms / 30 s） | 生产端唤醒（次 / s） |
+  | --- | --- | --- |
+  | 空闲（无会话） | 0 | 0 |
+  | 播放 44.1 kHz / 16 位 | 125 | 9.3 |
+  | 暂停中 | 93 | 1.0 |
+  | 播放 192 kHz / 24 位 | 328 | 9.4 |
+  | 暂停中 | 31 | 1.0 |
+
+  - 命令响应最长：暂停 0.1 ms，恢复 < 0.1 ms，下一首 10.2 ms，停止 8.7 ms，都在 50 ms 以内；
+  - 无欠载，最低水位 533–557 ms；
+  - 改动前没有在 Windows 上测量。
 - **未运行**：
   - Windows 与 Linux 真实音频设备上的 L1 行为（命令灵敏度、最小化后恢复）。随 [windows-device-tests.md](windows-device-tests.md) 一起请用户确认；
   - MCU 实物（§5 的表）；
