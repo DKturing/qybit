@@ -21,7 +21,7 @@ mod bits;
 mod crc;
 mod frame;
 
-use qy_core::engine::{CapabilityError, DecoderDemand, Resources};
+use qy_core::engine::{CapabilityError, DecoderDemand, Resources, Unit};
 use qy_core::{ChannelLayout, DecodeError, Decoder, Progress, SeekError, SourceFormat, Status};
 
 /// 解码器容量配置（宿主声明）。
@@ -482,16 +482,18 @@ impl FlacDecoder {
             return Err(FlacError::TooManyChannels);
         }
         if usize::from(max_block) > self.cap.max_block {
-            self.rejection = Some(CapabilityError::FlacBlock {
-                block: u32::from(max_block),
+            self.rejection = Some(CapabilityError::DecodeUnit {
+                frames: u32::from(max_block),
                 max: sat(self.cap.max_block),
+                unit: BLOCK,
             });
             return Err(FlacError::BlockTooLarge);
         }
         if max_frame != 0 && max_frame as usize > self.cap.input_window {
-            self.rejection = Some(CapabilityError::FlacFrame {
+            self.rejection = Some(CapabilityError::InputUnit {
                 bytes: max_frame,
                 window: sat(self.cap.input_window),
+                unit: FRAME,
             });
             return Err(FlacError::FrameTooLarge);
         }
@@ -1195,13 +1197,26 @@ impl Resources for FlacDecoder {
         let info = self.info.as_ref()?;
         let sat = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
         Some(DecoderDemand {
-            max_block: info.max_block,
-            block_capacity: sat(self.cap.max_block),
-            max_frame: info.max_frame,
+            max_unit_frames: info.max_block,
+            unit_frames_capacity: sat(self.cap.max_block),
+            max_unit_bytes: info.max_frame,
             window: sat(self.cap.input_window),
+            decode_unit: BLOCK,
+            input_unit: FRAME,
         })
     }
 }
+
+/// FLAC 的解码单元是“块”（一个块的样本帧数），输入单元是“帧”（编码帧的字节数）；报告中的叫法
+/// （B1：核心只按资源表达）。
+pub const BLOCK: Unit = Unit {
+    codec: "FLAC",
+    name: "块",
+};
+pub const FRAME: Unit = Unit {
+    codec: "FLAC",
+    name: "帧",
+};
 
 /// 下一帧帧头应有的编号：固定块策略为帧号加 1，可变块策略为首样本号加本帧块大小（RFC 9639
 /// §9.1.5）。溢出时为 `None`（不再核对）。

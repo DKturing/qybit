@@ -836,8 +836,8 @@ pub fn write_plan(w: &mut impl fmt::Write, p: &PlaybackPlan) -> fmt::Result {
     if let Some(d) = &p.decoder {
         write!(
             w,
-            " flac_block={}/{} flac_frame={}/{}",
-            d.max_block, d.block_capacity, d.max_frame, d.window
+            " decode_unit={}/{} input_unit={}/{}",
+            d.max_unit_frames, d.unit_frames_capacity, d.max_unit_bytes, d.window
         )?;
     }
     writeln!(w)

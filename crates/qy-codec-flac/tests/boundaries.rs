@@ -146,9 +146,10 @@ fn declared_max_frame_beyond_window() {
     assert_eq!(d.last_error(), Some(FlacError::FrameTooLarge));
     assert_eq!(
         d.capacity_rejection(),
-        Some(CapabilityError::FlacFrame {
+        Some(CapabilityError::InputUnit {
             bytes: window + 1,
-            window
+            window,
+            unit: qy_codec_flac::FRAME,
         })
     );
     info[7..10].copy_from_slice(&[0, 0, 0]);
@@ -306,13 +307,13 @@ fn constants_and_demand() {
         panic!("STREAMINFO 之后应有需求")
     };
     assert_eq!(
-        dm.max_block,
+        dm.max_unit_frames,
         u32::from(u16::from_be_bytes([info[2], info[3]]))
     );
     assert_eq!(
-        dm.max_frame,
+        dm.max_unit_bytes,
         u32::from_be_bytes([0, info[7], info[8], info[9]])
     );
-    assert_eq!(dm.block_capacity, Capacity::DESKTOP.max_block as u32);
+    assert_eq!(dm.unit_frames_capacity, Capacity::DESKTOP.max_block as u32);
     assert_eq!(dm.window, Capacity::DESKTOP.input_window as u32);
 }

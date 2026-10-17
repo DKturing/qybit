@@ -46,6 +46,40 @@ pub struct Capabilities {
     pub prefill_ms: u32,
 }
 
+/// 解码器所说的“单元”在报告中的名称（B1）：核心只按资源表达（解码单元的帧数、输入单元的字节数），
+/// 具体格式的叫法由解码器给出，例如 FLAC 的解码单元是“块”、输入单元是“帧”。核心不认识任何格式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unit {
+    /// 格式名（如 `"FLAC"`）；空串表示不写格式名。
+    pub codec: &'static str,
+    /// 单元名（如 `"块"`）。
+    pub name: &'static str,
+}
+
+impl Unit {
+    /// 未给出格式叫法时的解码单元。
+    pub const DECODE: Unit = Unit {
+        codec: "",
+        name: "解码单元",
+    };
+    /// 未给出格式叫法时的输入单元。
+    pub const INPUT: Unit = Unit {
+        codec: "",
+        name: "输入单元",
+    };
+}
+
+impl fmt::Display for Unit {
+    /// “FLAC 最大块”或“最大解码单元”。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.codec.is_empty() {
+            write!(f, "最大{}", self.name)
+        } else {
+            write!(f, "{} 最大{}", self.codec, self.name)
+        }
+    }
+}
+
 /// 能力不足的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityError {
@@ -66,15 +100,17 @@ pub enum CapabilityError {
         required: usize,
         available: usize,
     },
-    /// FLAC 文件头声明的最大块超出本机解码容量（R1）。
-    FlacBlock {
-        block: u32,
+    /// 文件头声明的最大解码单元（帧数）超出本机解码容量（R1；B1 起与格式无关，FLAC 为“块”）。
+    DecodeUnit {
+        frames: u32,
         max: u32,
+        unit: Unit,
     },
-    /// FLAC 文件头声明的最大帧超出本机输入窗口（R1）。
-    FlacFrame {
+    /// 文件头声明的最大输入单元（字节）超出本机输入窗口（R1；B1 起与格式无关，FLAC 为“帧”）。
+    InputUnit {
         bytes: u32,
         window: u32,
+        unit: Unit,
     },
     /// 开启了浮点转整数，设备也不接受源的浮点格式，但本机配置没有转换工作区（F3；如 Embedded
     /// Lite）。
@@ -96,13 +132,23 @@ impl fmt::Display for CapabilityError {
                 f,
                 "本机配置的队列不足以承载该格式：需要 {required} 字节，只有 {available} 字节"
             ),
-            Self::FlacBlock { block, max } => {
-                write!(f, "FLAC 最大块 {block} 帧超出本机配置的 {max} 帧")
+            Self::DecodeUnit { frames, max, unit } => {
+                write!(f, "{unit} {frames} 帧超出本机配置的 {max} 帧")
             }
-            Self::FlacFrame { bytes, window } => write!(
-                f,
-                "FLAC 声明的最大帧 {bytes} 字节超出本机输入窗口 {window} 字节"
-            ),
+            Self::InputUnit {
+                bytes,
+                window,
+                unit,
+            } => {
+                if !unit.codec.is_empty() {
+                    write!(f, "{} ", unit.codec)?;
+                }
+                write!(
+                    f,
+                    "声明的最大{} {bytes} 字节超出本机输入窗口 {window} 字节",
+                    unit.name
+                )
+            }
             Self::ConvertWorkspace => write!(
                 f,
                 "设备不接受该浮点格式；已开启浮点转整数，但本机配置没有转换工作区"
@@ -269,15 +315,19 @@ impl fmt::Display for Repair {
     }
 }
 
-/// 解码器的需求与容量（文件头声明值，不可信，只用于报告）。
+/// 解码器的需求与容量（文件头声明值，不可信，只用于报告）。按资源表达，单元的叫法由解码器给出
+/// （B1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecoderDemand {
-    /// 声明的最大块（帧）与本机容量。
-    pub max_block: u32,
-    pub block_capacity: u32,
-    /// 声明的最大帧字节数（0 表示未声明）与本机输入窗口。
-    pub max_frame: u32,
+    /// 声明的最大解码单元（帧数）与本机容量。
+    pub max_unit_frames: u32,
+    pub unit_frames_capacity: u32,
+    /// 声明的最大输入单元（字节，0 表示未声明）与本机输入窗口。
+    pub max_unit_bytes: u32,
     pub window: u32,
+    /// 两种单元在报告中的叫法。
+    pub decode_unit: Unit,
+    pub input_unit: Unit,
 }
 
 /// 播放计划（R1）：当前源在本机上的资源安排，供宿主报告。
@@ -323,13 +373,13 @@ impl fmt::Display for PlaybackPlan {
         if let Some(d) = &self.decoder {
             write!(
                 f,
-                "，FLAC 最大块 {}/{} 帧，最大帧 ",
-                d.max_block, d.block_capacity
+                "，{} {}/{} 帧，最大{} ",
+                d.decode_unit, d.max_unit_frames, d.unit_frames_capacity, d.input_unit.name
             )?;
-            if d.max_frame == 0 {
+            if d.max_unit_bytes == 0 {
                 f.write_str("未声明")?;
             } else {
-                write!(f, "{}", d.max_frame)?;
+                write!(f, "{}", d.max_unit_bytes)?;
             }
             write!(f, "/{} 字节", d.window)?;
         }
@@ -1736,7 +1786,8 @@ mod tests {
         assert!(format!("{r}").starts_with("d??? 长度为流式占位值 0xffffffff"));
     }
 
-    /// 播放计划的显示：设备未定、最大帧未声明（0）与已声明。
+    /// 播放计划的显示：设备未定、最大输入单元未声明（0）与已声明；单元叫法由解码器给出（这里用
+    /// 测试格式“TST”），未给出时用通用叫法。
     #[test]
     fn plan_text_distinguishes_undeclared_max_frame() {
         let (Ok(source), Ok(device)) = (
@@ -1746,10 +1797,18 @@ mod tests {
             panic!("格式");
         };
         let demand = DecoderDemand {
-            max_block: 4_608,
-            block_capacity: 65_535,
-            max_frame: 0,
+            max_unit_frames: 4_608,
+            unit_frames_capacity: 65_535,
+            max_unit_bytes: 0,
             window: 1_048_576,
+            decode_unit: Unit {
+                codec: "TST",
+                name: "块",
+            },
+            input_unit: Unit {
+                codec: "TST",
+                name: "帧",
+            },
         };
         let mut plan = PlaybackPlan {
             source,
@@ -1763,15 +1822,63 @@ mod tests {
         assert_eq!(
             format!("{plan}"),
             "源 44100 Hz / 2 声道 / 24 位，设备未定，预填 22050 帧（500 ms），队列 132300/262144 字节，\
-             FLAC 最大块 4608/65535 帧，最大帧 未声明/1048576 字节"
+             TST 最大块 4608/65535 帧，最大帧 未声明/1048576 字节"
         );
         plan.device = Some(device);
         plan.decoder = Some(DecoderDemand {
-            max_frame: 18_000,
+            max_unit_bytes: 18_000,
             ..demand
         });
         let text = format!("{plan}");
         assert!(text.contains("设备 44100 Hz / 2 声道 / 32-24 位"), "{text}");
         assert!(text.ends_with("最大帧 18000/1048576 字节"), "{text}");
+        plan.decoder = Some(DecoderDemand {
+            decode_unit: Unit::DECODE,
+            input_unit: Unit::INPUT,
+            ..demand
+        });
+        let text = format!("{plan}");
+        assert!(
+            text.ends_with("最大解码单元 4608/65535 帧，最大输入单元 未声明/1048576 字节"),
+            "{text}"
+        );
+    }
+
+    /// 能力不足的文字：单元叫法由解码器给出时与 R1 起的原文相同；未给出时用通用叫法。
+    #[test]
+    fn unit_capability_text() {
+        use std::string::ToString;
+        let block = Unit {
+            codec: "TST",
+            name: "块",
+        };
+        let frame = Unit {
+            codec: "TST",
+            name: "帧",
+        };
+        let d = CapabilityError::DecodeUnit {
+            frames: 4_608,
+            max: 1_152,
+            unit: block,
+        };
+        assert_eq!(d.to_string(), "TST 最大块 4608 帧超出本机配置的 1152 帧");
+        let i = CapabilityError::InputUnit {
+            bytes: 40_000,
+            window: 28_244,
+            unit: frame,
+        };
+        assert_eq!(
+            i.to_string(),
+            "TST 声明的最大帧 40000 字节超出本机输入窗口 28244 字节"
+        );
+        let g = CapabilityError::InputUnit {
+            bytes: 40_000,
+            window: 28_244,
+            unit: Unit::INPUT,
+        };
+        assert_eq!(
+            g.to_string(),
+            "声明的最大输入单元 40000 字节超出本机输入窗口 28244 字节"
+        );
     }
 }

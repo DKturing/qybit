@@ -694,16 +694,18 @@ fn resource_plan_reasons() {
         [
             Notice::Skipped {
                 track: 0,
-                fault: EngineFault::Capability(CapabilityError::FlacBlock {
-                    block: 16_384,
-                    max: 4_608
+                fault: EngineFault::Capability(CapabilityError::DecodeUnit {
+                    frames: 16_384,
+                    max: 4_608,
+                    unit: qy_codec_flac::BLOCK,
                 })
             },
             Notice::Skipped {
                 track: 1,
-                fault: EngineFault::Capability(CapabilityError::FlacFrame {
+                fault: EngineFault::Capability(CapabilityError::InputUnit {
                     bytes: 30_000,
-                    window: 28_244
+                    window: 28_244,
+                    unit: qy_codec_flac::FRAME,
                 })
             },
             Notice::Skipped {
@@ -726,19 +728,21 @@ fn resource_plan_reasons() {
     }
     assert_eq!(got.len(), 5);
     assert_eq!(notices.last(), Some(&Notice::Finished));
-    // 原因文字带具体数值。
+    // 原因文字带具体数值；FLAC 的叫法由解码器给出（B1），文字与 R1 起相同。
     assert_eq!(
-        CapabilityError::FlacBlock {
-            block: 16_384,
-            max: 4_608
+        CapabilityError::DecodeUnit {
+            frames: 16_384,
+            max: 4_608,
+            unit: qy_codec_flac::BLOCK,
         }
         .to_string(),
         "FLAC 最大块 16384 帧超出本机配置的 4608 帧"
     );
     assert_eq!(
-        CapabilityError::FlacFrame {
+        CapabilityError::InputUnit {
             bytes: 30_000,
-            window: 28_244
+            window: 28_244,
+            unit: qy_codec_flac::FRAME,
         }
         .to_string(),
         "FLAC 声明的最大帧 30000 字节超出本机输入窗口 28244 字节"
@@ -799,8 +803,11 @@ fn plan_reports_flac_demand() {
     let b = &tracks[0].bytes;
     let max_block = u32::from(u16::from_be_bytes([b[10], b[11]]));
     let max_frame = u32::from_be_bytes([0, b[15], b[16], b[17]]);
-    assert_eq!((d.max_block, d.block_capacity), (max_block, 4_608));
-    assert_eq!((d.max_frame, d.window), (max_frame, 28_244));
+    assert_eq!(
+        (d.max_unit_frames, d.unit_frames_capacity),
+        (max_block, 4_608)
+    );
+    assert_eq!((d.max_unit_bytes, d.window), (max_frame, 28_244));
     let text = plan.to_string();
     assert!(
         text.contains(&format!("FLAC 最大块 {max_block}/4608 帧")),
