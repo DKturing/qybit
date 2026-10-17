@@ -11,5 +11,9 @@ publish.workspace = true
 [dependencies]
 qy-core.workspace = true
 
+[dev-dependencies]
+# X1：解码器契约测试。
+qy-testkit.workspace = true
+
 [lints]
 workspace = true

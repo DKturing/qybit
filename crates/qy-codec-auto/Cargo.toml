@@ -22,5 +22,9 @@ qy-codec-wav = { workspace = true, optional = true }
 qy-codec-flac = { workspace = true, optional = true }
 qy-codec-aiff = { workspace = true, optional = true }
 
+[dev-dependencies]
+# X1：解码器契约测试。
+qy-testkit.workspace = true
+
 [lints]
 workspace = true

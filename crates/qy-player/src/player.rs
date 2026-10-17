@@ -30,13 +30,13 @@ use std::sync::{Mutex, PoisonError};
 use std::thread::Thread;
 use std::time::{Duration, Instant};
 
-use qy_core::engine::{ChannelPolicy, FloatPolicy, HostAction, HostEvent, Poll, Wait};
-use qy_core::{DeviceFormat, Generation, SourceFormat};
+use qy_core::engine::{ChannelPolicy, FloatPolicy, HostAction, HostEvent, Poll, Resources, Wait};
+use qy_core::{Decoder, DeviceFormat, Generation, SourceFormat};
 
-use crate::HostResources;
 use crate::backend::{Backend, PendingStream, RunningStream};
 use crate::render::{RenderControl, RenderEnd};
 use crate::report::{Negotiation, PlaybackReport, StreamReport, Submission};
+use crate::{Diagnostics, HostResources};
 
 enum Stream<B: Backend> {
     Pending(B::Pending),
@@ -230,9 +230,9 @@ const PARK_SAFETY: Duration = Duration::from_secs(1);
 /// 从那里唤醒生产端，故按此间隔查看。
 const STOP_POLL: Duration = Duration::from_millis(100);
 
-struct Player<'a, B: Backend, S: TrackSource> {
+struct Player<'a, B: Backend, S: TrackSource, D: Decoder + Resources> {
     backend: &'a mut B,
-    res: &'a mut HostResources,
+    res: &'a mut HostResources<D>,
     source: &'a mut S,
     file: Option<S::Reader>,
     active: Option<Active<B>>,
@@ -249,18 +249,18 @@ struct Player<'a, B: Backend, S: TrackSource> {
 }
 
 /// 依次播放 `files`，直到完成、失败或设备出错。
-pub fn play<B: Backend>(
+pub fn play<B: Backend, D: Decoder + Resources + Diagnostics>(
     backend: &mut B,
-    res: &mut HostResources,
+    res: &mut HostResources<D>,
     files: &[PathBuf],
 ) -> PlaybackReport<B::Attempt> {
     play_source(backend, res, &mut Files(files))
 }
 
 /// 依次播放 `source` 中的曲目，直到完成、失败或设备出错。
-pub fn play_source<B: Backend, S: TrackSource>(
+pub fn play_source<B: Backend, S: TrackSource, D: Decoder + Resources + Diagnostics>(
     backend: &mut B,
-    res: &mut HostResources,
+    res: &mut HostResources<D>,
     source: &mut S,
 ) -> PlaybackReport<B::Attempt> {
     play_with(
@@ -278,9 +278,9 @@ pub fn play_source<B: Backend, S: TrackSource>(
 }
 
 /// 同 [`play_source`]，并给出实时进度与中断（命令行播放用）。
-pub fn play_with<'a, B: Backend, S: TrackSource>(
+pub fn play_with<'a, B: Backend, S: TrackSource, D: Decoder + Resources + Diagnostics>(
     backend: &'a mut B,
-    res: &'a mut HostResources,
+    res: &'a mut HostResources<D>,
     source: &'a mut S,
     ctl: PlayControl<'a>,
 ) -> PlaybackReport<B::Attempt> {
@@ -313,7 +313,7 @@ pub fn play_with<'a, B: Backend, S: TrackSource>(
     p.report
 }
 
-impl<B: Backend, S: TrackSource> Player<'_, B, S> {
+impl<B: Backend, S: TrackSource, D: Decoder + Resources + Diagnostics> Player<'_, B, S, D> {
     fn handle(&mut self, event: HostEvent) {
         if self.res.engine.handle(event).is_err() {
             self.report.protocol_errors += 1;
@@ -707,23 +707,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
             HostAction::Failed { track, fault } => {
                 self.report.fault = Some((track, fault));
                 let mut details = Vec::new();
-                let d = self.res.engine.decoder();
-                #[cfg(feature = "flac")]
-                if let Some(e) = d.flac_error() {
-                    details.push(format!("FLAC 错误明细：{e:?}"));
-                }
-                if let Some(w) = d.wav_detail() {
-                    details.push(format!("WAV 错误明细：{w}"));
-                }
-                if let Some(a) = d.aiff_detail() {
-                    details.push(format!("AIFF 错误明细：{a}"));
-                }
-                if let Some(u) = d.unrecognized() {
-                    details.push(format!("无法识别的文件：{u}"));
-                }
-                if let Some(name) = d.disabled() {
-                    details.push(format!("本构建未启用 {name} 解码器，按不支持拒绝"));
-                }
+                self.res.engine.decoder().failure_details(&mut details);
                 self.line(&format!(
                     "  曲目 {} 失败：{}",
                     u64::from(track) + 1,

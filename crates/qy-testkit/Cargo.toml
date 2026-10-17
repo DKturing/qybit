@@ -1,0 +1,15 @@
+[package]
+name = "qy-testkit"
+description = "QyBit 扩展接口契约测试（X1）：任意解码器的分块无关、状态语义、格式不伪造、出错与复位、定位检查；只作 dev-dependency"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+qy-core.workspace = true
+
+[lints]
+workspace = true

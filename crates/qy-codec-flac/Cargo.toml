@@ -24,6 +24,8 @@ name = "metrics"
 required-features = ["test-metrics"]
 
 [dev-dependencies]
+# X1：解码器契约测试。
+qy-testkit.workspace = true
 qy-codec-wav.workspace = true
 
 [lints]

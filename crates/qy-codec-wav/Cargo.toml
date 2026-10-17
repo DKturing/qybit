@@ -15,5 +15,7 @@ qy-core.workspace = true
 workspace = true
 
 [dev-dependencies]
+# X1：解码器契约测试。
+qy-testkit.workspace = true
 # F3：浮点夹具测试用转换模块核对 ffmpeg 的整数转换参考。
 qy-pcm-format.workspace = true

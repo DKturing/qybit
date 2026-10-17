@@ -14,6 +14,7 @@ members = [
     "crates/qy-host-wasapi",
     "crates/qy-host-alsa",
     "crates/qy-host-embedded",
+    "crates/qy-testkit",
     "crates/qybit",
     "crates/qybit-gui",
     "tools/qy-gen-fixtures",
@@ -37,6 +38,7 @@ qy-codec-aiff = { path = "crates/qy-codec-aiff" }
 # 各成员自行声明链接哪些解码器（B1：最小配置可组装）。
 qy-codec-auto = { path = "crates/qy-codec-auto", default-features = false }
 qy-pcm-format = { path = "crates/qy-pcm-format" }
+qy-testkit = { path = "crates/qy-testkit" }
 qy-host-sim = { path = "crates/qy-host-sim" }
 qy-player = { path = "crates/qy-player" }
 qy-ui = { path = "crates/qy-ui" }

@@ -34,8 +34,8 @@ pub use report::{
 
 use qy_codec_auto::profile::{self, Profile};
 use qy_codec_auto::{AutoDecoder, AutoInitError};
-use qy_core::engine::{Engine, EngineConfig, ErrorPolicy, ReusePolicy};
-use qy_core::{Core, DeviceFormat, PCM_WORK_SAMPLES};
+use qy_core::engine::{Engine, EngineConfig, ErrorPolicy, Resources, ReusePolicy};
+use qy_core::{Core, Decoder, DeviceFormat, PCM_WORK_SAMPLES};
 use qy_pcm_format::ring::{
     FrameConsumer, FrameProducer, PACK_SCRATCH_BYTES, RingError, frame_ring, reconfigure_for,
 };
@@ -84,10 +84,50 @@ fn decoder_for(profile: &Profile) -> Result<AutoDecoder, HostError> {
     Ok(d)
 }
 
-/// 宿主长期资源：整程序生命期复用。
-pub struct HostResources {
+/// 解码器给播放器报告的补充信息（实时输出与报告用）。全部方法都有默认实现：组装层接入新格式时
+/// 只需实现 `Decoder` 与 `Resources`，本 trait 写一行 `impl Diagnostics for … {}` 即可（X1）。
+pub trait Diagnostics {
+    /// 当前曲目失败时，追加失败明细，每条一行。
+    fn failure_details(&self, out: &mut Vec<String>) {
+        let _ = out;
+    }
+
+    /// 当前曲目开头跳过的元数据字节数（如 ID3v2 标签），关闭曲目时报告；没有时为 0。
+    fn skipped_tag_bytes(&self) -> u64 {
+        0
+    }
+}
+
+impl Diagnostics for AutoDecoder {
+    fn skipped_tag_bytes(&self) -> u64 {
+        AutoDecoder::skipped_tag_bytes(self)
+    }
+
+    fn failure_details(&self, out: &mut Vec<String>) {
+        #[cfg(feature = "flac")]
+        if let Some(e) = self.flac_error() {
+            out.push(format!("FLAC 错误明细：{e:?}"));
+        }
+        if let Some(w) = self.wav_detail() {
+            out.push(format!("WAV 错误明细：{w}"));
+        }
+        if let Some(a) = self.aiff_detail() {
+            out.push(format!("AIFF 错误明细：{a}"));
+        }
+        if let Some(u) = self.unrecognized() {
+            out.push(format!("无法识别的文件：{u}"));
+        }
+        if let Some(name) = self.disabled() {
+            out.push(format!("本构建未启用 {name} 解码器，按不支持拒绝"));
+        }
+    }
+}
+
+/// 宿主长期资源：整程序生命期复用。解码器默认为按文件头选择格式的 [`AutoDecoder`]；组装层可以
+/// 换成自己的解码器（如把新格式与 `AutoDecoder` 组合，X1），见 [`HostResources::with_decoder`]。
+pub struct HostResources<D: Decoder + Resources = AutoDecoder> {
     /// 播放引擎（M3 T1）：持有核心、队列生产端与 pack 暂存区。
-    pub engine: Engine<AutoDecoder, FrameProducer>,
+    pub engine: Engine<D, FrameProducer>,
     /// 队列消费端；播放时移交渲染线程，结束后归还。
     pub consumer: Option<FrameConsumer>,
     pub profile: Profile,
@@ -112,6 +152,16 @@ impl HostResources {
     pub fn with_profile(profile: Profile) -> Result<Self, HostError> {
         let decoder = decoder_for(&profile)?;
         let window = decoder.required_window();
+        Self::with_decoder(decoder, window, profile)
+    }
+}
+
+impl<D: Decoder + Resources> HostResources<D> {
+    /// 用组装层提供的解码器一次性分配（X1）：输入窗口 `window` 字节（不小于核心最小窗口
+    /// [`qy_core::INPUT_WINDOW_BYTES`]，并满足解码器最大输入单元的需要），能力声明、队列大小与
+    /// 浮点转换工作区取自 `profile`（配置档中的格式开关与 FLAC 容量此时不起作用，由解码器自己
+    /// 决定）。设备复用策略为 [`ReusePolicy::Accepts`]，出错即停止。
+    pub fn with_decoder(decoder: D, window: usize, profile: Profile) -> Result<Self, HostError> {
         let input = leak_zeroed::<u8>(window);
         let core = Core::with_window(input, window, decoder).map_err(HostError::Core)?;
         let (producer, consumer) = frame_ring(profile.queue_storage_bytes());
