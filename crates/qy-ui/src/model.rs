@@ -197,11 +197,41 @@ impl Changes {
         self.list || self.status || self.log || self.session
     }
 
-    fn merge(&mut self, o: Changes) {
+    pub fn merge(&mut self, o: Changes) {
         self.list |= o.list;
         self.status |= o.status;
         self.log |= o.log;
         self.session |= o.session;
+    }
+}
+
+/// 窗口不可见（如最小化）时暂存重绘（L1）：模型照常更新、日志与报告不丢，只是不重绘；重新可见时
+/// 把暂存的变化一次重绘。
+#[derive(Debug, Default)]
+pub struct Deferred {
+    hidden: bool,
+    stale: Changes,
+}
+
+impl Deferred {
+    /// 窗口变为可见或不可见；返回现在应当重绘的部分（变为可见时为暂存的变化）。
+    pub fn set_visible(&mut self, visible: bool) -> Changes {
+        self.hidden = !visible;
+        if visible {
+            std::mem::take(&mut self.stale)
+        } else {
+            Changes::default()
+        }
+    }
+
+    /// 本次的变化：可见时原样返回；不可见时暂存，返回空。
+    pub fn filter(&mut self, c: Changes) -> Changes {
+        if self.hidden {
+            self.stale.merge(c);
+            Changes::default()
+        } else {
+            c
+        }
     }
 }
 

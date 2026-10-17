@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use qy_player::signal::write_test_wav;
 use qy_player::testing::{FakeBackend, FakeDevice, NoMonoNegotiator};
 use qy_ui::probe::{Prober, scan_folder};
-use qy_ui::{Kind, Probe, Ui, text};
+use qy_ui::{Changes, Deferred, Kind, Probe, Ui, text};
 
 const ALL: [(u8, u8); 4] = [(16, 16), (24, 24), (32, 24), (32, 32)];
 
@@ -526,4 +526,38 @@ fn text_helpers() {
     assert_eq!(text::clock(3_725), "1:02:05");
     assert_eq!(text::duration(441_000, 44_100), "0:10");
     assert_eq!(text::duration(1, 0), "");
+}
+
+/// L1：窗口最小化期间不重绘，但模型照常更新（状态、日志与结束报告都不丢）；恢复显示时把期间的
+/// 变化一次重绘。
+#[test]
+fn hidden_window_defers_redraw_without_losing_events() {
+    let dir = temp("hidden");
+    let files = tracks(&dir, 2, 4_410);
+    let mut ui = ui_with(clock_backend());
+    let mut view = Deferred::default();
+    ui.add_paths(files);
+    assert!(until(&mut ui, 10, all_probed));
+    assert_eq!(view.set_visible(false), Changes::default());
+    ui.play_from(0);
+    let mut redrawn = Changes::default();
+    let t0 = Instant::now();
+    let mut ended = false;
+    while !ended && t0.elapsed() < Duration::from_secs(30) {
+        redrawn.merge(view.filter(ui.wait(Duration::from_millis(20))));
+        ended = ui.model.playing.is_none() && ui.model.last.is_some();
+    }
+    assert!(ended, "会话未结束");
+    assert!(!redrawn.any(), "最小化期间不应重绘：{redrawn:?}");
+    let Some(o) = ui.model.last.clone() else {
+        panic!("无结果")
+    };
+    assert!(o.finished, "{}", o.summary);
+    assert!(ui.model.log.iter().any(|l| l.contains("▶ 曲目 2/2")));
+    let shown = view.set_visible(true);
+    assert!(shown.status && shown.log && shown.session, "{shown:?}");
+    // 可见后照常重绘，暂存已清空。
+    assert_eq!(view.filter(Changes::default()), Changes::default());
+    assert_eq!(view.set_visible(true), Changes::default());
+    let _ = std::fs::remove_dir_all(&dir);
 }

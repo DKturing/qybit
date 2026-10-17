@@ -47,7 +47,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BM_GETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL,
     CB_SETCURSEL, CBN_SELCHANGE, CBS_DROPDOWNLIST, CW_USEDEFAULT, CreateMenu, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_AUTOVSCROLL, ES_MULTILINE,
-    ES_READONLY, GetClientRect, GetCursorPos, GetMessageW, HMENU, IDC_ARROW, LoadCursorW,
+    ES_READONLY, GetClientRect, GetCursorPos, GetMessageW, HMENU, IDC_ARROW, IsIconic, LoadCursorW,
     MB_ICONINFORMATION, MB_OK, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, MoveWindow,
     NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassW, SPI_GETNONCLIENTMETRICS,
     SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetMenu, SetWindowPos, SetWindowTextW,
@@ -761,10 +761,12 @@ fn dispatch(input: Input) {
         Input::Command(_) => selected_rows(h.list),
         _ => Vec::new(),
     };
+    // SAFETY: 主窗口句柄有效；IsIconic 只查询状态。
+    let visible = !unsafe { IsIconic(h.main) }.as_bool();
     let ops = APP.with(|a| match a.try_borrow_mut() {
         Ok(mut g) => g
             .as_mut()
-            .map(|app| app.handle(input, &selected))
+            .map(|app| app.handle(input, &selected, visible))
             .unwrap_or_default(),
         Err(_) => Vec::new(),
     });
@@ -979,6 +981,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             if let Some(h) = HANDLES.get() {
                 layout(&h);
             }
+            // 最小化或恢复（L1）：恢复时补画最小化期间暂存的变化。
+            dispatch(Input::Resized);
             LRESULT(0)
         }
         WM_DPICHANGED => {

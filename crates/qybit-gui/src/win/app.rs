@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use qy_host_wasapi::endpoints::EndpointInfo;
-use qy_ui::{Changes, Ui, text};
+use qy_ui::{Changes, Deferred, Ui, text};
 
 /// 菜单与按钮命令。
 pub const ID_PLAY: u16 = 101;
@@ -61,6 +61,8 @@ pub enum Input {
     SeekBy(i64),
     /// 后台线程有新事件。
     Notify,
+    /// 窗口大小变化（最小化或恢复，L1）：只按可见性补画暂存的变化。
+    Resized,
 }
 
 /// 显示操作（由 Win32 边界执行）。
@@ -88,6 +90,8 @@ pub enum Op {
 
 pub struct App {
     ui: Ui,
+    /// 窗口最小化时暂存重绘（L1）。
+    view: Deferred,
     /// 设备下拉框各项对应的端点标识（第 0 项为默认设备）与显示名。
     devices: Vec<(Option<String>, String)>,
 }
@@ -103,7 +107,11 @@ impl App {
             },
         )];
         devices.extend(endpoints.iter().map(|e| (Some(e.id.clone()), name(e))));
-        Self { ui, devices }
+        Self {
+            ui,
+            view: Deferred::default(),
+            devices,
+        }
     }
 
     /// 当前选定的输出设备（端点标识；`None` 为默认设备）。
@@ -115,8 +123,11 @@ impl App {
         self.devices.iter().map(|d| d.1.clone()).collect()
     }
 
-    /// 处理输入；`selected` 为播放列表当前选中的行（按位置升序）。
-    pub fn handle(&mut self, input: Input, selected: &[usize]) -> Vec<Op> {
+    /// 处理输入；`selected` 为播放列表当前选中的行（按位置升序），`visible` 为窗口当前是否可见
+    /// （未最小化）。不可见时模型照常更新，显示变化暂存，恢复时一次重绘（L1）。
+    pub fn handle(&mut self, input: Input, selected: &[usize], visible: bool) -> Vec<Op> {
+        let shown = self.view.set_visible(visible);
+        let mut ops = self.ops(shown);
         let changes = match input {
             Input::Command(ID_PLAY) => self.ui.play_pause(selected.first().copied()),
             Input::Command(ID_STOP) => self.ui.stop(),
@@ -128,12 +139,24 @@ impl App {
                 self.ui.next();
                 Changes::default()
             }
-            Input::Command(ID_ADD_FILES) => return vec![Op::OpenFiles],
-            Input::Command(ID_ADD_FOLDER) => return vec![Op::OpenFolder],
+            Input::Command(ID_ADD_FILES) => {
+                ops.push(Op::OpenFiles);
+                return ops;
+            }
+            Input::Command(ID_ADD_FOLDER) => {
+                ops.push(Op::OpenFolder);
+                return ops;
+            }
             Input::Command(ID_REMOVE) => self.ui.remove(selected),
             Input::Command(ID_CLEAR) => self.ui.clear(),
-            Input::Command(ID_EXIT) => return vec![Op::Close],
-            Input::Command(ID_ABOUT) => return vec![Op::About],
+            Input::Command(ID_EXIT) => {
+                ops.push(Op::Close);
+                return ops;
+            }
+            Input::Command(ID_ABOUT) => {
+                ops.push(Op::About);
+                return ops;
+            }
             Input::Command(_) => Changes::default(),
             Input::Activate(i) => self.ui.play_from(i),
             Input::Delete(rows) => self.ui.remove(&rows),
@@ -153,8 +176,11 @@ impl App {
                 Changes::default()
             }
             Input::Notify => self.ui.pump(),
+            Input::Resized => Changes::default(),
         };
-        self.ops(changes)
+        let changes = self.view.filter(changes);
+        ops.extend(self.ops(changes));
+        ops
     }
 
     fn ops(&self, c: Changes) -> Vec<Op> {
