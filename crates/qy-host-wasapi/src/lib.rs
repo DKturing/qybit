@@ -7,6 +7,7 @@
 //! - `sdk_format`（仅 Windows）：纯格式描述到 SDK 结构的字段映射；
 //! - `endpoints`（仅 Windows）：端点枚举；
 //! - `volume`（仅 Windows）：端点的硬件音量（GUI T5，只用设备在硬件上实现的音量）；
+//! - `watch`（仅 Windows）：端点变化通知（GUI T6，设备列表自动更新）；
 //! - `interrupt`（仅 Windows）：Ctrl+C 中断标志。
 //!
 //! 宿主资源、播放驱动与报告见 `qy-player`。
@@ -24,6 +25,8 @@ pub mod sdk_format;
 pub mod volume;
 #[cfg(windows)]
 pub mod wasapi;
+#[cfg(windows)]
+pub mod watch;
 
 #[cfg(test)]
 mod fake;

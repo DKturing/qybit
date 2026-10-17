@@ -564,3 +564,163 @@ fn hidden_window_defers_redraw_without_losing_events() {
     assert_eq!(view.set_visible(true), Changes::default());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 写入一个 WAV（采样率、声道、帧数可选）。
+fn wav(dir: &Path, name: &str, rate: u32, channels: u16, frames: u64) -> PathBuf {
+    let p = dir.join(name);
+    if let Err(e) = write_test_wav(&p, rate, channels, 16, frames) {
+        panic!("{e}");
+    }
+    p
+}
+
+fn names(ui: &Ui) -> Vec<String> {
+    ui.model
+        .entries
+        .iter()
+        .map(|e| {
+            e.path
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+        })
+        .collect()
+}
+
+/// 列表排序（GUI T6）：各依据、反向、稳定，未知时长与无法播放的排在最后；按添加顺序可还原。
+#[test]
+fn sorting_by_each_key() {
+    let dir = temp("sort");
+    let files = vec![
+        wav(&dir, "b.wav", 48_000, 2, 96_000), // 2.0 s
+        wav(&dir, "A.wav", 44_100, 2, 44_100), // 1.0 s
+        wav(&dir, "c.wav", 96_000, 1, 96_000), // 1.0 s
+    ];
+    let bad = dir.join("d.wav");
+    let _ = std::fs::write(&bad, b"not audio");
+    let mut ui = ui_with(FakeBackend::new(&ALL));
+    let mut all = files.clone();
+    all.push(bad);
+    ui.add_paths(all);
+    assert!(until(&mut ui, 10, all_probed));
+
+    assert!(ui.sort(qy_ui::SortKey::Name, false).list);
+    assert_eq!(names(&ui), ["A.wav", "b.wav", "c.wav", "d.wav"]);
+    ui.sort(qy_ui::SortKey::Name, true);
+    assert_eq!(names(&ui), ["d.wav", "c.wav", "b.wav", "A.wav"]);
+    // 时长：A 与 c 同为 1 秒，稳定排序保持当前顺序（c 在 A 前）；无法播放的总在最后。
+    ui.sort(qy_ui::SortKey::Length, false);
+    assert_eq!(names(&ui), ["c.wav", "A.wav", "b.wav", "d.wav"]);
+    ui.sort(qy_ui::SortKey::Length, true);
+    assert_eq!(names(&ui), ["b.wav", "c.wav", "A.wav", "d.wav"]);
+    // 格式：同为 WAV，按采样率。
+    ui.sort(qy_ui::SortKey::Format, false);
+    assert_eq!(names(&ui), ["A.wav", "b.wav", "c.wav", "d.wav"]);
+    ui.sort(qy_ui::SortKey::Added, false);
+    assert_eq!(names(&ui), ["b.wav", "A.wav", "c.wav", "d.wav"]);
+    ui.sort(qy_ui::SortKey::Added, true);
+    assert_eq!(names(&ui), ["d.wav", "c.wav", "A.wav", "b.wav"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 移动行（GUI T6）：单行、多行不连续、到首尾、越界；返回移动后的位置。
+#[test]
+fn moving_rows() {
+    let dir = temp("move");
+    let files = tracks(&dir, 5, 100); // 00..04
+    let mut ui = ui_with(FakeBackend::new(&ALL));
+    ui.add_paths(files);
+    let order = |ui: &Ui| -> String { names(ui).iter().map(|n| &n[1..2]).collect() };
+    assert_eq!(order(&ui), "01234");
+    // 第 0 行移到第 3 行之前。
+    let (c, at) = ui.move_rows(&[0], 3);
+    assert!(c.list);
+    assert_eq!((order(&ui), at), ("12034".to_string(), vec![2]));
+    // 不连续的两行（位置 1 与 3：“2”“3”）移到开头。
+    let (_, at) = ui.move_rows(&[3, 1], 0);
+    assert_eq!((order(&ui), at), ("23104".to_string(), vec![0, 1]));
+    // 移到末尾（to = 行数，越界的 to 视为末尾）。
+    let (_, at) = ui.move_rows(&[0], 99);
+    assert_eq!((order(&ui), at), ("31042".to_string(), vec![4]));
+    // 原地不动：没有变化。
+    let (c, at) = ui.move_rows(&[1, 2], 1);
+    assert!(!c.any());
+    assert_eq!((order(&ui), at), ("31042".to_string(), vec![1, 2]));
+    // 越界的行忽略；全部越界时什么也不做。
+    let (c, at) = ui.move_rows(&[7, 8], 0);
+    assert!(!c.any() && at.is_empty());
+    let (_, at) = ui.move_rows(&[4, 9], 0);
+    assert_eq!((order(&ui), at), ("23104".to_string(), vec![0]));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 播放中排序：正在播放的会话按开始时的顺序继续，日志只说明一次。
+#[test]
+fn reorder_while_playing_keeps_session_order() {
+    let dir = temp("reorder");
+    let files = tracks(&dir, 3, 441_000);
+    let mut ui = ui_with(clock_backend());
+    ui.add_paths(files);
+    ui.play_from(0);
+    assert!(until(&mut ui, 10, |u| {
+        u.model.playing.as_ref().is_some_and(|p| p.status.is_some())
+    }));
+    let session: Vec<u64> = ui
+        .model
+        .playing
+        .as_ref()
+        .map(|p| p.entries.clone())
+        .unwrap_or_default();
+    let playing = ui.model.playing_entry();
+    ui.sort(qy_ui::SortKey::Name, true);
+    ui.move_rows(&[0], 3);
+    let notes = ui
+        .model
+        .log
+        .iter()
+        .filter(|l| l.contains("列表顺序已改变"))
+        .count();
+    assert_eq!(notes, 1);
+    assert_eq!(
+        ui.model.playing.as_ref().map(|p| p.entries.clone()),
+        Some(session)
+    );
+    assert_eq!(ui.model.playing_entry(), playing, "播放标记跟随条目");
+    ui.stop();
+    assert!(until(&mut ui, 10, |u| u.model.playing.is_none()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 采样率指示灯（GUI T6）：未播放灰、打开中琥珀、按源采样率打开为绿；设备不接受时红，并写明
+/// 曲目的采样率（不断言是采样率本身的问题）。
+#[test]
+fn rate_lamp_follows_negotiation() {
+    use qy_ui::text::RateLamp;
+    let dir = temp("lamp");
+    let mono = wav(&dir, "mono.wav", 48_000, 1, 48_000);
+    let stereo = wav(&dir, "stereo.wav", 96_000, 2, 96_000);
+    let mut b = FakeBackend::with_negotiator(&ALL, NoMonoNegotiator);
+    b.device = FakeDevice::Clock;
+    let mut ui = Ui::new(move |_device: Option<&str>| Ok(b.clone()), Arc::new(|| {}));
+    assert_eq!(
+        text::rate_lamp(&ui.model),
+        (RateLamp::Off, "采样率 —".to_string())
+    );
+    ui.add_paths(vec![stereo, mono]);
+    assert!(until(&mut ui, 10, all_probed));
+    ui.play_from(0);
+    assert_eq!(text::rate_lamp(&ui.model).0, RateLamp::Opening);
+    assert!(until(&mut ui, 10, |u| text::rate_lamp(&u.model)
+        == (RateLamp::Native, "96 kHz 原生".to_string())));
+    ui.stop();
+    assert!(until(&mut ui, 10, |u| u.model.playing.is_none()));
+    assert_eq!(text::rate_lamp(&ui.model).0, RateLamp::Off);
+    // 单声道：设备不接受，按失败曲目的采样率显示红灯。
+    ui.play_from(1);
+    assert!(until(&mut ui, 10, |u| u.model.playing.is_none()));
+    assert!(ui.model.last.as_ref().is_some_and(|o| o.device_rejected));
+    assert_eq!(
+        text::rate_lamp(&ui.model),
+        (RateLamp::Rejected, "48 kHz 未打开".to_string())
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

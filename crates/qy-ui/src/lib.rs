@@ -16,8 +16,9 @@
 pub mod model;
 pub mod probe;
 pub mod session;
+pub mod settings;
 pub mod text;
 
-pub use model::{Changes, Deferred, Entry, Model, Outcome, Playing, Ui};
+pub use model::{Changes, Deferred, Entry, Model, Outcome, Playing, SortKey, Ui};
 pub use probe::{Kind, Probe, TrackInfo};
 pub use session::UiEvent;

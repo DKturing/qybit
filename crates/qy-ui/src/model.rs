@@ -1,13 +1,14 @@
 //! 界面模型与界面线程上的操作。
 
+use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use qy_core::Fault;
 use qy_core::engine::EngineFault;
+use qy_core::{Fault, SourceFormat};
 use qy_player::report::{AttemptRecord, fault_text};
 use qy_player::{Backend, Command, CommandSender, PlaybackReport, Status};
 
@@ -43,6 +44,10 @@ pub struct Outcome {
     pub error: Option<String>,
     /// 播放因曲目失败而停止时的原因（如设备不支持该曲目的格式），含曲目编号。
     pub stopped: Option<String>,
+    /// 播放因输出设备未能按曲目格式打开而停止（采样率指示灯显示红色，GUI T6）。
+    pub device_rejected: bool,
+    /// 失败的曲目（会话内编号）。
+    pub fault_track: Option<u32>,
 }
 
 impl Outcome {
@@ -57,6 +62,8 @@ impl Outcome {
             underrun_events: r.underrun_events(),
             user_skips: r.user_skips,
             error: None,
+            device_rejected: matches!(r.fault, Some((_, EngineFault::Core(Fault::Configure)))),
+            fault_track: r.fault.map(|(track, _)| track),
             stopped: r.fault.map(|(track, fault)| {
                 let n = u64::from(track) + 1;
                 match (fault, r.open_failures.last()) {
@@ -81,6 +88,8 @@ impl Outcome {
             user_skips: 0,
             error: Some(reason),
             stopped: None,
+            device_rejected: false,
+            fault_track: None,
         }
     }
 }
@@ -101,6 +110,125 @@ pub struct Playing {
     /// 已发出的定位命令数与最近一次的目标帧（S1）。状态快照的 `user_seeks` 赶上之前，播放位置按
     /// 目标帧显示：定位命令在播放线程执行前到达的旧快照不把进度条与时间拉回原位置。
     seek_hold: Option<(u32, u64)>,
+    /// 本会话中已在日志写明“列表顺序改变不影响正在播放的会话”（GUI T6，只写一次）。
+    reorder_noted: bool,
+}
+
+/// 播放列表的排序依据（GUI T6）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+    /// 加入列表的先后（“#”列）。
+    Added,
+    /// 文件名（不区分大小写，相同时按完整路径）。
+    Name,
+    /// 文件头声明的时长；未知的排在最后。
+    Length,
+    /// 格式：容器、采样率、位数、声道数；读取中与无法播放的排在最后。
+    Format,
+}
+
+impl SortKey {
+    /// 设置文件中的写法。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Name => "name",
+            Self::Length => "length",
+            Self::Format => "format",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        [Self::Added, Self::Name, Self::Length, Self::Format]
+            .into_iter()
+            .find(|k| k.name() == s)
+    }
+
+    /// 显示用的名称。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Added => "添加顺序",
+            Self::Name => "文件名",
+            Self::Length => "时长",
+            Self::Format => "格式",
+        }
+    }
+}
+
+/// 排序用的比较：`Some` 之间按值比较，`None`（未知）不论方向都排在最后。
+fn cmp_known<T: Ord>(a: Option<T>, b: Option<T>, descending: bool) -> Ordering {
+    match (a, b) {
+        (Some(x), Some(y)) if descending => y.cmp(&x),
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// 时长（帧数 / 采样率）的精确比较键：以分数比较，不经浮点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Length {
+    frames: u64,
+    rate: u32,
+}
+
+impl Ord for Length {
+    fn cmp(&self, o: &Self) -> Ordering {
+        (u128::from(self.frames) * u128::from(o.rate))
+            .cmp(&(u128::from(o.frames) * u128::from(self.rate)))
+    }
+}
+
+impl PartialOrd for Length {
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+        Some(self.cmp(o))
+    }
+}
+
+fn sort_cmp(key: SortKey, a: &Entry, b: &Entry, descending: bool) -> Ordering {
+    let info = |e: &Entry| match &e.probe {
+        Probe::Ready(i) => Some(*i),
+        _ => None,
+    };
+    match key {
+        SortKey::Added => cmp_known(Some(a.id), Some(b.id), descending),
+        SortKey::Name => {
+            let k = |e: &Entry| {
+                let name = e
+                    .path
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().to_lowercase());
+                (name, e.path.to_string_lossy().to_lowercase())
+            };
+            cmp_known(Some(k(a)), Some(k(b)), descending)
+        }
+        SortKey::Length => {
+            let k = |e: &Entry| {
+                let i = info(e)?;
+                let rate = i.format.sample_rate();
+                (rate > 0).then_some(Length {
+                    frames: i.frames?,
+                    rate,
+                })
+            };
+            cmp_known(k(a), k(b), descending)
+        }
+        SortKey::Format => {
+            let k = |e: &Entry| {
+                info(e).map(|i| {
+                    (
+                        i.kind.label(),
+                        i.format.sample_rate(),
+                        i.format.bits(),
+                        i.format.encoding().is_float(),
+                        i.format.channels(),
+                    )
+                })
+            };
+            cmp_known(k(a), k(b), descending)
+        }
+    }
 }
 
 /// 界面模型。
@@ -123,6 +251,8 @@ pub struct Model {
     pub read_limit: Option<u64>,
     /// 后台线程的致命错误。
     pub fatal: Option<String>,
+    /// 最近一次结束的播放中失败曲目（或最后一首）的源格式（采样率指示灯用，GUI T6）。
+    pub last_source: Option<SourceFormat>,
     next_entry: u64,
     next_session: u64,
 }
@@ -353,6 +483,71 @@ impl Ui {
         }
     }
 
+    /// 在日志区追加一行说明（界面操作的结果，如设备列表更新、设置恢复）。
+    pub fn note(&mut self, text: &str) -> Changes {
+        self.model.push_log(text);
+        Changes {
+            log: true,
+            ..Default::default()
+        }
+    }
+
+    /// 按 `key` 排序（稳定；`descending` 为反向，未知值总在最后）。正在播放的会话不受影响。
+    pub fn sort(&mut self, key: SortKey, descending: bool) -> Changes {
+        self.model
+            .entries
+            .sort_by(|a, b| sort_cmp(key, a, b, descending));
+        let mut c = Changes {
+            list: true,
+            ..Default::default()
+        };
+        c.merge(self.note_reorder());
+        c
+    }
+
+    /// 把 `rows` 指定的行（不必连续）按原来的相对顺序移到第 `to` 行之前（`to` 为移动前的位置，
+    /// 等于行数时移到末尾）。越界的行忽略。返回变化与移动后这些行的位置。正在播放的会话不受影响。
+    pub fn move_rows(&mut self, rows: &[usize], to: usize) -> (Changes, Vec<usize>) {
+        let len = self.model.entries.len();
+        let mut rows: Vec<usize> = rows.iter().copied().filter(|&r| r < len).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        if rows.is_empty() {
+            return (Changes::default(), Vec::new());
+        }
+        let to = to.min(len);
+        let at = to - rows.iter().filter(|&&r| r < to).count();
+        let mut moved = Vec::with_capacity(rows.len());
+        for &r in rows.iter().rev() {
+            moved.push(self.model.entries.remove(r));
+        }
+        moved.reverse();
+        let n = moved.len();
+        let unchanged = rows.iter().copied().eq(at..at + n);
+        self.model.entries.splice(at..at, moved);
+        if unchanged {
+            return (Changes::default(), (at..at + n).collect());
+        }
+        let mut c = Changes {
+            list: true,
+            ..Default::default()
+        };
+        c.merge(self.note_reorder());
+        (c, (at..at + n).collect())
+    }
+
+    /// 播放中第一次改变列表顺序时说明：正在播放的会话按开始时的顺序继续。
+    fn note_reorder(&mut self) -> Changes {
+        let Some(p) = self.model.playing.as_mut() else {
+            return Changes::default();
+        };
+        if p.stopping || p.reorder_noted {
+            return Changes::default();
+        }
+        p.reorder_noted = true;
+        self.note("列表顺序已改变：正在播放的会话按开始时的顺序继续，新顺序从下一次开始播放起生效")
+    }
+
     /// 从列表第 `index` 首开始播放。正在播放且该条目属于当前会话时直接跳曲；否则停止当前
     /// 会话（不排空），按当前列表开始新会话。
     pub fn play_from(&mut self, index: usize) -> Changes {
@@ -395,6 +590,7 @@ impl Ui {
             status: None,
             stopping: false,
             seek_hold: None,
+            reorder_noted: false,
         });
         self.model.last = None;
         Changes {
@@ -623,6 +819,20 @@ impl Ui {
                     return Changes::default();
                 }
                 m.push_log(&outcome.summary);
+                // 指示灯：失败曲目的源格式（文件头读取结果），没有失败时取最后的状态快照。
+                let fault_source = outcome.fault_track.and_then(|t| {
+                    let id = *m.playing.as_ref()?.entries.get(t as usize)?;
+                    match &m.entries.get(m.index_of(id)?)?.probe {
+                        Probe::Ready(i) => Some(i.format),
+                        _ => None,
+                    }
+                });
+                m.last_source = fault_source.or_else(|| {
+                    m.playing
+                        .as_ref()
+                        .and_then(|p| p.status)
+                        .and_then(|s| s.source)
+                });
                 m.playing = None;
                 m.last = Some(outcome);
                 Changes {

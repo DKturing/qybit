@@ -31,6 +31,9 @@ windows = { workspace = true, features = [
     "Win32_System_Variant",
     "Win32_UI_Shell_PropertiesSystem",
 ] }
+# COM 接口实现宏（`#[implement]`）生成的代码引用 `windows_core`，需要直接依赖；版本与 `windows`
+# 所用的一致（GUI T6：端点变化通知 `IMMNotificationClient`）。
+windows-core = { workspace = true }
 
 [dev-dependencies]
 qy-player = { workspace = true, features = ["test-support"] }

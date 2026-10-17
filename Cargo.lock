@@ -398,6 +398,7 @@ dependencies = [
  "qy-pcm-format",
  "qy-player",
  "windows",
+ "windows-core",
 ]
 
 [[package]]

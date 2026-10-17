@@ -65,6 +65,8 @@ alsa = { version = "=0.12.1", default-features = false, features = ["std"] }
 libc = { version = "=0.2.190", default-features = false }
 # Windows SDK 绑定（WASAPI / COM），仅 Windows 目标使用。
 windows = { version = "=0.62.2", default-features = false }
+# `windows` 的核心 crate：COM 接口实现宏 `#[implement]` 的生成代码按此名引用（与 `windows` 的依赖同版本）。
+windows-core = { version = "=0.62.2", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

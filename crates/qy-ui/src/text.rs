@@ -192,3 +192,56 @@ pub fn outcome_line(o: &Outcome) -> String {
         "播放未完整完成，详见日志".into()
     }
 }
+
+/// 采样率指示灯的状态（GUI T6）。只依据独占协商的结果，不宣称 DAC 实际运行在该采样率。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLamp {
+    /// 未播放（灰）。
+    Off,
+    /// 正在打开设备（琥珀）。
+    Opening,
+    /// 设备流已按源采样率独占打开，没有重采样（绿）。
+    Native,
+    /// 设备未能按曲目格式打开；原因在状态栏与日志，不断言是采样率本身的问题（红）。
+    Rejected,
+    /// 设备流采样率与源不同（严格路径不应出现，出现即报告；红）。
+    Mismatch,
+}
+
+/// 指示灯状态与旁边的文字（文字本身写明状态，不只靠颜色区分）。
+pub fn rate_lamp(m: &Model) -> (RateLamp, String) {
+    if let Some(p) = &m.playing {
+        let Some(s) = p.status.filter(|_| !p.stopping) else {
+            return (RateLamp::Opening, "正在打开…".into());
+        };
+        return match (&s.source, &s.device) {
+            (Some(src), Some(d)) if src.sample_rate() != d.sample_rate() => (
+                RateLamp::Mismatch,
+                format!(
+                    "采样率不一致：源 {} kHz，设备 {} kHz",
+                    khz(src.sample_rate()),
+                    khz(d.sample_rate())
+                ),
+            ),
+            (_, Some(d)) => (
+                RateLamp::Native,
+                format!("{} kHz 原生", khz(d.sample_rate())),
+            ),
+            (Some(src), None) => (
+                RateLamp::Opening,
+                format!("{} kHz 打开中", khz(src.sample_rate())),
+            ),
+            (None, None) => (RateLamp::Opening, "正在打开…".into()),
+        };
+    }
+    match &m.last {
+        Some(o) if o.device_rejected => match &m.last_source {
+            Some(src) => (
+                RateLamp::Rejected,
+                format!("{} kHz 未打开", khz(src.sample_rate())),
+            ),
+            None => (RateLamp::Rejected, "设备未打开".into()),
+        },
+        _ => (RateLamp::Off, "采样率 —".into()),
+    }
+}

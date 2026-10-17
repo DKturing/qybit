@@ -215,7 +215,41 @@ jobs:
             [DllImport("user32.dll")] public static extern void mouse_event(uint f, int x, int y, uint d, UIntPtr e);
             [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
             [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+            [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+            [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint a, bool i, int pid);
+            [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+            [DllImport("kernel32.dll")] public static extern IntPtr VirtualAllocEx(IntPtr h, IntPtr a, UIntPtr n, uint t, uint p);
+            [DllImport("kernel32.dll")] public static extern bool VirtualFreeEx(IntPtr h, IntPtr a, UIntPtr n, uint t);
+            [DllImport("kernel32.dll")] public static extern bool WriteProcessMemory(IntPtr h, IntPtr a, byte[] b, UIntPtr n, out UIntPtr w);
+            [DllImport("kernel32.dll")] public static extern bool ReadProcessMemory(IntPtr h, IntPtr a, byte[] b, UIntPtr n, out UIntPtr r);
             [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+            [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+            // GUI T6：读另一个进程中列表控件的文字与行矩形（消息参数须指向该进程的内存）。
+            // LVITEMW（x64，88 字节）：iSubItem 偏移 8，pszText 偏移 24，cchTextMax 偏移 32。
+            static byte[] Remote(int pid, IntPtr list, uint msg, int row, byte[] head, int extra, int textOffset) {
+              IntPtr p = OpenProcess(0x0038, false, pid);
+              IntPtr m = VirtualAllocEx(p, IntPtr.Zero, (UIntPtr)(head.Length + extra), 0x3000, 0x04);
+              if (textOffset >= 0) { BitConverter.GetBytes(m.ToInt64() + head.Length).CopyTo(head, textOffset); }
+              UIntPtr n; WriteProcessMemory(p, m, head, (UIntPtr)head.Length, out n);
+              SendInt(list, msg, (IntPtr)row, m);
+              byte[] back = new byte[head.Length + extra];
+              ReadProcessMemory(p, m, back, (UIntPtr)back.Length, out n);
+              VirtualFreeEx(p, m, UIntPtr.Zero, 0x8000); CloseHandle(p);
+              return back;
+            }
+            public static string ItemText(IntPtr list, int pid, int row, int col) {
+              byte[] item = new byte[88];
+              BitConverter.GetBytes(col).CopyTo(item, 8);
+              BitConverter.GetBytes(512).CopyTo(item, 32);
+              byte[] back = Remote(pid, list, 0x1073, row, item, 1024, 24);
+              string s = Encoding.Unicode.GetString(back, 88, 1024);
+              int z = s.IndexOf((char)0); return z >= 0 ? s.Substring(0, z) : s;
+            }
+            public static RECT ItemRect(IntPtr list, int pid, int row) {
+              byte[] back = Remote(pid, list, 0x100E, row, new byte[16], 0, -1);
+              RECT r; r.Left = BitConverter.ToInt32(back, 0); r.Top = BitConverter.ToInt32(back, 4);
+              r.Right = BitConverter.ToInt32(back, 8); r.Bottom = BitConverter.ToInt32(back, 12); return r;
+            }
           }
           "@
           $out = "$env:RUNNER_TEMP/gui-shots"; New-Item -ItemType Directory -Force $out | Out-Null
@@ -250,12 +284,18 @@ jobs:
             $ms = New-Object System.IO.MemoryStream; $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
             Write-Output "===== 状态 $name"
             Write-Output "状态栏：$(Text $h 205)"
+            Write-Output "采样率指示灯：$(Text $h 212)"
             Write-Output "音量：$(Text $h 209)"
             Write-Output "日志（最后 25 行）："
             (Text $h 204) -split "`r`n" | Select-Object -Last 25 | ForEach-Object { Write-Output "  | $_" }
             Write-Output "SHOT-BEGIN $name"
             Write-Output ([Convert]::ToBase64String($ms.ToArray()))
             Write-Output "SHOT-END $name"
+          }
+          # GUI T6：采样率指示灯的文字（212）应为 $want。
+          function Lamp($p, $want) {
+            $got = Text $p.MainWindowHandle 212
+            if ($got -ne $want) { Write-Output "采样率指示灯应为“$want”，实际“$got”"; exit 1 }
           }
           function Close($p) {
             [void]$p.CloseMainWindow()
@@ -266,6 +306,7 @@ jobs:
           # 101 播放/暂停，102 停止，104 下一首；203 单声道复制复选框（BM_CLICK 0x00F5）。
           $p = Gui $sim "ok" "stereo44,hires96" $fixtures
           Shot $p "01-就绪"
+          Lamp $p "采样率 —"
           # 两个选项复选框（203 单声道复制、210 浮点转整数）都完整可见、互不重叠（真机曾因第一行放不下
           # 而把浮点复选框挤成零宽度）。
           $mw = New-Object W+RECT; [void][W]::GetWindowRect($p.MainWindowHandle, [ref]$mw)
@@ -280,6 +321,7 @@ jobs:
             $prev = $r
           }
           Cmd $p 101; Start-Sleep -Seconds 2; Shot $p "02-播放中"
+          Lamp $p "44.1 kHz 原生"
           Cmd $p 101; Start-Sleep -Seconds 1; Shot $p "03-暂停"
           Cmd $p 101; Start-Sleep -Milliseconds 500; Cmd $p 104; Start-Sleep -Seconds 2; Shot $p "04-下一首"
           Cmd $p 102; Start-Sleep -Seconds 1; Shot $p "05-停止"
@@ -294,8 +336,10 @@ jobs:
           Close $p
           $p = Gui $sim "ok" "mono48,stereo44" $null
           Cmd $p 101; Start-Sleep -Seconds 2; Shot $p "06-单声道严格路径被拒"
+          Lamp $p "48 kHz 未打开"
           [void][W]::SendInt([W]::GetDlgItem($p.MainWindowHandle, 203), 0x00F5, [IntPtr]0, [IntPtr]0)
           Cmd $p 101; Start-Sleep -Seconds 2; Shot $p "07-单声道复制"
+          Lamp $p "48 kHz 原生"
           Close $p
           $p = Gui $sim "slow" "stereo44" $null
           Cmd $p 101; Start-Sleep -Seconds 4; Shot $p "08-欠载"
@@ -345,6 +389,89 @@ jobs:
           [void][W]::SendInt([W]::GetDlgItem($p.MainWindowHandle, 210), 0x00F5, [IntPtr]0, [IntPtr]0)
           Cmd $p 101; Start-Sleep -Seconds 2; Shot $p "15-浮点转整数"
           Close $p
+          # GUI T6：媒体键、列表排序与拖动、设备列表更新、记住播放列表与设置。设置写到临时的
+          # APPDATA，不影响其他运行。
+          $appdata = $env:APPDATA
+          $env:APPDATA = "$env:RUNNER_TEMP/qy-appdata"; New-Item -ItemType Directory -Force $env:APPDATA | Out-Null
+          $cfg = "$env:APPDATA/QyBit/qybit-gui.cfg"
+          function Rows($p) {
+            $l = [W]::GetDlgItem($p.MainWindowHandle, 201)
+            $n = [int][W]::SendInt($l, 0x1004, [IntPtr]0, [IntPtr]0)
+            if ($n -le 0) { return @() }
+            @(0..($n - 1) | ForEach-Object { [W]::ItemText($l, $p.Id, $_, 2) })
+          }
+          function Order($p, $want, $what) {
+            $got = (Rows $p) -join ","
+            Write-Output "$what：$got"
+            if ($got -ne $want) { Write-Output "$what 应为 $want"; exit 1 }
+          }
+          function Has($p, $text) { (Text $p.MainWindowHandle 204).Contains($text) }
+          $p = Gui $sim "ok" "stereo44,short,hires96,mono48" $null
+          $h = $p.MainWindowHandle
+          (Text $h 204) -split "`r`n" | Where-Object { $_ -match "全局媒体键|设备" } | ForEach-Object { Write-Output "  | $_" }
+          # 媒体键：WM_APPCOMMAND（0x0319），lparam 高位字为命令（14 播放/暂停）。
+          [void][W]::PostMessageW($h, 0x0319, $h, [IntPtr](14 -shl 16)); Start-Sleep -Seconds 2
+          $st = Text $h 205; Write-Output "媒体键播放后：$st"
+          if (-not $st.StartsWith("▶")) { Write-Output "媒体键播放/暂停未开始播放"; exit 1 }
+          [void][W]::PostMessageW($h, 0x0319, $h, [IntPtr](14 -shl 16)); Start-Sleep -Seconds 1
+          $st = Text $h 205; Write-Output "媒体键暂停后：$st"
+          if (-not $st.StartsWith("‖")) { Write-Output "媒体键播放/暂停未暂停"; exit 1 }
+          Cmd $p 102; Start-Sleep -Seconds 1
+          # 排序（列表菜单：114 文件名，再一次反向；115 时长，同为 10 秒的保持当前顺序）。
+          Order $p "sim-stereo44.wav,sim-short.wav,sim-hires96.wav,sim-mono48.wav" "初始顺序"
+          Cmd $p 114; Start-Sleep -Milliseconds 300
+          Order $p "sim-hires96.wav,sim-mono48.wav,sim-short.wav,sim-stereo44.wav" "按文件名"
+          Cmd $p 114; Start-Sleep -Milliseconds 300
+          Order $p "sim-stereo44.wav,sim-short.wav,sim-mono48.wav,sim-hires96.wav" "按文件名反向"
+          Cmd $p 115; Start-Sleep -Milliseconds 300
+          Order $p "sim-short.wav,sim-mono48.wav,sim-stereo44.wav,sim-hires96.wav" "按时长"
+          Shot $p "16-排序"
+          # 拖动：真实鼠标把第 1 行拖到最后一行的下半部（落点为列表末尾）。
+          $l = [W]::GetDlgItem($h, 201)
+          [void][W]::SetForegroundWindow($h)
+          function At($row, $frac) {
+            $r = [W]::ItemRect($l, $p.Id, $row); $pt = New-Object W+POINT
+            $pt.X = $r.Left + 200; $pt.Y = [int]($r.Top + ($r.Bottom - $r.Top) * $frac)
+            [void][W]::ClientToScreen($l, [ref]$pt); $pt
+          }
+          $a = At 0 0.5; $b = At 3 0.8
+          [void][W]::SetCursorPos($a.X, $a.Y); Start-Sleep -Milliseconds 200
+          [W]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 150
+          foreach ($k in 1..12) {
+            [void][W]::SetCursorPos($a.X, [int]($a.Y + ($b.Y - $a.Y) * $k / 12)); Start-Sleep -Milliseconds 40
+          }
+          [W]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 500
+          $sel = [int][W]::SendInt($l, 0x100C, [IntPtr](-1), [IntPtr]2)
+          $got = (Rows $p) -join ","
+          if ($got -eq "sim-short.wav,sim-mono48.wav,sim-stereo44.wav,sim-hires96.wav" -and $sel -ne 0) {
+            Write-Output "真实鼠标输入未到达窗口（runner 桌面不接受模拟输入）：拖动核对未运行"
+          } else {
+            Order $p "sim-mono48.wav,sim-stereo44.wav,sim-hires96.wav,sim-short.wav" "拖动后"
+            Shot $p "17-拖动后"
+            # 上移选中的行（117）：拖动后选中的是移到末尾的那一行。
+            Cmd $p 117; Start-Sleep -Milliseconds 300
+            Order $p "sim-mono48.wav,sim-stereo44.wav,sim-short.wav,sim-hires96.wav" "上移后"
+          }
+          # 设备列表更新（WM_APP + 2，模拟设备模式下只有模拟端点）。
+          [void][W]::PostMessageW($h, 0x8002, [IntPtr]0, [IntPtr]0); Start-Sleep -Milliseconds 500
+          if (-not (Has $p "输出设备列表已更新")) { Write-Output "设备列表更新未写入日志"; exit 1 }
+          # 记住播放列表与设置（119）：开启即保存，退出时再保存；再次启动后恢复同样的顺序。
+          $saved = (Rows $p) -join ","
+          Cmd $p 119; Start-Sleep -Milliseconds 500
+          if (-not (Has $p "已开启“记住播放列表与设置”")) { Write-Output "开启记住设置未写入日志"; exit 1 }
+          Close $p
+          if (-not (Test-Path $cfg)) { Write-Output "退出后没有设置文件 $cfg"; exit 1 }
+          Get-Content $cfg | ForEach-Object { Write-Output "  cfg | $_" }
+          if (@(Get-Content $cfg | Where-Object { $_ -match "^(mono|float)" }).Count -gt 0) { Write-Output "设置文件不应保存两个非严格选项"; exit 1 }
+          $p = Gui $sim "ok" "" $null
+          if (-not (Has $p "已恢复上次的播放列表（4 首）")) { Write-Output "再次启动未恢复播放列表"; exit 1 }
+          Order $p $saved "恢复后"
+          Shot $p "18-恢复设置"
+          Cmd $p 119; Start-Sleep -Milliseconds 500
+          if (Test-Path $cfg) { Write-Output "关闭记住设置后设置文件仍在"; exit 1 }
+          Close $p
+          if (Test-Path $cfg) { Write-Output "关闭记住设置后退出又写了设置文件"; exit 1 }
+          $env:APPDATA = $appdata
           $p = Gui $rel $null $null @("`"$((Resolve-Path crates/qy-codec-wav/tests/fixtures/pcm16_stereo_44k.wav).Path)`"")
           Cmd $p 101; Start-Sleep -Seconds 3; Shot $p "11-真实WASAPI"
           Close $p
