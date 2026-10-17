@@ -10,6 +10,13 @@
 //! - **I²S**：SPI2/I²S2 主发送（PB12 = WS，PB13 = CK，PB15 = SD，不输出 MCK），飞利浦标准；
 //!   DMA1 Stream4 通道 0 双缓冲，传输完成中断里调用 `Feeder::fill` 填空闲缓冲后换入；
 //! - **串口**：USART2（PA2 = TX，PA3 = RX），115200 8N1，命令见 `qy_host_embedded::command`。
+//!   接收用 RXNE 中断：中断里只把字节放入有界的 `RxQueue`（64 字节，满时丢弃并计数），主循环
+//!   取出后按行解析（L1）；
+//! - **空闲休眠**（L1）：`Player::step` 返回 `Step::Idle` 且接收队列为空时执行 WFI，由 DMA 传输完成
+//!   中断或串口接收中断唤醒。判断与 WFI 在同一个临界区内（屏蔽中断时 WFI 仍会被挂起的中断唤醒），
+//!   不会在判断之后、休眠之前漏掉中断；
+//! - **统计**（L1）：DWT 周期计数器量出主循环的活跃与休眠时间、单次 `step` 的最长耗时，串口命令
+//!   `stats` 报告（另含 DMA 截止余量）。
 //!
 //! 输出格式：
 //! - 16 位源用 16 位帧（`Data16Channel16`），样本小端放入 16 位数据寄存器；
@@ -25,13 +32,15 @@
 //! 时序：`budget` 要求的读取最大输入单元耗时 `U`、解码耗时 `D` 与打开曲目耗时 `O` 必须在实物上实测。本示例的值是
 //! **未实测的占位值**，启动时打印警告；实测后替换 [`UNMEASURED_WAV_READ_US`] 等常量。
 //!
-//! `unsafe`：只有一处，开启 DMA 中断的 `NVIC::unmask`（cortex-m 规定为 unsafe：解除屏蔽可能打破
-//! 依赖屏蔽的临界区；这里在中断处理所需的共享状态都已就绪之后才解除，处理函数只经临界区访问状态）。
+//! `unsafe`：只有一处，开启 DMA 与串口接收中断的 `NVIC::unmask`（cortex-m 规定为 unsafe：解除屏蔽
+//! 可能打破依赖屏蔽的临界区；这里在中断处理所需的共享状态都已就绪之后才解除，两个处理函数都只经
+//! 临界区访问状态）。
 
 use core::cell::{Cell, RefCell};
 use core::fmt::{self, Write as _};
 
 use cortex_m::interrupt::{Mutex, free};
+use cortex_m::peripheral::DWT;
 use cortex_m_rt::entry;
 use embedded_sdmmc::{Block, BlockCount, BlockDevice, BlockIdx};
 use static_cell::ConstStaticCell;
@@ -44,6 +53,7 @@ use stm32f4xx_hal::pac::{self, DMA1, SPI2, interrupt};
 use stm32f4xx_hal::prelude::*;
 use stm32f4xx_hal::rcc::Config;
 use stm32f4xx_hal::sdio::{ClockFreq, SdCard, Sdio};
+use stm32f4xx_hal::serial::{Rx, RxListen};
 
 use qy_codec_auto::AutoDecoder;
 use qy_codec_auto::profile::{Budget, Profile, QueueKind};
@@ -52,7 +62,9 @@ use qy_core::{Core, DeviceFormat, PCM_WORK_SAMPLES};
 use qy_host_embedded::budget::{Demand, Load};
 use qy_host_embedded::output::{AudioOutput, OutputCaps, SlotFormat};
 use qy_host_embedded::player::{Player, write_notice, write_parse_error};
-use qy_host_embedded::{FatStorage, Feeder, FeederAccess, LineBuffer, NoClock};
+use qy_host_embedded::{
+    Activity, Command, FatStorage, Feeder, FeederAccess, LineBuffer, NoClock, RxQueue, Step,
+};
 use qy_pcm_format::static_queue::StaticFrameQueue;
 use qy_pcm_format::{Endian, Placement};
 
@@ -80,6 +92,9 @@ const UNMEASURED_OPEN_US: u32 = 20_000;
 const WAV_UNIT: u32 = 16_384;
 /// 主循环每步至多读取的字节数。
 const READ_CHUNK: u32 = 512;
+
+/// 系统时钟（DWT 周期计数的频率）。
+const SYSCLK_HZ: u32 = 96_000_000;
 
 /// I2SCLK 目标值（PLLI2S）。
 const I2S_CLK_HZ: u32 = 61_440_000;
@@ -408,6 +423,41 @@ fn DMA1_STREAM4() {
 
 // ---- 串口 ----
 
+/// 串口接收端与接收队列（L1）：接收中断写入，主循环在临界区内取出。
+static RX: Mutex<RefCell<Option<Rx<pac::USART2>>>> = Mutex::new(RefCell::new(None));
+static RX_QUEUE: Mutex<RefCell<RxQueue<64>>> = Mutex::new(RefCell::new(RxQueue::new()));
+/// 接收错误（溢出、帧错误等）次数：出错的字节已丢失，所在行按解析错误回应。
+static RX_ERRORS: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
+
+/// 串口接收中断：取出接收寄存器中的字节放入队列（有界，只做搬运与计数）。
+#[interrupt]
+fn USART2() {
+    free(|cs| {
+        let (Ok(mut rx), Ok(mut queue)) = (
+            RX.borrow(cs).try_borrow_mut(),
+            RX_QUEUE.borrow(cs).try_borrow_mut(),
+        ) else {
+            return;
+        };
+        let Some(rx) = rx.as_mut() else {
+            return;
+        };
+        // 读数据寄存器清除 RXNE；出错时 HAL 同样读一次数据寄存器清除错误标志。
+        for _ in 0..4 {
+            match rx.read() {
+                Ok(b) => {
+                    queue.push(b);
+                }
+                Err(stm32f4xx_hal::nb::Error::WouldBlock) => break,
+                Err(stm32f4xx_hal::nb::Error::Other(_)) => {
+                    let e = RX_ERRORS.borrow(cs);
+                    e.set(e.get().wrapping_add(1));
+                }
+            }
+        }
+    });
+}
+
 struct Console<W: fmt::Write>(W);
 
 impl<W: fmt::Write> fmt::Write for Console<W> {
@@ -421,14 +471,14 @@ impl<W: fmt::Write> fmt::Write for Console<W> {
 #[entry]
 fn main() -> ! {
     // 外设只取一次；失败时停在这里（没有可报告的通道）。
-    let (Some(dp), Some(_cp)) = (pac::Peripherals::take(), cortex_m::Peripherals::take()) else {
+    let (Some(dp), Some(mut cp)) = (pac::Peripherals::take(), cortex_m::Peripherals::take()) else {
         loop {
             cortex_m::asm::wfi();
         }
     };
     let mut rcc = dp.RCC.freeze(
         Config::hse(8.MHz())
-            .sysclk(96.MHz())
+            .sysclk(SYSCLK_HZ.Hz())
             .require_pll48clk()
             .i2s_clk(I2S_CLK_HZ.Hz()),
     );
@@ -447,6 +497,15 @@ fn main() -> ! {
         }
     };
     let (tx, mut rx) = serial.split();
+    rx.listen();
+    free(|cs| {
+        if let Ok(mut r) = RX.borrow(cs).try_borrow_mut() {
+            *r = Some(rx);
+        }
+    });
+    // L1：主循环时间统计用 DWT 周期计数器。
+    cp.DCB.enable_trace();
+    cp.DWT.enable_cycle_counter();
     let mut out = Console(tx);
     let _ = writeln!(out, "QYBIT board=stm32f411 i2s_clk={i2s_clk}");
     let _ = writeln!(
@@ -554,10 +613,11 @@ fn main() -> ! {
             };
         }
     });
-    // 共享状态都已就绪，才解除 DMA 中断屏蔽（见模块说明中的 unsafe 审计）。
+    // 共享状态都已就绪，才解除 DMA 与串口接收中断屏蔽（见模块说明中的 unsafe 审计）。
     #[allow(unsafe_code)]
     unsafe {
         cortex_m::peripheral::NVIC::unmask(pac::Interrupt::DMA1_STREAM4);
+        cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USART2);
     }
 
     let loads = [Load {
@@ -584,9 +644,32 @@ fn main() -> ! {
     };
 
     let mut lines = LineBuffer::<32>::new();
+    let mut activity = Activity::new();
     loop {
-        while let Ok(byte) = rx.read() {
+        let start = DWT::cycle_count();
+        // 一次取出队列中的字节（临界区尽量短），再在临界区外解析与执行。
+        let mut bytes = [0u8; 64];
+        let n = free(|cs| {
+            let mut n = 0;
+            if let Ok(mut q) = RX_QUEUE.borrow(cs).try_borrow_mut() {
+                while n < bytes.len() {
+                    let Some(b) = q.pop() else { break };
+                    bytes[n] = b;
+                    n += 1;
+                }
+            }
+            n
+        });
+        for &byte in &bytes[..n] {
             match lines.push(byte) {
+                Some(Ok(Command::Stats)) => {
+                    let _ = player.write_stats(&mut out, Some((&activity, SYSCLK_HZ)));
+                    let (dropped, errors) = free(|cs| {
+                        let dropped = RX_QUEUE.borrow(cs).try_borrow().map_or(0, |q| q.dropped);
+                        (dropped, RX_ERRORS.borrow(cs).get())
+                    });
+                    let _ = writeln!(out, "STATS rx_dropped={dropped} rx_errors={errors}");
+                }
                 Some(Ok(c)) => {
                     let _ = player.command(c, &mut out);
                 }
@@ -599,9 +682,27 @@ fn main() -> ! {
         while let Some(n) = player.pop_notice() {
             let _ = write_notice(&mut out, &n);
         }
-        // 示例不进入低功耗等待：串口接收没有用中断或 DMA，WFI 期间到达的多个字符会因 1 字节
-        // 接收寄存器溢出而丢失，因此空闲时也轮询。
-        let _ = player.step();
+        let before_step = DWT::cycle_count();
+        let step = player.step();
+        let end = DWT::cycle_count();
+        let session = player.status().active;
+        activity.step(end.wrapping_sub(before_step));
+        activity.active(end.wrapping_sub(start), session);
+        if step == Step::Idle {
+            // 判断与 WFI 在同一临界区：之间到达的中断保持挂起，WFI 立即返回，退出临界区后处理。
+            // 唤醒时刻在退出临界区（执行中断处理）之前读取，中断处理的时间计入下一轮的活跃时间。
+            let (slept, woke) = free(|cs| {
+                let idle = RX_QUEUE.borrow(cs).try_borrow().is_ok_and(|q| q.is_empty());
+                let from = DWT::cycle_count();
+                if idle {
+                    cortex_m::asm::wfi();
+                }
+                (idle, DWT::cycle_count().wrapping_sub(from))
+            });
+            if slept {
+                activity.slept(woke, session);
+            }
+        }
     }
 }
 

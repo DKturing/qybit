@@ -29,6 +29,7 @@ use crate::budget::{self, BudgetError, Load, Margins};
 use crate::command::{Command, ParseError};
 use crate::feeder::{FeederAccess, OutputStats};
 use crate::output::{AudioOutput, SelectError};
+use crate::power::Activity;
 use crate::storage::Storage;
 
 /// [`Player::step`] 的结果。
@@ -643,6 +644,8 @@ where
                 writeln!(w, "OK prev")
             }
             Command::Status => write_status(w, &self.status()),
+            // 板级测量主循环时间时自行处理 `stats`（[`Self::write_stats`]）；这里只有喂数器的水位。
+            Command::Stats => self.write_stats(w, None),
             Command::Seek(ms) => {
                 // 定位目标按正在播放的曲目的采样率换算（严格路径不重采样，源与设备采样率相同）；
                 // 刚开始播放、格式还不知道时先记下，格式确定后再定位。
@@ -702,6 +705,41 @@ where
                 }
             }
         }
+    }
+
+    /// 统计行（L1）：`STATS key=value ...`。`timing` 为板级测量的主循环时间与计时器频率（Hz）；
+    /// 没有时写 `activity=unmeasured`。DMA 截止余量复用 R1 水位：中断取数前队列中的最少帧数。
+    pub fn write_stats(
+        &self,
+        w: &mut impl fmt::Write,
+        timing: Option<(&Activity, u32)>,
+    ) -> fmt::Result {
+        w.write_str("STATS")?;
+        match timing {
+            Some((a, hz)) if hz > 0 => {
+                match a.active_permille() {
+                    Some(p) => write!(w, " active_permille={p}")?,
+                    None => w.write_str(" active_permille=none")?,
+                }
+                let max_us = u64::from(a.max_step) * 1_000_000 / u64::from(hz);
+                write!(
+                    w,
+                    " steps={} max_step_us={max_us} sleeps={}",
+                    a.steps, a.sleeps
+                )?;
+            }
+            _ => w.write_str(" activity=unmeasured")?,
+        }
+        let s = self.status();
+        let m = &s.output.watermark;
+        match (
+            m.min_frames,
+            s.device.and_then(|d| m.min_ms(d.sample_rate())),
+        ) {
+            (Some(f), Some(ms)) => write!(w, " dma_min_frames={f} dma_min_ms={ms}")?,
+            _ => w.write_str(" dma_min_frames=none")?,
+        }
+        writeln!(w, " underruns={}", s.output.underruns)
     }
 }
 

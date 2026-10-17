@@ -1237,3 +1237,146 @@ fn opening_a_long_fragmented_track_does_not_underrun() {
         "打散的长曲目",
     );
 }
+
+/// L1：板级主循环的休眠模型（与 `qy-board` 示例相同）。串口字节由接收中断放入 `RxQueue`；`step`
+/// 返回 `Idle` 且队列为空时休眠到下一个中断（DMA 完成或串口字节到达），休眠期间不调用 `step`。
+/// 脚本：0 s `play`，0.5 s `pause`，1.5 s `resume`，播完后停止，3 s `stats` 与 `play`。
+/// - 两次播放都与参考逐字节一致、无欠载；
+/// - 暂停期间每次 DMA 中断只唤醒一次（`step` 次数 ≤ 中断次数 + 1），停止后到 3 s 之间不调用 `step`；
+/// - `stats` 回应活跃比例与 DMA 截止余量（这里用虚拟微秒计时）。
+#[test]
+fn idle_main_loop_sleeps_until_interrupt() {
+    use qy_host_embedded::{Activity, RxQueue, Step};
+    let tracks = vec![synth_wav("A.WAV", 48_000, 2, 16, 48_000, 7)];
+    let Ok((mut p, w, _)) = setup(disk(image(&tracks)), caps(), TIMING, ErrorPolicy::Skip) else {
+        panic!("时序");
+    };
+    let script: [(u64, &[u8]); 4] = [
+        (0, b"play\n"),
+        (500_000, b"pause\n"),
+        (1_500_000, b"resume\n"),
+        (3_000_000, b"stats\nplay\n"),
+    ];
+    let (mut rx, mut lb) = (RxQueue::<64>::new(), LineBuffer::<32>::new());
+    let (mut next_line, mut out, mut notices) = (0usize, String::new(), Vec::new());
+    let mut steps: Vec<u64> = Vec::new();
+    let mut isr_at_pause = (0u64, 0u64);
+    let mut activity = Activity::new();
+    loop {
+        let now = w.borrow().now;
+        assert!(now < 8_000_000, "仿真超时");
+        // 串口接收中断：到点的字节放入队列。
+        while let Some((t, bytes)) = script.get(next_line).copied()
+            && t <= now
+        {
+            for &b in bytes {
+                assert!(rx.push(b));
+            }
+            next_line += 1;
+        }
+        while let Some(b) = rx.pop() {
+            match lb.push(b) {
+                Some(Ok(qy_host_embedded::Command::Stats)) => {
+                    let _ = p.write_stats(&mut out, Some((&activity, 1_000_000)));
+                }
+                Some(Ok(c)) => {
+                    let pausing = c == qy_host_embedded::Command::Pause;
+                    let resuming = c == qy_host_embedded::Command::Resume;
+                    let _ = p.command(c, &mut out);
+                    let isr = w.borrow().isr_calls;
+                    if pausing {
+                        isr_at_pause.0 = isr;
+                    }
+                    if resuming {
+                        isr_at_pause.1 = isr;
+                    }
+                }
+                Some(Err(e)) => panic!("{e:?}"),
+                None => {}
+            }
+        }
+        let step = p.step();
+        steps.push(now);
+        while let Some(n) = p.pop_notice() {
+            notices.push((now, n));
+        }
+        let session = p.status().active;
+        activity.step(STEP_US as u32);
+        match step {
+            Step::Busy => {
+                activity.active(STEP_US as u32, session);
+                w.borrow_mut().advance(STEP_US);
+            }
+            Step::Idle => {
+                activity.active(STEP_US as u32, session);
+                w.borrow_mut().advance(STEP_US);
+                if !rx.is_empty() {
+                    continue;
+                }
+                // WFI：睡到下一个中断。
+                let (dma, uart) = (w.borrow().next_dma(), script.get(next_line).map(|e| e.0));
+                let Some(t) = [dma, uart].into_iter().flatten().min() else {
+                    break;
+                };
+                let from = w.borrow().now;
+                if t > from {
+                    activity.slept((t - from) as u32, session);
+                    w.borrow_mut().advance_to(t);
+                }
+            }
+        }
+    }
+    assert_eq!(next_line, script.len());
+    let s = p.status();
+    assert_eq!(s.output.underruns, 0, "{s:?}");
+    let want = expected(&tracks, &[true], &[None]);
+    let wb = w.borrow();
+    let played: Vec<&common::Segment> = wb.segments.iter().filter(|s| !s.data.is_empty()).collect();
+    assert_eq!(played.len(), 2);
+    for seg in played {
+        assert!(seg.data == want[0].4, "与参考不一致");
+    }
+    drop(wb);
+    // 暂停 1 s：每次 DMA 中断（送静音）只唤醒一次主循环。
+    let paused_steps = steps
+        .iter()
+        .filter(|&&t| t > 500_000 + 2 * STEP_US && t < 1_500_000)
+        .count() as u64;
+    let isr = isr_at_pause.1 - isr_at_pause.0;
+    assert!(
+        isr > 0 && paused_steps <= isr + 1,
+        "暂停中 step {paused_steps} 次，中断 {isr} 次"
+    );
+    // 第一次播完到 3 s 的 `play` 之间不调用 step。
+    let finished = notices
+        .iter()
+        .find(|(_, n)| *n == Notice::Finished)
+        .map(|(t, _)| *t);
+    let Some(finished) = finished else {
+        panic!("未播完：{notices:?}");
+    };
+    let idle_steps = steps
+        .iter()
+        .filter(|&&t| t > finished + 2 * STEP_US && t < 3_000_000)
+        .count();
+    assert!(
+        finished < 3_000_000 && idle_steps == 0,
+        "停止后 step {idle_steps} 次"
+    );
+    assert!(
+        out.contains("OK pause\n") && out.contains("OK resume\n"),
+        "{out}"
+    );
+    let Some(stats) = out.lines().find(|l| l.starts_with("STATS")) else {
+        panic!("{out}");
+    };
+    assert!(
+        stats.contains(" active_permille=") && stats.contains(" dma_min_frames="),
+        "{stats}"
+    );
+    assert!(
+        activity.active_permille().is_some_and(|p| p < 1000),
+        "{activity:?}"
+    );
+    eprintln!("{stats}\n暂停中 step {paused_steps} 次 / 中断 {isr} 次；{activity:?}");
+}

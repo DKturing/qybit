@@ -11,6 +11,7 @@
 //! | `next` / `prev` | 下一首 / 上一首（相对正在播放的曲目） |
 //! | `seek <毫秒>` | 在正在播放的曲目内定位（S1；样本级精确，等于或超过长度时进入下一首） |
 //! | `status` | 状态与计数 |
+//! | `stats` | 主循环活跃比例、单次 `step` 最长耗时与 DMA 截止余量（L1；时间由板级测量） |
 //! | `scan` | 重新扫描存储（换卡后；只在停止时有效） |
 //! | `mono-to-stereo on\|off` | 单声道 `[FC]` 复制到左右两路（非严格选项，默认关闭；对之后开始的曲目生效，见 tasks/O1.md） |
 //! | `float-to-int on\|off` | 浮点转整数（非严格选项，默认关闭；I²S 只输出整数，浮点文件只在开启时播放，样本已改变；见 tasks/F3.md） |
@@ -35,6 +36,8 @@ pub enum Command {
     FloatToInt(bool),
     /// 在正在播放的曲目内定位到第 n 毫秒（S1）。
     Seek(u32),
+    /// 主循环的活跃与休眠统计（L1）。
+    Stats,
 }
 
 /// 解析错误。
@@ -84,7 +87,7 @@ pub fn parse(line: &[u8]) -> Result<Command, ParseError> {
         None => Ok(c),
         Some(_) => Err(ParseError::BadArgument),
     };
-    const TABLE: [(&[u8], Command); 8] = [
+    const TABLE: [(&[u8], Command); 9] = [
         (b"ls", Command::List),
         (b"pause", Command::Pause),
         (b"resume", Command::Resume),
@@ -93,6 +96,7 @@ pub fn parse(line: &[u8]) -> Result<Command, ParseError> {
         (b"prev", Command::Prev),
         (b"status", Command::Status),
         (b"scan", Command::Scan),
+        (b"stats", Command::Stats),
     ];
     if eq_ignore_case(cmd, b"mono-to-stereo") {
         return match arg {
@@ -184,6 +188,61 @@ impl<const L: usize> LineBuffer<L> {
     }
 }
 
+/// 串口接收队列（L1）：接收中断里 [`RxQueue::push`] 收到的字节，主循环 [`RxQueue::pop`] 后交给
+/// [`LineBuffer`]。有界（`N` 字节）；满时丢弃新到的字节并计数，之后的行可能因此不完整，按解析错误
+/// 回应。本身不做同步：中断与主循环共享时，板级在临界区内访问。
+pub struct RxQueue<const N: usize> {
+    buf: [u8; N],
+    head: usize,
+    len: usize,
+    /// 因队列满丢弃的字节数（饱和）。
+    pub dropped: u32,
+}
+
+impl<const N: usize> Default for RxQueue<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> RxQueue<N> {
+    pub const fn new() -> Self {
+        Self {
+            buf: [0; N],
+            head: 0,
+            len: 0,
+            dropped: 0,
+        }
+    }
+
+    /// 放入一个字节；队列满时丢弃并返回 false。
+    pub fn push(&mut self, b: u8) -> bool {
+        if self.len >= N {
+            self.dropped = self.dropped.saturating_add(1);
+            return false;
+        }
+        let tail = (self.head + self.len) % N;
+        self.buf[tail] = b;
+        self.len += 1;
+        true
+    }
+
+    /// 取出最早的字节。
+    pub fn pop(&mut self) -> Option<u8> {
+        if self.len == 0 {
+            return None;
+        }
+        let b = self.buf[self.head];
+        self.head = (self.head + 1) % N;
+        self.len -= 1;
+        Some(b)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -220,6 +279,29 @@ mod tests {
         assert_eq!(parse(b"FLOAT-TO-INT Off"), Ok(Command::FloatToInt(false)));
         assert_eq!(parse(b"float-to-int"), Err(ParseError::BadArgument));
         assert_eq!(parse(b"float-to-int yes"), Err(ParseError::BadArgument));
+        assert_eq!(parse(b"STATS"), Ok(Command::Stats));
+        assert_eq!(parse(b"stats now"), Err(ParseError::BadArgument));
+    }
+
+    #[test]
+    fn rx_queue_is_bounded_fifo() {
+        let mut q = RxQueue::<4>::new();
+        assert!(q.is_empty() && q.pop().is_none());
+        for b in b"abcd" {
+            assert!(q.push(*b));
+        }
+        // 满：丢弃并计数，已有字节不变。
+        assert!(!q.push(b'e') && !q.push(b'f'));
+        assert_eq!(q.dropped, 2);
+        assert_eq!((q.pop(), q.pop()), (Some(b'a'), Some(b'b')));
+        // 环绕。
+        assert!(q.push(b'g') && q.push(b'h') && !q.push(b'i'));
+        let rest: Vec<u8> = core::iter::from_fn(|| q.pop()).collect();
+        assert_eq!(rest, b"cdgh");
+        assert!(q.is_empty());
+        assert_eq!(q.dropped, 3);
+        let mut z = RxQueue::<0>::new();
+        assert!(!z.push(1) && z.pop().is_none() && z.dropped == 1);
     }
 
     #[test]

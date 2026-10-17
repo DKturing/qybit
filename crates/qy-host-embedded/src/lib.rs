@@ -10,7 +10,9 @@
 //!   [`output::OutputCaps`] 声明；
 //! - [`feeder::Feeder`]：DMA 完成中断里调用的喂数器（只做有界搬运、静音补齐与计数），与主循环经
 //!   [`feeder::FeederAccess`] 共享；
-//! - [`command`]：串口命令按行解析，与具体串口外设无关；
+//! - [`command`]：串口命令按行解析，与具体串口外设无关；接收中断与主循环之间用有界的
+//!   [`command::RxQueue`]；
+//! - [`power`]：主循环的活跃与休眠统计（L1：空闲时 WFI，由 DMA 与串口中断唤醒）；
 //! - [`budget`]：由最坏读卡延迟推出预填是否足够，不足时 [`player::Player::new`] 直接报错。
 //!
 //! 播放规则全部在引擎里（预填、续用、换格式排空、暂停、切歌、出错跳过、能力检查），本 crate
@@ -25,12 +27,14 @@ pub mod feeder;
 pub mod flat;
 pub mod output;
 pub mod player;
+pub mod power;
 pub mod storage;
 
 pub use budget::{BudgetError, Demand, Load};
-pub use command::{Command, LineBuffer, ParseError};
+pub use command::{Command, LineBuffer, ParseError, RxQueue};
 pub use feeder::{Feeder, FeederAccess, Fill, OutputStats};
 pub use flat::{FlatError, FlatStorage, FlatTrack, MemoryStorage};
 pub use output::{AudioOutput, OutputCaps, SelectError, SlotFormat};
 pub use player::{Notice, Player, Status, Step};
+pub use power::Activity;
 pub use storage::{FatError, FatStorage, NoClock, Storage};
