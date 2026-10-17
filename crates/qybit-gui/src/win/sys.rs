@@ -669,19 +669,14 @@ fn layout(h: &Handles) {
             let _ = MoveWindow(b, x, bar_y, s(w), bar_h, true);
             x += s(w) + s(6);
         }
-        let _ = MoveWindow(h.device, x + s(6), bar_y + s(2), s(260), s(300), true);
-        x += s(272);
-        let _ = MoveWindow(h.mono, x + s(6), bar_y, s(250), bar_h, true);
-        x += s(256);
-        let _ = MoveWindow(
-            h.float,
-            x + s(6),
-            bar_y,
-            (rc.right - x - s(12)).max(0),
-            bar_h,
-            true,
-        );
-        let (fmt_y, fmt_h) = (bar_y + bar_h + s(4), s(24));
+        // 设备下拉框占第一行余下的宽度（至多 360），不与选项争位置。
+        let dev_w = (rc.right - x - s(12)).clamp(0, s(360));
+        let _ = MoveWindow(h.device, x + s(6), bar_y + s(2), dev_w, s(300), true);
+        // 第二行：两个非严格选项。单独一行，窗口较窄或缩放较大时也完整可见。
+        let (opt_y, opt_h) = (bar_y + bar_h + s(2), s(26));
+        let _ = MoveWindow(h.mono, s(8), opt_y, s(270), opt_h, true);
+        let _ = MoveWindow(h.float, s(8) + s(280), opt_y, s(240), opt_h, true);
+        let (fmt_y, fmt_h) = (opt_y + opt_h + s(2), s(24));
         // 格式行右侧：设备硬件音量的读数标签与滑块（GUI T5）。
         let (vol_w, label_w) = (s(140), s(300));
         let vol_x = (rc.right - s(6) - vol_w).max(0);

@@ -265,6 +265,19 @@ jobs:
           # 101 播放/暂停，102 停止，104 下一首；203 单声道复制复选框（BM_CLICK 0x00F5）。
           $p = Gui $sim "ok" "stereo44,hires96" $fixtures
           Shot $p "01-就绪"
+          # 两个选项复选框（203 单声道复制、210 浮点转整数）都完整可见、互不重叠（真机曾因第一行放不下
+          # 而把浮点复选框挤成零宽度）。
+          $mw = New-Object W+RECT; [void][W]::GetWindowRect($p.MainWindowHandle, [ref]$mw)
+          $prev = $null
+          foreach ($id in 203, 210) {
+            $r = New-Object W+RECT; [void][W]::GetWindowRect([W]::GetDlgItem($p.MainWindowHandle, $id), [ref]$r)
+            $w = $r.Right - $r.Left
+            Write-Output "复选框 $id：左 $($r.Left) 右 $($r.Right) 宽 $w"
+            if ($w -lt 120 -or $r.Right -gt $mw.Right -or ($prev -and $r.Left -lt $prev.Right)) {
+              Write-Output "复选框 $id 不完整可见或与前一个重叠"; exit 1
+            }
+            $prev = $r
+          }
           Cmd $p 101; Start-Sleep -Seconds 2; Shot $p "02-播放中"
           Cmd $p 101; Start-Sleep -Seconds 1; Shot $p "03-暂停"
           Cmd $p 101; Start-Sleep -Milliseconds 500; Cmd $p 104; Start-Sleep -Seconds 2; Shot $p "04-下一首"
