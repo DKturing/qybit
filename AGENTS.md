@@ -9,7 +9,7 @@
 - Rust、纯本地、跨平台；桌面与 MCU 共用同一个 Core（含播放调度）及自有解码路径，宿主只适配 I/O 与设备，不各自实现播放器逻辑。
 - 可移植性按三层验收：编译可移植（no_std 构建）→ 功能可移植（同一 Core 在模拟与 MCU 宿主下完成真实解码、播放与错误处理）→ 实时可靠（真实 MCU 长时运行、资源不超限、无未报告欠载、数字输出符合配置）。不得以前一层冒充后一层。
 - 自行实现 WAV 和 FLAC 解码器；不得改用 Symphonia 或其他生产解码器替代。参考解码器仅用于测试。
-- 格式范围：先只做无损格式（WAV、FLAC，其后 AIFF、浮点 WAV、ALAC、WavPack、APE、DSD 等，见 tasks/FORMATS.md），每种格式自行实现解码并单独立卡；有损格式（MP3、AAC、Opus 等）以后以插件形式另行设计，不进入当前核心范围。2026-10-17 用户决定：暂不做任何音频格式插件；不接入 FFmpeg 等外部解码器（不链接、不调用外部进程），以后自行编写纯 Rust 插件，按编译期接口接入（扩展契约见 tasks/X1.md）。
+- 格式范围：先只做无损格式（WAV、FLAC，其后 AIFF、浮点 WAV、ALAC、WavPack、APE、DSD 等，见 tasks/FORMATS.md），每种格式自行实现解码并单独立卡；有损格式（MP3、AAC、Opus 等）以后以插件形式另行设计，不进入当前核心范围。2026-10-17 用户决定：暂不做任何音频格式插件；不接入 FFmpeg 等外部解码器（不链接、不调用外部进程），以后自行编写纯 Rust 插件，按编译期接口接入（扩展契约见 tasks/X1.md）。2026-10-17 用户确认三层：核心 `qy-core` 不含任何格式；官方解码器（`qy-codec-wav` / `-flac` / `-aiff` 及以后 FORMATS 路线上的格式）各自可选，由项目维护，默认发行版包含；第三方扩展按 docs/x1-extensions.md 的契约编写，在组装层接入。
 - M0 先完成 Windows：核心、WAV、模拟宿主、纯格式描述、WASAPI 独占、CLI。
 - M0 允许按命令行顺序播放多文件；不实现 GUI、拖放、随机播放、seek、配置保存或交互设备选择。
 - M1 实现自有 FLAC；M2 实现 ALSA 与 snd-aloop 自动回环（M2 T5 验证加强在 M3 T1 之后完成）；M3 为 QyBit Embedded Reference：先把播放调度下沉到 no_std 核心层，再做不绑定开发板的通用嵌入式宿主（板级只做薄适配），从板载存储（介质由板级决定：SD 卡、eMMC、U 盘、闪存等，宿主不假定 SD 卡）经 I²S DMA 播放，并在用户手头任一满足最低要求的板上实测验证（见 tasks/M3.md 与 docs/arch-core-mcu.md）；M3 T2 之前先做 F1 多声道（tasks/F1.md），M3 T3 之前先做 R1 资源计划与可靠性验证（tasks/R1.md），性能优化 P1（tasks/P1.md）在 M3 T3 实测之后按数据决定；真实世界 WAV 容错 W1（tasks/W1.md）随 FORMATS 路线排在 F2 之前。2026-10-15 用户调整顺序：先把 Windows 做完整（含 GUI，见 tasks/GUI.md，作为薄应用层），再做 Linux（ALSA 真机与 GUI 在 Linux 上运行），单片机（M3 T2 实物验收、M3 T3、P1）放在最后；macOS 另列任务，不提前扩展范围。

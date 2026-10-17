@@ -6,6 +6,18 @@
 
 完整的可运行示例：[`examples/qy-ext-demo`](../examples/qy-ext-demo)。
 
+## 分层（2026-10-17 用户确认）
+
+| 层 | 包含 | 规则 |
+| --- | --- | --- |
+| **核心** | `qy-core`（sans-IO 核心与 `engine` 播放调度） | 不含任何格式：没有解码代码，也不按格式分支；依赖只有 `qy-pcm-format`（PCM 表示、pack 与帧队列接口，不涉及文件格式）。能力不足与播放计划只按资源描述，格式的叫法由解码器给出（B1）。 |
+| **官方解码器** | `qy-codec-wav`、`qy-codec-flac`、`qy-codec-aiff`，以后 FORMATS 路线上的格式（ALAC、WavPack、APE 等）各一个 `qy-codec-*` crate | 由项目维护，按规范自行实现，`no_std`、无 `alloc`；每个格式各自可选（`qy-codec-auto` 的 `wav` / `flac` / `aiff` 特性，`qy-player` 的 `flac` 特性）；在仓库内接受完整验证（独立参考逐样本核对、`qy-testkit` 契约测试、fuzz、`no_std` 目标编译，适用处 Kani 与 cargo-mutants）。默认发行版包含：桌面 CLI 与 GUI 默认链接 WAV、FLAC、AIFF；MCU 配置档按资源选择（Embedded Lite 不链接 FLAC）。 |
+| **第三方扩展** | 仓库外的格式插件（包括以后自己写的纯 Rust 插件）、音源、输出后端、存储与外设适配 | 按本文的契约编写，在组装层（应用的 `main` 或板级代码）接入，不修改核心；用 `qy-testkit` 证明遵守接口约定。规范之外的格式变体（如 AIFF-C 的 `sowt` / `twos`、AIFF-C 浮点）与以后的有损格式属于这一层。 |
+
+宿主（`qy-player`、`qy-host-*`）与应用（`qybit`、`qybit-gui`、板级程序）不属于这三层：它们是组装层，把核心、官方解码器与扩展组合起来，只执行 I/O 与设备操作。
+
+两层解码器用的是同一套接口（`Decoder` + `Resources`），核心对它们一视同仁；区别只在由谁维护、是否默认包含。官方解码器也可以不编译：关掉对应特性即可，核心不需要改动。
+
 ## 1. 扩展点
 
 | 扩展什么 | 实现 | 所在 | 接入位置 |
