@@ -556,6 +556,9 @@ fn hidden_window_defers_redraw_without_losing_events() {
     assert!(ui.model.log.iter().any(|l| l.contains("▶ 曲目 2/2")));
     let shown = view.set_visible(true);
     assert!(shown.status && shown.log && shown.session, "{shown:?}");
+    // 清除日志只清显示，结束结果保留。
+    assert!(ui.clear_log().log && ui.model.log.is_empty());
+    assert!(ui.model.last.is_some());
     // 可见后照常重绘，暂存已清空。
     assert_eq!(view.filter(Changes::default()), Changes::default());
     assert_eq!(view.set_visible(true), Changes::default());

@@ -214,6 +214,7 @@ jobs:
             [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
             [DllImport("user32.dll")] public static extern void mouse_event(uint f, int x, int y, uint d, UIntPtr e);
             [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+            [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
             [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
           }
           "@
@@ -282,6 +283,14 @@ jobs:
           Cmd $p 101; Start-Sleep -Seconds 1; Shot $p "03-暂停"
           Cmd $p 101; Start-Sleep -Milliseconds 500; Cmd $p 104; Start-Sleep -Seconds 2; Shot $p "04-下一首"
           Cmd $p 102; Start-Sleep -Seconds 1; Shot $p "05-停止"
+          # 查看菜单：111 清除日志、112 显示/隐藏日志区。
+          Cmd $p 111; Start-Sleep -Milliseconds 300
+          if ((Text $p.MainWindowHandle 204) -ne "") { Write-Output "清除日志后日志区仍有文字"; exit 1 }
+          Cmd $p 112; Start-Sleep -Milliseconds 300
+          if ([W]::IsWindowVisible([W]::GetDlgItem($p.MainWindowHandle, 204))) { Write-Output "隐藏后日志区仍可见"; exit 1 }
+          Shot $p "05b-隐藏日志"
+          Cmd $p 112; Start-Sleep -Milliseconds 300
+          if (-not [W]::IsWindowVisible([W]::GetDlgItem($p.MainWindowHandle, 204))) { Write-Output "重新显示后日志区不可见"; exit 1 }
           Close $p
           $p = Gui $sim "ok" "mono48,stereo44" $null
           Cmd $p 101; Start-Sleep -Seconds 2; Shot $p "06-单声道严格路径被拒"

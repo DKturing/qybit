@@ -16,6 +16,9 @@ pub const ID_REMOVE: u16 = 107;
 pub const ID_CLEAR: u16 = 108;
 pub const ID_EXIT: u16 = 109;
 pub const ID_ABOUT: u16 = 110;
+/// 查看菜单：清除日志、显示/隐藏日志区。
+pub const ID_CLEAR_LOG: u16 = 111;
+pub const ID_TOGGLE_LOG: u16 = 112;
 /// 控件。
 pub const IDC_LIST: u16 = 201;
 pub const IDC_DEVICE: u16 = 202;
@@ -79,6 +82,8 @@ pub enum Op {
         format: String,
     },
     Log(String),
+    /// 显示或隐藏日志区（隐藏时播放列表占满）。
+    LogVisible(bool),
     PlayLabel(&'static str),
     /// 进度条位置（千分比）；`None` 时不可用（未播放或总长度未知）。
     Seekbar(Option<u32>),
@@ -92,6 +97,8 @@ pub struct App {
     ui: Ui,
     /// 窗口最小化时暂存重绘（L1）。
     view: Deferred,
+    /// 日志区是否显示。
+    log_visible: bool,
     /// 设备下拉框各项对应的端点标识（第 0 项为默认设备）与显示名。
     devices: Vec<(Option<String>, String)>,
 }
@@ -110,6 +117,7 @@ impl App {
         Self {
             ui,
             view: Deferred::default(),
+            log_visible: true,
             devices,
         }
     }
@@ -149,6 +157,12 @@ impl App {
             }
             Input::Command(ID_REMOVE) => self.ui.remove(selected),
             Input::Command(ID_CLEAR) => self.ui.clear(),
+            Input::Command(ID_CLEAR_LOG) => self.ui.clear_log(),
+            Input::Command(ID_TOGGLE_LOG) => {
+                self.log_visible = !self.log_visible;
+                ops.push(Op::LogVisible(self.log_visible));
+                return ops;
+            }
             Input::Command(ID_EXIT) => {
                 ops.push(Op::Close);
                 return ops;

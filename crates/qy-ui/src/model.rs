@@ -344,6 +344,15 @@ impl Ui {
         }
     }
 
+    /// 清除日志区的文字（只清显示；会话状态、结束结果与之后的新日志不受影响）。
+    pub fn clear_log(&mut self) -> Changes {
+        self.model.log.clear();
+        Changes {
+            log: true,
+            ..Default::default()
+        }
+    }
+
     /// 从列表第 `index` 首开始播放。正在播放且该条目属于当前会话时直接跳曲；否则停止当前
     /// 会话（不排空），按当前列表开始新会话。
     pub fn play_from(&mut self, index: usize) -> Changes {

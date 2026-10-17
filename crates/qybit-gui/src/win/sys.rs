@@ -35,7 +35,8 @@ use windows::Win32::UI::HiDpi::{
     SystemParametersInfoForDpi,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetKeyState, VK_DELETE, VK_LBUTTON, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE,
+    EnableWindow, GetKeyState, ReleaseCapture, SetCapture, VK_DELETE, VK_LBUTTON, VK_LEFT,
+    VK_RETURN, VK_RIGHT, VK_SPACE,
 };
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
@@ -45,23 +46,26 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BM_GETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL,
-    CB_SETCURSEL, CBN_SELCHANGE, CBS_DROPDOWNLIST, CW_USEDEFAULT, CreateMenu, CreatePopupMenu,
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_AUTOVSCROLL, ES_MULTILINE,
-    ES_READONLY, GetClientRect, GetCursorPos, GetMessageW, HMENU, IDC_ARROW, IsIconic, LoadCursorW,
-    MB_ICONINFORMATION, MB_OK, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, MoveWindow,
-    NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassW, SPI_GETNONCLIENTMETRICS,
-    SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetMenu, SetWindowPos, SetWindowTextW,
-    ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE,
-    WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_HSCROLL, WM_NOTIFY, WM_SETFONT,
-    WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP,
-    WS_VISIBLE, WS_VSCROLL,
+    CB_SETCURSEL, CBN_SELCHANGE, CBS_DROPDOWNLIST, CW_USEDEFAULT, CheckMenuItem, CreateMenu,
+    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GetClientRect, GetCursorPos, GetMenu, GetMessageW,
+    GetWindowRect, HMENU, IDC_ARROW, IDC_SIZENS, IsIconic, LoadCursorW, MB_ICONINFORMATION, MB_OK,
+    MF_BYCOMMAND, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, MessageBoxW,
+    MoveWindow, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassW,
+    SPI_GETNONCLIENTMETRICS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
+    SetCursor, SetMenu, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_DPICHANGED, WM_DROPFILES, WM_HSCROLL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NOTIFY,
+    WM_SETCURSOR, WM_SETFONT, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_EX_CLIENTEDGE,
+    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
 use super::app::{
-    App, COLUMNS, ID_ABOUT, ID_ADD_FILES, ID_ADD_FOLDER, ID_CLEAR, ID_EXIT, ID_NEXT, ID_PLAY,
-    ID_PREV, ID_REMOVE, ID_STOP, IDC_DEVICE, IDC_FLOAT, IDC_FORMAT, IDC_LIST, IDC_LOG, IDC_MONO,
-    IDC_SEEK, IDC_STATUS, IDC_VOLUME, IDC_VOLUME_LABEL, Input, Op, VolumeView, about_text,
+    App, COLUMNS, ID_ABOUT, ID_ADD_FILES, ID_ADD_FOLDER, ID_CLEAR, ID_CLEAR_LOG, ID_EXIT, ID_NEXT,
+    ID_PLAY, ID_PREV, ID_REMOVE, ID_STOP, ID_TOGGLE_LOG, IDC_DEVICE, IDC_FLOAT, IDC_FORMAT,
+    IDC_LIST, IDC_LOG, IDC_MONO, IDC_SEEK, IDC_STATUS, IDC_VOLUME, IDC_VOLUME_LABEL, Input, Op,
+    VolumeView, about_text,
 };
 use super::sim::Sim;
 use qy_host_wasapi::volume::EndpointVolume;
@@ -114,6 +118,14 @@ thread_local! {
     static SIM_MODE: Cell<bool> = const { Cell::new(false) };
     /// 音量标签上一次的文字（相同时不重设，避免闪烁）。
     static VOL_TEXT: RefCell<String> = const { RefCell::new(String::new()) };
+    /// 日志区是否显示。
+    static LOG_VISIBLE: Cell<bool> = const { Cell::new(true) };
+    /// 用户拖动分隔条设定的日志区高度（96 DPI 下的像素）；0 表示按默认比例（可用高度的 1/4）。
+    static LOG_HEIGHT: Cell<i32> = const { Cell::new(0) };
+    /// 播放列表与日志区之间分隔条的纵向范围（客户区坐标，上界含、下界不含）；隐藏日志时为空。
+    static SPLIT: Cell<(i32, i32)> = const { Cell::new((0, 0)) };
+    /// 正在拖动分隔条。
+    static SPLITTING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// 跨线程通知状态：主窗口句柄（整数形式）与“已投递未处理”标志（合并连续通知）。
@@ -542,6 +554,7 @@ fn menu() -> Option<HMENU> {
         let bar = CreateMenu().ok()?;
         let file = CreatePopupMenu().ok()?;
         let play = CreatePopupMenu().ok()?;
+        let view = CreatePopupMenu().ok()?;
         let help = CreatePopupMenu().ok()?;
         let item = |m: HMENU, id: u16, text: PCWSTR| {
             let _ = AppendMenuW(m, MF_STRING, usize::from(id), text);
@@ -557,9 +570,17 @@ fn menu() -> Option<HMENU> {
         item(play, ID_STOP, w!("停止(&S)"));
         item(play, ID_PREV, w!("上一首(&V)"));
         item(play, ID_NEXT, w!("下一首(&N)"));
+        let _ = AppendMenuW(
+            view,
+            MF_STRING | MF_CHECKED,
+            usize::from(ID_TOGGLE_LOG),
+            w!("显示日志(&L)"),
+        );
+        item(view, ID_CLEAR_LOG, w!("清除日志(&E)"));
         item(help, ID_ABOUT, w!("关于 QyBit(&A)"));
         let _ = AppendMenuW(bar, MF_POPUP, file.0 as usize, w!("文件(&F)"));
         let _ = AppendMenuW(bar, MF_POPUP, play.0 as usize, w!("播放(&P)"));
+        let _ = AppendMenuW(bar, MF_POPUP, view.0 as usize, w!("查看(&V)"));
         let _ = AppendMenuW(bar, MF_POPUP, help.0 as usize, w!("帮助(&H)"));
         Some(bar)
     }
@@ -702,9 +723,23 @@ fn layout(h: &Handles) {
         let _ = MoveWindow(h.seek, s(2), seek_y, (rc.right - s(4)).max(0), seek_h, true);
         let top = seek_y + seek_h + s(2);
         let free = (rc.bottom - top - status_h).max(0);
-        let log_h = (free / 4).max(s(60)).min(free);
-        let _ = MoveWindow(h.list, 0, top, rc.right, free - log_h, true);
-        let _ = MoveWindow(h.log, 0, top + free - log_h, rc.right, log_h, true);
+        if LOG_VISIBLE.get() {
+            // 列表与日志之间是可拖动的分隔条；列表至少 60、日志至少 40（96 DPI 像素）。
+            let gap = s(6);
+            let want = match LOG_HEIGHT.get() {
+                0 => free / 4,
+                v => s(v),
+            };
+            let max = (free - gap - s(60)).max(0);
+            let log_h = want.clamp(s(40).min(max), max);
+            let list_h = (free - gap - log_h).max(0);
+            let _ = MoveWindow(h.list, 0, top, rc.right, list_h, true);
+            let _ = MoveWindow(h.log, 0, top + list_h + gap, rc.right, log_h, true);
+            SPLIT.set((top + list_h, top + list_h + gap));
+        } else {
+            let _ = MoveWindow(h.list, 0, top, rc.right, free, true);
+            SPLIT.set((0, 0));
+        }
     }
 }
 
@@ -866,6 +901,20 @@ fn exec(op: Op) {
                 );
             }
         }
+        Op::LogVisible(on) => {
+            LOG_VISIBLE.set(on);
+            // SAFETY: 句柄有效；菜单句柄来自主窗口。
+            unsafe {
+                let _ = ShowWindow(h.log, if on { SW_SHOW } else { SW_HIDE });
+                let state = if on { MF_CHECKED } else { MF_UNCHECKED };
+                let _ = CheckMenuItem(
+                    GetMenu(h.main),
+                    u32::from(ID_TOGGLE_LOG),
+                    (MF_BYCOMMAND | state).0,
+                );
+            }
+            layout(&h);
+        }
         Op::Close => unsafe {
             let _ = PostMessageW(Some(h.main), WM_CLOSE, WPARAM(0), LPARAM(0));
         },
@@ -970,6 +1019,53 @@ fn fill_cell(info: &mut NMLVDISPINFOW) {
     }
 }
 
+/// 鼠标消息 lparam 中的客户区纵坐标（有符号 16 位）。
+fn client_y(lparam: LPARAM) -> i32 {
+    i32::from(((lparam.0 as usize >> 16) & 0xFFFF) as u16 as i16)
+}
+
+fn in_split(y: i32) -> bool {
+    let (a, b) = SPLIT.get();
+    a < b && (a..b).contains(&y)
+}
+
+/// 鼠标当前是否在分隔条上（WM_SETCURSOR 用）。
+fn over_split(hwnd: HWND) -> bool {
+    let mut p = POINT::default();
+    // SAFETY: 输出参数为本地变量；主窗口句柄有效。
+    unsafe {
+        if GetCursorPos(&mut p).is_err() || !ScreenToClient(hwnd, &mut p).as_bool() {
+            return false;
+        }
+    }
+    in_split(p.y)
+}
+
+/// 拖动分隔条到 `y`：日志区上沿跟随鼠标，高度按 96 DPI 像素记下，重新布局。
+fn drag_split(y: i32) {
+    let Some(h) = HANDLES.get() else {
+        return;
+    };
+    let mut rc = RECT::default();
+    let mut lr = RECT::default();
+    // SAFETY: 句柄有效；输出参数为本地变量。
+    let dpi = unsafe {
+        let _ = GetClientRect(h.main, &mut rc);
+        let _ = GetWindowRect(h.log, &mut lr);
+        let mut bottom = POINT {
+            x: lr.left,
+            y: lr.bottom,
+        };
+        let _ = ScreenToClient(h.main, &mut bottom);
+        lr.bottom = bottom.y;
+        GetDpiForWindow(h.main).max(96) as i32
+    };
+    let gap = 6 * dpi / 96;
+    let log_h = (lr.bottom - (y + gap / 2)).max(0);
+    LOG_HEIGHT.set((log_h * 96 / dpi).max(1));
+    layout(&h);
+}
+
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_SIZE => {
@@ -978,6 +1074,36 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             // 最小化或恢复（L1）：恢复时补画最小化期间暂存的变化。
             dispatch(Input::Resized);
+            LRESULT(0)
+        }
+        // 列表与日志之间的分隔条：鼠标在其上时显示上下箭头，按下后拖动调整日志区高度。
+        WM_SETCURSOR if over_split(hwnd) => {
+            // SAFETY: 系统光标资源，无需释放。
+            unsafe {
+                if let Ok(c) = LoadCursorW(None, IDC_SIZENS) {
+                    SetCursor(Some(c));
+                }
+            }
+            LRESULT(1)
+        }
+        WM_LBUTTONDOWN if in_split(client_y(lparam)) => {
+            SPLITTING.set(true);
+            // SAFETY: 主窗口句柄有效。
+            unsafe {
+                SetCapture(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE if SPLITTING.get() => {
+            drag_split(client_y(lparam));
+            LRESULT(0)
+        }
+        WM_LBUTTONUP if SPLITTING.get() => {
+            SPLITTING.set(false);
+            // SAFETY: 释放本线程设置的鼠标捕获。
+            unsafe {
+                let _ = ReleaseCapture();
+            }
             LRESULT(0)
         }
         WM_DPICHANGED => {
@@ -1112,7 +1238,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         dispatch(Input::Mono(r.0 as u32 == BST_CHECKED.0));
                     }
                 }
-                ID_PLAY..=ID_ABOUT if code <= 1 => dispatch(Input::Command(id)),
+                ID_PLAY..=ID_TOGGLE_LOG if code <= 1 => dispatch(Input::Command(id)),
                 _ => {}
             }
             LRESULT(0)
