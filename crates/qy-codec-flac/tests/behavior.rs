@@ -264,3 +264,63 @@ fn incomplete_input_never_publishes_partial_audio() {
         }
     }
 }
+
+/// 各音频帧的字节范围（按一次性解码时每次产出的消耗位置划分）。
+fn frame_ranges(d: &mut FlacDecoder, data: &[u8]) -> Vec<std::ops::Range<usize>> {
+    d.reset();
+    let (mut pos, mut start) = (0, meta_len(data));
+    let mut out = Vec::new();
+    loop {
+        match d.decode(&data[pos..], true) {
+            Err(e) => panic!("{e:?}"),
+            Ok(p) => {
+                pos += p.consumed;
+                match p.status {
+                    Status::End => return out,
+                    Status::NeedInput => panic!("EOF 后 NeedInput"),
+                    _ => {
+                        out.push(start..pos);
+                        start = pos;
+                        let ch = d.format().map_or(1, |f| usize::from(f.channels()));
+                        d.release(d.pcm().len() / ch);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// RFC 9639 §9.1.5：帧头编号必须等于此前的帧数（固定块）或样本数（可变块）。交换前两个完整的
+/// 音频帧、重复一帧或去掉一帧时，每帧的 CRC 都仍然正确（总样本数也可能不变），只有编号能发现；
+/// 必须按不合规拒绝并给出明细。原样的码流照常解码。
+#[test]
+fn frame_numbers_must_follow_decoded_content() {
+    for name in [
+        "cli_16_stereo_44k_default.flac",
+        "seek_variable_notable.flac",
+        "seek_variable_table.flac",
+    ] {
+        let data = fixture(name);
+        assert!(!data.is_empty(), "{name}");
+        let mut d = dec(Capacity::DESKTOP);
+        let r = frame_ranges(&mut d, &data);
+        assert!(r.len() >= 3, "{name}: 帧数 {}", r.len());
+        let (f0, f1) = (r[0].clone(), r[1].clone());
+        let head = &data[..f0.start];
+        let tail = &data[f1.end..];
+        let swapped = [head, &data[f1.clone()], &data[f0.clone()], tail].concat();
+        let repeated = [head, &data[f0.clone()], &data[f0.clone()], &data[f1.end..]].concat();
+        let dropped = [head, &data[f1.clone()], tail].concat();
+        for (what, bad) in [("交换", &swapped), ("重复", &repeated), ("缺失", &dropped)] {
+            let (res, _) = run_all(&mut d, bad);
+            assert_eq!(res, Err(DecodeError::Malformed), "{name} {what}");
+            assert_eq!(
+                d.last_error(),
+                Some(FlacError::FrameNumberMismatch),
+                "{name} {what}"
+            );
+        }
+        let (res, _) = run_all(&mut d, &data);
+        assert_eq!(res, Ok(()), "{name} 原样");
+    }
+}

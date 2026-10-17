@@ -198,6 +198,9 @@ pub enum FlacError {
     Truncated,
     /// 已解码样本多于 STREAMINFO 总样本数。
     TotalSamplesMismatch,
+    /// 帧头的编号与前面已解码的内容不符（RFC 9639 §9.1.5：固定块策略下为此前的帧数，可变块策略下
+    /// 为此前的样本数）：帧被重排、重复或缺失，单帧 CRC 发现不了。
+    FrameNumberMismatch,
 }
 
 impl FlacError {
@@ -334,6 +337,9 @@ pub struct FlacDecoder {
     blocking: Option<bool>,
     retry_at: usize,
     decoded_samples: u64,
+    /// 下一帧帧头应有的编号（固定块：帧号；可变块：首样本号）。定位后为 `None`，由落点之后的第一帧
+    /// 重新确定。
+    expected_number: Option<u64>,
     /// VORBIS_COMMENT 声明的声道掩码。
     channel_mask: Option<u32>,
     /// STREAMINFO 阶段因本机容量不足拒绝的具体原因（R1）。
@@ -379,6 +385,7 @@ impl FlacDecoder {
             blocking: None,
             retry_at: 0,
             decoded_samples: 0,
+            expected_number: Some(0),
             start: 0,
             end: 0,
             offset: 0,
@@ -833,6 +840,10 @@ impl FlacDecoder {
                     if *self.blocking.get_or_insert(d.variable) != d.variable {
                         return self.fail(FlacError::StreamMismatch);
                     }
+                    if self.expected_number.is_some_and(|n| n != d.number) {
+                        return self.fail(FlacError::FrameNumberMismatch);
+                    }
+                    self.expected_number = next_number(&d);
                     #[cfg(any(test, feature = "test-metrics"))]
                     {
                         self.metrics.frames += 1;
@@ -939,6 +950,7 @@ impl FlacDecoder {
         self.end = 0;
         self.retry_at = 0;
         self.skip = 0;
+        self.expected_number = None;
         self.offset = to;
         Ok(to)
     }
@@ -1145,6 +1157,7 @@ impl FlacDecoder {
             self.seeking = None;
             self.retry_at = 0;
             self.decoded_samples = first + block;
+            self.expected_number = next_number(&d);
             let drop = (s.target - first) as usize;
             let ch = info.params.channels as usize;
             self.start = drop * ch;
@@ -1190,6 +1203,16 @@ impl Resources for FlacDecoder {
     }
 }
 
+/// 下一帧帧头应有的编号：固定块策略为帧号加 1，可变块策略为首样本号加本帧块大小（RFC 9639
+/// §9.1.5）。溢出时为 `None`（不再核对）。
+fn next_number(d: &frame::Decoded) -> Option<u64> {
+    if d.variable {
+        d.number.checked_add(d.block_size as u64)
+    } else {
+        d.number.checked_add(1)
+    }
+}
+
 impl Decoder for FlacDecoder {
     fn reset(&mut self) {
         self.state = State::Marker;
@@ -1199,6 +1222,7 @@ impl Decoder for FlacDecoder {
         self.blocking = None;
         self.retry_at = 0;
         self.decoded_samples = 0;
+        self.expected_number = Some(0);
         self.start = 0;
         self.end = 0;
         self.offset = 0;
