@@ -148,6 +148,8 @@ const TIMING: Timing = Timing {
     wav_decode_us: 1_000,
     flac_read_us: 17_000,
     flac_decode_us: 15_000,
+    // 打开曲目：FAT16 根目录 32 块查找两遍加目录项一块，每块 100 µs，另含一次停顿。
+    open_us: 15_000,
 };
 
 /// 按曲目打开顺序分解各输出段（见模块说明第 2 条）。

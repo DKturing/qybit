@@ -34,6 +34,8 @@ const TIMING: Timing = Timing {
     wav_decode_us: 1_000,
     flac_read_us: 17_000,
     flac_decode_us: 15_000,
+    // 打开曲目：FAT16 根目录 32 块查找两遍加目录项一块，每块 100 µs，另含一次停顿。
+    open_us: 15_000,
 };
 
 fn disk(image: Vec<u8>) -> Disk {
@@ -249,15 +251,16 @@ fn insufficient_timing_is_rejected_at_startup() {
     // 只有预填不足的组合（负载 ≤ 100% 而 U + D + T > P）在 Embedded Full 的需求下不会出现
     // （U ≤ W / R 才能满足负载，远小于 250 ms），组成核对见 budget 单元测试；这里确认报告文字。
     let e = qy_host_embedded::BudgetError::Prefill {
-        required_us: 255_334,
+        required_us: 270_334,
         prefill_us: 250_000,
+        open_us: 15_000,
         read_us: 230_000,
         decode_us: 20_000,
         period_us: 5_334,
     };
     assert_eq!(
         e.to_string(),
-        "预填 250000 µs 不足：最坏情况需要 255334 µs（读取最大输入单元 230000 + 解码 20000 + DMA 周期 5334）"
+        "预填 250000 µs 不足：最坏情况需要 270334 µs（换曲时打开曲目 15000 + 读取最大输入单元 230000 + 解码 20000 + DMA 周期 5334）"
     );
 }
 
@@ -1180,4 +1183,50 @@ fn float_wav_strict_rejected_or_converted() {
     let _ = write_notice(&mut ev, &Notice::FloatConverted { track: 0, bits: 24 });
     assert_eq!(ev, "EVENT samples-altered track=0 float->int24 explicit\n");
     check_segments(&w, &[(44_100, 2, 32, 24, want)], "浮点转 24 位");
+}
+
+/// 换曲时打开下一首不得阻塞主循环：第二首约 8 MiB、簇链完全打散（每一跳都换 FAT 扇区）。每块
+/// 读取 100 µs，时序核对通过；打开文件的耗时不能随文件大小增长（原先打开前沿整条簇链核对，
+/// 约 1.6 s，队列只有 250 ms，欠载）。两首都与参考逐字节一致、无欠载。
+#[test]
+fn opening_a_long_fragmented_track_does_not_underrun() {
+    let tracks = vec![
+        synth_wav("T01.WAV", 96_000, 2, 24, 48_000, 11),
+        synth_wav("T02.WAV", 96_000, 2, 24, 8 * 1024 * 1024 / 6, 12),
+    ];
+    let files: Vec<(&str, &[u8])> = tracks
+        .iter()
+        .map(|t| (t.name.as_str(), t.bytes.as_slice()))
+        .collect();
+    let mut img = match qy_fat_image::build_with(&files, 512) {
+        Ok(i) => i,
+        Err(e) => panic!("{e}"),
+    };
+    let n = scatter_chain(&mut img, b"T02     WAV");
+    assert!(n > 16_000, "簇数 {n}");
+    let d = Disk {
+        image: img,
+        block_us: 100,
+        ..Disk::default()
+    };
+    let timing = Timing {
+        // 每 512 字节：数据块 + 文件系统的 FAT 查找（打散后每次都换扇区）+ 宿主逐跳核对，共 3 块。
+        wav_read_us: 32 * 3 * 100 + 1_000,
+        ..TIMING
+    };
+    let Ok((mut p, w, _)) = setup(d, caps(), timing, ErrorPolicy::Stop) else {
+        panic!("时序应满足");
+    };
+    assert!(p.play(0));
+    let mut notices = Vec::new();
+    run(&mut p, &w, 60_000_000, &mut notices, |_, _, _| {});
+    let s = p.status();
+    assert_eq!(notices.last(), Some(&Notice::Finished), "{notices:?}");
+    assert_eq!(s.output.underruns, 0, "{s:?}");
+    assert_eq!(s.output.underrun_frames, 0, "{s:?}");
+    check_segments(
+        &w,
+        &expected(&tracks, &[true, true], &[None, None]),
+        "打散的长曲目",
+    );
 }

@@ -166,8 +166,13 @@ impl<D: BlockDevice> FatReader<'_, D> {
     }
 
     fn valid(&self, c: u32) -> bool {
-        c >= 2 && c <= self.g.clusters + 1
+        cluster_valid(self.g, c)
     }
+}
+
+/// 有效的数据簇号：`2 ..= 簇数 + 1`。
+fn cluster_valid(g: Geometry, c: u32) -> bool {
+    c >= 2 && c <= g.clusters + 1
 }
 
 /// 文件的簇链是否安全：长度为 0 时不读数据；否则起始簇有效，前 ⌈长度 / 簇字节数⌉ 个簇每一跳都有效，
@@ -214,6 +219,80 @@ pub(crate) fn file_ok<D: BlockDevice>(
             power *= 2;
             lam = 0;
         }
+    }
+}
+
+/// 读取中的簇链逐跳核对。打开文件时不沿整条链走（耗时随文件长度与碎片程度增长，换曲时会阻塞
+/// 主循环；整条链已在扫描时用 [`file_ok`] 核对过）；每次读取前只核对到本次要访问的位置，代价与
+/// 本次读取跨过的簇数成正比，计入读取耗时 `U`（见 `crate::budget`）。这样即使换卡而未重新扫描，
+/// 交给 `embedded-sdmmc` 的每一跳仍然有效：遇到无效表项、提前结束或环路时报告损坏，不读数据。
+#[derive(Debug, Clone)]
+pub(crate) struct ChainCursor {
+    g: Geometry,
+    size: u32,
+    /// 已核对到的簇及其在链中的序号（0 为起始簇）。
+    cluster: u32,
+    index: u64,
+    /// Brent 环路检测（同 [`file_ok`]）。
+    mark: u32,
+    power: u64,
+    lam: u64,
+    cached: Option<(u32, [u8; 512])>,
+}
+
+impl ChainCursor {
+    /// 由目录项建立；长度非零而起始簇无效时为 `None`。
+    pub(crate) fn new(g: Geometry, start: u32, size: u32) -> Option<Self> {
+        if size != 0 && !cluster_valid(g, start) {
+            return None;
+        }
+        Some(Self {
+            g,
+            size,
+            cluster: start,
+            index: 0,
+            mark: start,
+            power: 1,
+            lam: 0,
+            cached: None,
+        })
+    }
+
+    /// 核对覆盖文件前 `end` 字节（超出文件长度的部分按文件长度）所需的簇；`false` 为簇链损坏。
+    pub(crate) fn cover<D: BlockDevice>(&mut self, d: &D, end: u64) -> Result<bool, D::Error> {
+        let end = end.min(u64::from(self.size));
+        if end == 0 {
+            return Ok(true);
+        }
+        let cluster_bytes = u64::from(self.g.sectors_per_cluster) * 512;
+        let need = (end - 1) / cluster_bytes;
+        let mut r = FatReader {
+            d,
+            g: self.g,
+            cached: self.cached.take(),
+        };
+        let result = loop {
+            if self.index >= need {
+                break Ok(true);
+            }
+            match r.next(self.cluster) {
+                Err(e) => break Err(e),
+                Ok(Next::Cluster(n)) => self.cluster = n,
+                Ok(Next::End | Next::Invalid) => break Ok(false),
+            }
+            self.index += 1;
+            if self.cluster == self.mark || self.index >= u64::from(self.g.clusters) {
+                break Ok(false);
+            }
+            self.lam += 1;
+            if self.lam == self.power {
+                self.mark = self.cluster;
+                self.power *= 2;
+                self.lam = 0;
+            }
+        };
+        self.cached = r.cached;
+        result
     }
 }
 

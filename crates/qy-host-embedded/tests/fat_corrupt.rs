@@ -398,3 +398,69 @@ fn reverified_before_open() {
         assert!(s.device(|d| d.reads.get()).is_some_and(|n| n > 0));
     }
 }
+
+/// 扫描之后簇链被改坏（换卡而未重新扫描）：打开不再沿整条链走，读取前逐跳核对。空闲表项、越界簇、
+/// 坏簇标记与提前结束都在 `embedded-sdmmc` 走到那一跳之前以 `Corrupt` 返回，此前读出的字节与原文件
+/// 一致。环路在文件长度以内时可能先读出重复的簇才被发现，但读取有界（以文件长度为限）、不 panic；
+/// 重新扫描时按整条链核对，照常拒绝。
+#[test]
+fn chain_corrupted_after_scan_is_caught_while_reading() {
+    for kind in kinds() {
+        let probe = image(kind);
+        let l = layout(&probe);
+        let c = chain(
+            &probe,
+            &l,
+            start_cluster(&probe, &l, dir_entry(&probe, b"A       WAV")),
+        );
+        let (bad, beyond) = if l.fat32 {
+            (0x0FFF_FFF7, 0x0FFF_FFF0)
+        } else {
+            (0xFFF7, 0xFFF0)
+        };
+        let eoc = if l.fat32 { 0x0FFF_FFFF } else { 0xFFFF };
+        let want = files()[0].1.clone();
+        for (what, at, value, caught) in [
+            ("空闲表项", c[2], 0u32, true),
+            ("越界簇", c[1], beyond, true),
+            ("坏簇", c[3], bad, true),
+            ("提前结束", c[4], eoc, true),
+            ("环路", c[3], c[1] as u32, false),
+        ] {
+            let disk = Disk {
+                data: probe.clone(),
+                reads: Cell::new(0),
+            };
+            let (mut s, r) = Fs::new(disk, NoClock);
+            assert!(matches!(r, Ok(3)), "{kind:?} {what}: {r:?}");
+            s.device(|d| set_fat(&mut d.data, &l, at, value));
+            assert!(s.open(0).is_ok(), "{kind:?} {what}：打开只读目录项");
+            let mut got = Vec::new();
+            let mut buf = [0u8; 512];
+            let res = loop {
+                match s.read(&mut buf) {
+                    Ok(0) => break Ok(()),
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                    Err(e) => break Err(e),
+                }
+                assert!(got.len() <= READ_LIMIT, "{kind:?} {what}：无界读取");
+            };
+            if caught {
+                assert!(
+                    matches!(res, Err(FatError::Corrupt)),
+                    "{kind:?} {what}: {res:?}"
+                );
+                assert!(
+                    !got.is_empty() && want.starts_with(&got),
+                    "{kind:?} {what}：前缀"
+                );
+            } else {
+                assert!(got.len() <= want.len(), "{kind:?} {what}：以文件长度为限");
+            }
+            s.close();
+            // 重新扫描：整条链核对，文件被跳过。
+            assert!(matches!(s.rescan(), Ok(2)), "{kind:?} {what}");
+            assert_eq!(names(&s), ["B.FLA", "C.WAV"], "{kind:?} {what}");
+        }
+    }
+}

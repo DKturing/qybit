@@ -22,7 +22,7 @@
 //! 配置档：Embedded Full 需要约 360 KiB RAM，本芯片放不下；这里声明一个适合 128 KiB 的配置档
 //! （只链接 WAV，≤ 48 kHz、≤ 24 位、双声道、预填 150 ms，约 98 KiB），代码与其他板相同。
 //!
-//! 时序：`budget` 要求的读取最大输入单元耗时 `U` 与解码耗时 `D` 必须在实物上实测。本示例的值是
+//! 时序：`budget` 要求的读取最大输入单元耗时 `U`、解码耗时 `D` 与打开曲目耗时 `O` 必须在实物上实测。本示例的值是
 //! **未实测的占位值**，启动时打印警告；实测后替换 [`UNMEASURED_WAV_READ_US`] 等常量。
 //!
 //! `unsafe`：只有一处，开启 DMA 中断的 `NVIC::unmask`（cortex-m 规定为 unsafe：解除屏蔽可能打破
@@ -74,6 +74,8 @@ const WINDOW: usize = BUDGET.input_window;
 /// 未实测的占位值（µs）：WAV 读取 16 KiB 的最长耗时与解码耗时。实测后替换。
 const UNMEASURED_WAV_READ_US: u32 = 20_000;
 const UNMEASURED_WAV_DECODE_US: u32 = 5_000;
+/// 未实测的占位值（µs）：打开一首曲目（根目录查找与读取目录项）的最长耗时。实测后替换。
+const UNMEASURED_OPEN_US: u32 = 20_000;
 /// WAV 统计窗口字节数。
 const WAV_UNIT: u32 = 16_384;
 /// 主循环每步至多读取的字节数。
@@ -449,7 +451,7 @@ fn main() -> ! {
     let _ = writeln!(out, "QYBIT board=stm32f411 i2s_clk={i2s_clk}");
     let _ = writeln!(
         out,
-        "WARN timing=unmeasured wav_read_us={UNMEASURED_WAV_READ_US} wav_decode_us={UNMEASURED_WAV_DECODE_US}"
+        "WARN timing=unmeasured wav_read_us={UNMEASURED_WAV_READ_US} wav_decode_us={UNMEASURED_WAV_DECODE_US} open_us={UNMEASURED_OPEN_US}"
     );
 
     // SD 卡。
@@ -562,6 +564,7 @@ fn main() -> ! {
         demand: Demand::wav(&PROFILE.caps, WAV_UNIT),
         unit_read_us: UNMEASURED_WAV_READ_US,
         decode_us: UNMEASURED_WAV_DECODE_US,
+        open_us: UNMEASURED_OPEN_US,
     }];
     let mut player = match Player::new(
         engine,

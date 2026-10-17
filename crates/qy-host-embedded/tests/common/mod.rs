@@ -363,13 +363,14 @@ fn leak<T: Default + Clone>(n: usize) -> &'static mut [T] {
 
 pub const PROFILE: Profile = EMBEDDED_FULL;
 
-/// 板级时序声明：（WAV 读 16 KiB 的 U，WAV 解码 D，FLAC 读最大帧的 U，FLAC 解码 D），µs。
+/// 板级时序声明：（WAV 读 16 KiB 的 U，WAV 解码 D，FLAC 读最大帧的 U，FLAC 解码 D，打开曲目 O），µs。
 #[derive(Debug, Clone, Copy)]
 pub struct Timing {
     pub wav_read_us: u32,
     pub wav_decode_us: u32,
     pub flac_read_us: u32,
     pub flac_decode_us: u32,
+    pub open_us: u32,
 }
 
 /// WAV 统计窗口字节数。
@@ -386,6 +387,7 @@ pub fn loads(t: Timing) -> [Load; 2] {
             demand: Demand::wav(&caps, WAV_UNIT),
             unit_read_us: t.wav_read_us,
             decode_us: t.wav_decode_us,
+            open_us: t.open_us,
         },
         Load {
             demand: Demand::flac(
@@ -396,6 +398,7 @@ pub fn loads(t: Timing) -> [Load; 2] {
             ),
             unit_read_us: t.flac_read_us,
             decode_us: t.flac_decode_us,
+            open_us: t.open_us,
         },
     ]
 }
@@ -733,4 +736,55 @@ pub fn check_segments(w: &Shared, want: &[(u32, u16, u32, u32, Vec<u8>)], what: 
         assert_eq!(g.data.len(), e.4.len(), "{what}：第 {i} 段字节数");
         assert!(g.data == e.4, "{what}：第 {i} 段字节不一致");
     }
+}
+
+/// 把镜像（簇 512 字节的 FAT16，[`qy_fat_image::build_with`] 生成）中短文件名为 `short`（11 字节，
+/// 如 `b"T02     WAV"`）的文件的簇链打散：相邻两簇在 FAT 中相隔 257 项（FAT16 每扇区 256 项），
+/// 沿链每走一步都落到另一个 FAT 扇区。文件内容随簇搬移，按文件读出的字节不变。返回簇数。
+pub fn scatter_chain(image: &mut [u8], short: &[u8; 11]) -> usize {
+    let u16_at = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]) as usize;
+    let u32_at =
+        |b: &[u8], o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as usize;
+    let part = u32_at(image, 0x1C6) * 512;
+    let bpb = &image[part..part + 512];
+    let spc = bpb[13] as usize;
+    let reserved = u16_at(bpb, 14);
+    let fats = bpb[16] as usize;
+    let root_entries = u16_at(bpb, 17);
+    let fat_sectors = u16_at(bpb, 22);
+    assert!(fat_sectors > 0 && spc == 1, "只处理簇 512 字节的 FAT16");
+    let fat = part + reserved * 512;
+    let root = fat + fats * fat_sectors * 512;
+    let data = root + root_entries * 32;
+    let entry = (0..root_entries)
+        .map(|i| root + i * 32)
+        .find(|&e| &image[e..e + 11] == short)
+        .unwrap_or_else(|| panic!("找不到 {short:?}"));
+    let mut chain = vec![u16_at(image, entry + 26)];
+    while let Some(&c) = chain.last() {
+        let next = u16_at(image, fat + c * 2);
+        if next >= 0xFFF8 {
+            break;
+        }
+        chain.push(next);
+    }
+    let n = chain.len();
+    let step = if n % 257 == 0 { 263 } else { 257 };
+    let contents: Vec<Vec<u8>> = chain
+        .iter()
+        .map(|&c| image[data + (c - 2) * 512..data + (c - 1) * 512].to_vec())
+        .collect();
+    let mut sorted = chain.clone();
+    sorted.sort_unstable();
+    let order: Vec<usize> = (0..n).map(|j| sorted[(j * step) % n]).collect();
+    for (j, &c) in order.iter().enumerate() {
+        image[data + (c - 2) * 512..data + (c - 1) * 512].copy_from_slice(&contents[j]);
+        let next = order.get(j + 1).map_or(0xFFFF, |&x| x as u16);
+        for k in 0..fats {
+            let at = fat + k * fat_sectors * 512 + c * 2;
+            image[at..at + 2].copy_from_slice(&next.to_le_bytes());
+        }
+    }
+    image[entry + 26..entry + 28].copy_from_slice(&(order[0] as u16).to_le_bytes());
+    n
 }

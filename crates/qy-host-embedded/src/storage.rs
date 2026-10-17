@@ -7,9 +7,14 @@
 //! 读取是同步分段的：主循环每步至多读一段（`read_chunk` 字节），期间 DMA 中断照常
 //! 取数，因此单次读取的最长耗时直接计入预填公式（见 [`crate::budget`]）。
 //!
-//! 损坏的卡是不可信输入：挂载前按 FAT 规范独立核对引导扇区与根目录，扫描后与打开前核对每个文件的
-//! 目录项与簇链（见 `fatcheck`），不合格的结构不交给 `embedded-sdmmc`（它对部分损坏结构会 panic
+//! 损坏的卡是不可信输入：挂载前按 FAT 规范独立核对引导扇区与根目录，扫描时核对每个文件的目录项与
+//! 整条簇链（见 `fatcheck`），不合格的结构不交给 `embedded-sdmmc`（它对部分损坏结构会 panic
 //! 或无界读取，R1 fuzz 发现）。不合格的文件跳过并计入 [`FatStorage::corrupt_entries`]。
+//!
+//! 打开曲目时只重新读取目录项（换卡而未重新扫描时它可能已变），不沿整条簇链走：那样的耗时随文件
+//! 长度与碎片程度增长，换曲时会阻塞主循环直到队列取空。读取与定位后的第一次读取之前，再逐跳核对到
+//! 要访问的位置（`fatcheck::ChainCursor`），代价与读取跨过的簇数成正比，计入读取耗时。打开的耗时
+//! 只与根目录大小有关，由板级实测后计入预填公式（[`crate::budget`] 的 `O`）。
 //!
 //! [`FatStorage`] 读取 MBR 第 1 个分区（FAT16/FAT32）根目录中扩展名为 `WAV`、`FLA`
 //! （`.flac` 的 8.3 短名）或 `AIF`（`.aiff` / `.aifc` 的短名）的文件，按短文件名排序成播放列表，
@@ -101,6 +106,9 @@ pub struct FatStorage<D: BlockDevice, T: TimeSource, const M: usize> {
     volume: Option<RawVolume>,
     root: Option<RawDirectory>,
     file: Option<RawFile>,
+    /// 打开的曲目的簇链核对进度与读取位置。
+    cursor: Option<fatcheck::ChainCursor>,
+    pos: u64,
     names: [Option<ShortFileName>; M],
     count: usize,
     /// 根目录中符合条件的文件超过 `M` 首（只收录排序后的前 `M` 首）。
@@ -120,6 +128,8 @@ impl<D: BlockDevice, T: TimeSource, const M: usize> FatStorage<D, T, M> {
             volume: None,
             root: None,
             file: None,
+            cursor: None,
+            pos: 0,
             names: [const { None }; M],
             count: 0,
             truncated: false,
@@ -149,6 +159,7 @@ impl<D: BlockDevice, T: TimeSource, const M: usize> FatStorage<D, T, M> {
             }
         }
         self.file = None;
+        self.cursor = None;
         self.root = None;
         self.volume = None;
     }
@@ -267,38 +278,60 @@ impl<D: BlockDevice, T: TimeSource, const M: usize> Storage for FatStorage<D, T,
             .get(track as usize)
             .and_then(|n| n.as_ref())
             .ok_or(FatError::NoSuchTrack(track))?;
-        // 打开前重新核对（换卡而未重新扫描时，目录项可能已变）。
-        if !self.file_ok(&name)? {
-            return Err(FatError::Corrupt);
-        }
-        let (Some(vm), Some(root)) = (self.vm.as_ref(), self.root) else {
+        let (Some(vm), Some(root), Some(g)) = (self.vm.as_ref(), self.root, self.geometry) else {
             return Err(FatError::NotMounted);
         };
+        // 重新读取目录项（换卡而未重新扫描时可能已变）；簇链在读取时逐跳核对，不在这里走整条链。
+        let e = vm.find_directory_entry(root, name)?;
+        let cursor = vm
+            .device(|d| fatcheck::dir_entry(&*d, g, e.entry_block, e.entry_offset))
+            .map_err(|e| FatError::Fs(embedded_sdmmc::Error::DeviceError(e)))?
+            .and_then(|(start, size)| fatcheck::ChainCursor::new(g, start, size))
+            .ok_or(FatError::Corrupt)?;
         self.file = Some(vm.open_file_in_dir(root, name, Mode::ReadOnly)?);
+        self.cursor = Some(cursor);
+        self.pos = 0;
         Ok(())
     }
 
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        let (Some(vm), Some(file)) = (self.vm.as_ref(), self.file) else {
+        let (Some(vm), Some(file), Some(cursor)) =
+            (self.vm.as_ref(), self.file, self.cursor.as_mut())
+        else {
             return Err(FatError::NotOpen);
         };
-        Ok(vm.read(file, buf)?)
+        let end = self.pos.saturating_add(buf.len() as u64);
+        if !vm
+            .device(|d| cursor.cover(&*d, end))
+            .map_err(|e| FatError::Fs(embedded_sdmmc::Error::DeviceError(e)))?
+        {
+            return Err(FatError::Corrupt);
+        }
+        let n = vm.read(file, buf)?;
+        self.pos = self.pos.saturating_add(n as u64);
+        Ok(n)
     }
 
-    /// `embedded-sdmmc` 按簇链从头走到目标位置（打开前已核对簇链，见 `fatcheck`）；文件大小以
-    /// 32 位表示，越过文件末尾时失败。
+    /// 只移动读取位置；`embedded-sdmmc` 在下一次读取时按簇链走到目标位置，此前先逐跳核对到该处
+    /// （见 `fatcheck::ChainCursor`）。定位的耗时随距离增长，但引擎定位时会停止设备并重新预填，
+    /// 只增加延迟，不造成欠载。文件大小以 32 位表示，越过文件末尾时失败。
     fn seek(&mut self, offset: u64) -> bool {
         let (Some(vm), Some(file), Ok(at)) = (self.vm.as_ref(), self.file, u32::try_from(offset))
         else {
             return false;
         };
-        vm.file_seek_from_start(file, at).is_ok()
+        if vm.file_seek_from_start(file, at).is_err() {
+            return false;
+        }
+        self.pos = offset;
+        true
     }
 
     fn close(&mut self) {
         if let (Some(vm), Some(f)) = (self.vm.as_ref(), self.file.take()) {
             let _ = vm.close_file(f);
         }
+        self.cursor = None;
     }
 
     fn rescan(&mut self) -> Result<u32, Self::Error> {

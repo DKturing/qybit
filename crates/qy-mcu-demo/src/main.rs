@@ -325,6 +325,9 @@ type DemoPlayer = Player<
     QUEUE_BYTES,
 >;
 
+/// 名义的打开曲目耗时 `O`（µs）。
+const OPEN_US: u32 = 10_000;
+
 /// 名义时序（QEMU 不测时序；实物板须按 `qy_host_embedded::budget` 实测后填写）。
 fn loads() -> ([Load; 2], usize) {
     let caps = PROFILE.caps;
@@ -332,6 +335,7 @@ fn loads() -> ([Load; 2], usize) {
         demand: Demand::wav(&caps, 16_384),
         unit_read_us: 10_000,
         decode_us: 2_000,
+        open_us: OPEN_US,
     };
     #[cfg(feature = "full")]
     if let Some(c) = PROFILE.flac_capacity() {
@@ -349,6 +353,7 @@ fn loads() -> ([Load; 2], usize) {
             ),
             unit_read_us: 10_000,
             decode_us: 10_000,
+            open_us: OPEN_US,
         };
         return ([wav, flac], 2);
     }

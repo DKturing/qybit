@@ -6,6 +6,8 @@
 //! - `U`：**读取文件中任意连续 `W` 字节的最长耗时**，含其间所有命令开销、偶发停顿与 FAT 簇链查找
 //!   （板级实测：反复读取测试文件，取所有长度为 `W` 的窗口中的最大值）；
 //! - `D`：解码并 pack 一个最大输入单元的最长耗时（板级实测）；
+//! - `O`：**打开一首曲目的最长耗时**（板级实测：目录查找与读取目录项；不含簇链——FAT 存储打开时
+//!   不沿整条簇链走，读取时逐跳核对，计入 `U`，见 [`crate::storage`]）；
 //! - `T`：最长的 DMA 缓冲周期（最低采样率下一个缓冲的时长）；
 //! - `R`：源的最大字节率（字节/秒，见 [`Demand`]）；`fs`：最高采样率；`P`：配置档的预填时长。
 //!
@@ -13,9 +15,13 @@
 //! 1. **持续负载**：读取与解码占用的时间比例不超过 1：`R · U / W / 10⁶ + D · fs / F / 10⁶ ≤ 1`。
 //!    读取是阻塞的（SPI/SDIO 传输占用主循环），所以读取时间与解码时间相加；每秒要读 `R / W` 个单元，
 //!    每个至多 `U`。
-//! 2. **预填**：`P ≥ U + D + T`。最坏情况下，开始读取一个最大输入单元时队列只剩预填量：读取这个
+//! 2. **预填**：`P ≥ O + U + D + T`。最坏情况下，开始读取一个最大输入单元时队列只剩预填量：读取这个
 //!    单元（至多 `U`）、解码（至多 `D`），数据入队后还要等到下一个 DMA 缓冲边界（至多 `T`）才会被
-//!    取走；这段时间内设备持续取数，队列不得取空。条件 1 保证此后队列不会越来越空。
+//!    取走；这段时间内设备持续取数，队列不得取空。换曲时，在读取下一首的第一个单元之前还要先打开它
+//!    （至多 `O`），期间设备仍在播放上一首排队的音频。条件 1 保证此后队列不会越来越空。
+//!
+//! 未计入的部分：下一首的文件头阶段若要读过很大的元数据（例如 FLAC 中内嵌的大幅图片），读取量取决于
+//! 文件本身，不能由板级常数给出上界；这类文件在换曲时仍可能欠载，欠载照常计数与报告。
 //!
 //! `U` 与 `D` 由板级按格式实测给出（M3 T2 实物验收与 T3 回写配置档）；本模块只按公式核对，不估算。
 
@@ -31,6 +37,8 @@ pub struct Load {
     pub unit_read_us: u32,
     /// 解码并 pack 一个最大输入单元的最长耗时 `D`（µs）。
     pub decode_us: u32,
+    /// 打开一首曲目的最长耗时 `O`（µs；同一存储对各格式相同）。
+    pub open_us: u32,
 }
 
 /// 源对读取的需求（按配置档的能力上限计算）。
@@ -77,7 +85,7 @@ impl Demand {
 pub struct Margins {
     /// 持续负载（千分比，≤ 1000）。
     pub load_permille: u64,
-    /// 最坏情况所需预填 `U + D + T`（µs）。
+    /// 最坏情况所需预填 `O + U + D + T`（µs）。
     pub required_prefill_us: u64,
     /// 配置档的预填 `P`（µs）。
     pub prefill_us: u64,
@@ -94,6 +102,7 @@ pub enum BudgetError {
     Prefill {
         required_us: u64,
         prefill_us: u64,
+        open_us: u64,
         read_us: u64,
         decode_us: u64,
         period_us: u64,
@@ -115,13 +124,14 @@ impl fmt::Display for BudgetError {
             Self::Prefill {
                 required_us,
                 prefill_us,
+                open_us,
                 read_us,
                 decode_us,
                 period_us,
             } => write!(
                 f,
-                "预填 {prefill_us} µs 不足：最坏情况需要 {required_us} µs（读取最大输入单元 \
-                 {read_us} + 解码 {decode_us} + DMA 周期 {period_us}）"
+                "预填 {prefill_us} µs 不足：最坏情况需要 {required_us} µs（换曲时打开曲目 {open_us} \
+                 + 读取最大输入单元 {read_us} + 解码 {decode_us} + DMA 周期 {period_us}）"
             ),
         }
     }
@@ -159,12 +169,14 @@ pub fn check_one(caps: &Capabilities, load: &Load, period_us: u64) -> Result<Mar
     if load_permille > 1000 {
         return Err(BudgetError::Load { load_permille });
     }
-    let required_us = u + d + period_us;
+    let o = u64::from(load.open_us);
+    let required_us = o + u + d + period_us;
     let prefill_us = u64::from(caps.prefill_ms) * 1000;
     if prefill_us < required_us {
         return Err(BudgetError::Prefill {
             required_us,
             prefill_us,
+            open_us: o,
             read_us: u,
             decode_us: d,
             period_us,
@@ -194,6 +206,7 @@ mod tests {
             demand: Demand::flac(&CAPS, 28_244, 4_608, 116),
             unit_read_us: u,
             decode_us: d,
+            open_us: 0,
         }
     }
 
@@ -220,7 +233,29 @@ mod tests {
             Err(BudgetError::Prefill {
                 required_us: 255_334,
                 prefill_us: 250_000,
+                open_us: 0,
                 read_us: 230_000,
+                decode_us: 20_000,
+                period_us: 5_334
+            })
+        );
+        // 换曲时的打开耗时计入预填：O = 15 000 时需要 15000 + 11000 + 20000 + 5334 = 51 334；
+        // O = 214 000 时 214000 + 11000 + 20000 + 5334 = 250 334 > 250 000（只差打开）。
+        let open = |o| Load {
+            open_us: o,
+            ..flac(11_000, 20_000)
+        };
+        assert_eq!(
+            check(&CAPS, &[open(15_000)], 5_334).map(|m| m.required_prefill_us),
+            Ok(51_334)
+        );
+        assert_eq!(
+            check(&CAPS, &[open(214_000)], 5_334),
+            Err(BudgetError::Prefill {
+                required_us: 250_334,
+                prefill_us: 250_000,
+                open_us: 214_000,
+                read_us: 11_000,
                 decode_us: 20_000,
                 period_us: 5_334
             })
@@ -248,6 +283,7 @@ mod tests {
             demand: w,
             unit_read_us: 9_000,
             decode_us: 1_000,
+            open_us: 0,
         };
         // WAV：768000 × 9000 / 16384 / 1000 = 421.875 → 422；1000 × 96000 / 2048 / 1000 = 46.875 → 47。
         let m = check(&CAPS, &[wav, flac(11_000, 20_000)], 5_334);
