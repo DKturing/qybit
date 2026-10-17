@@ -10,9 +10,10 @@
 //! - RIFF/WAVE，小端；格式码 1（PCM）、3（`WAVE_FORMAT_IEEE_FLOAT`）与 0xFFFE（EXTENSIBLE，子格式
 //!   PCM 或 `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`）。
 //! - 浮点（F3）：32 / 64 位 IEEE 754，小端，样本按位输出（binary32 每样本 1 个 `i32`，binary64 每样本
-//!   2 个 `i32`，先低后高），不做数值运算；EXTENSIBLE 的有效位必须等于容器。非 PCM 格式按 RIFF
-//!   规范须有 `fact` 块（样本帧数）：浮点文件在 data 之前没有 `fact`、`fact` 重复或帧数与 data 不符时
-//!   按不合规拒绝并给出 [`WavDetail::Fact`]（先严格，以后按真实样例逐条加容错，tasks/F3.md §2）。
+//!   2 个 `i32`，先低后高），不做数值运算；EXTENSIBLE 的有效位必须等于容器。`fact` 块（样本帧数）
+//!   可有可无：RIFF 1991 原文只要求压缩格式有 `fact`，没有时帧数按 data 长度计算（用户 2026-10-16
+//!   决定，tasks/F3.md §2）；data 之前的 `fact` 重复、帧数与 data 不符、或 data 长度为占位值而无法
+//!   核对时按不合规拒绝并给出 [`WavDetail::Fact`]。data 之后的块不读取（同 PCM）。
 //! - 容器 8/16/24/32 位；采样率不设软件上限（M3 T1）；声道布局见 F1。
 //! - 8 位 PCM 按 WAVE 规范为无符号、偏移 128：读取时减去 128 得到有符号值（W1），是精确的整数
 //!   表示变换。
@@ -159,11 +160,10 @@ pub enum WavDetail {
     DataShort { declared: u32, missing: u64 },
     /// data 不是 PCM，而是伪装成 16 位双声道 PCM 的压缩码流（在 data 中 `offset` 字节处识别）。
     Bitstream { kind: Bitstream, offset: u32 },
-    /// 浮点文件的 `fact` 块不合规（F3）：data 之前没有 `fact`（`declared` 为 `None`）、`fact` 重复
-    /// （`duplicate`），或声明的帧数与 data 的完整帧数 `frames` 不符（data 长度为占位值时 `frames`
-    /// 为 `None`）。
+    /// 浮点文件 data 之前的 `fact` 块不合规（F3）：`fact` 重复（`duplicate`），或声明的帧数
+    /// `declared` 与 data 的完整帧数 `frames` 不符（data 长度为占位值时 `frames` 为 `None`，无法核对）。
     Fact {
-        declared: Option<u32>,
+        declared: u32,
         frames: Option<u64>,
         duplicate: bool,
     },
@@ -291,16 +291,9 @@ impl core::fmt::Display for WavDetail {
             ),
             Self::Fact {
                 duplicate: true, ..
-            } => write!(
-                f,
-                "浮点 WAV 有重复的 fact 块（RIFF 规范：非 PCM 格式有一个 fact 块）"
-            ),
-            Self::Fact { declared: None, .. } => write!(
-                f,
-                "浮点 WAV 在 data 之前没有 fact 块（RIFF 规范要求非 PCM 格式有 fact 块）"
-            ),
+            } => write!(f, "浮点 WAV 有重复的 fact 块，帧数不能确定"),
             Self::Fact {
-                declared: Some(d),
+                declared: d,
                 frames: Some(n),
                 ..
             } => write!(
@@ -308,7 +301,7 @@ impl core::fmt::Display for WavDetail {
                 "浮点 WAV 的 fact 块声明 {d} 帧，data 中有 {n} 帧，两者不符"
             ),
             Self::Fact {
-                declared: Some(d),
+                declared: d,
                 frames: None,
                 ..
             } => write!(
@@ -686,17 +679,19 @@ impl WavDecoder {
         Ok(())
     }
 
-    /// 浮点文件的 `fact` 核对（F3）：data 之前恰有一个 `fact`，声明的帧数等于 data 的完整帧数。
+    /// 浮点文件的 `fact` 核对（F3）：data 之前没有 `fact` 时照常（帧数按 data 长度）；有则只能有一个，
+    /// 声明的帧数等于 data 的完整帧数。
     fn check_fact(&mut self, layout: &Layout, size: u32) -> Result<(), DecodeError> {
+        let Some(declared) = self.fact else {
+            return Ok(());
+        };
         let frames =
             (size != LENGTH_PLACEHOLDER).then(|| u64::from(size) / layout.block_align as u64);
-        let ok = !self.fact_duplicate
-            && matches!((self.fact, frames), (Some(d), Some(n)) if u64::from(d) == n);
-        if ok {
+        if !self.fact_duplicate && frames == Some(u64::from(declared)) {
             return Ok(());
         }
         self.detail = Some(WavDetail::Fact {
-            declared: self.fact,
+            declared,
             frames,
             duplicate: self.fact_duplicate,
         });

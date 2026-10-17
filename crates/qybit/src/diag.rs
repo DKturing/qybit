@@ -25,7 +25,7 @@ fn leak<T: Copy + Default>(len: usize) -> &'static mut [T] {
 }
 
 /// WAV 文件头（fmt 为 40 字节的 EXTENSIBLE）。浮点格式另写 fact 块（内容为样本帧数）：RIFF 1991
-/// 原文只要求压缩格式有 fact，浮点 WAV 的通行做法是写上，本程序的解码器目前也要求（tasks/F3.md）。
+/// 原文只要求压缩格式有 fact；浮点 WAV 的通行做法是写上，便于其他程序读取（本程序的解码器不要求）。
 fn wav_header(format: &DeviceFormat, data_len: u32) -> Result<Vec<u8>, String> {
     let fmt = WaveFormatExtensible::from_device(format)
         .map_err(|e| format!("无法描述格式：{e:?}"))?

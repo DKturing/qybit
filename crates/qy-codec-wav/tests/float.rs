@@ -96,7 +96,7 @@ fn detail_text(d: Option<WavDetail>) -> String {
             duplicate,
         }) => format!(
             "fact:{}:{}:{}",
-            opt(declared.map(|x| x.to_string())),
+            declared,
             opt(frames.map(|x| x.to_string())),
             u8::from(duplicate)
         ),

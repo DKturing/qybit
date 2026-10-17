@@ -1,5 +1,15 @@
-result Malformed
-format none
+result ok
+format 44100 2 f32
 mask none
-detail fact:none:10:0
-samples 0
+detail none
+samples 20
+00000000 80000000
+3f7ffe00 bf800000
+3f000000 bf000000
+3b490000 3b4b0000
+b9700000 34000000
+b4000000 2b800000
+be8bc400 3ec70c40
+3f3a21e2 3ee88400
+bf65ee08 bf1a3ae1
+3f5ec200 bf1c7c8c

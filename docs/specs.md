@@ -32,4 +32,4 @@
   - 原文的 `fact` 规则（3-26 页）是：“The fact chunk is required if the waveform data is contained in a wavl LIST chunk and for all compressed audio formats. The chunk is not required for PCM files using the data chunk format.”；
   - 原文定义的格式类别只有 `WAVE_FORMAT_PCM`（0x0001）和 IBM 的三种专有格式，没有 `WAVE_FORMAT_IEEE_FLOAT`（0x0003）；
   - 因此任务卡 §0 写的“非 PCM 格式需要 `fact`”在 1991 原文中没有依据：原文只要求压缩格式有 `fact`，而 IEEE 浮点不是压缩格式；
-  - 当前实现按任务卡对浮点 WAV 要求 `fact`，比原文严格。是否放宽待用户决定（见 [f3-float.md](f3-float.md) §7）。
+  - 用户 2026-10-16 决定：浮点 WAV 的 `fact` 可有可无，没有时帧数按 `data` 长度计算；有则必须与 `data` 一致（见 [f3-float.md](f3-float.md) §1）。

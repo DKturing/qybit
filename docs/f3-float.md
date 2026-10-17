@@ -18,11 +18,11 @@ WASAPI 与 ALSA 真机上的浮点独占播放、MCU 实物都未运行（见 §
   - 16/24 位浮点按“合规但尚不支持”拒绝（`Unsupported`）；
   - EXTENSIBLE 有效位不等于容器按不合规拒绝（`Malformed`）；
   - Microsoft Learn `WAVEFORMATEX` 对格式码 3 只写到 “`wBitsPerSample` should be set to 32”。64 位按任务卡 §2 接受：EXTENSIBLE 下容器位宽可以是 8 的任意倍数，ffmpeg 写出的 64 位浮点 WAV 就是 EXTENSIBLE + IEEE_FLOAT（见 [specs.md](specs.md)）。
-- **`fact` chunk**：按“先严格”执行，暂无容错条目。
-  - 必须出现在 `data` 之前，且帧数等于 `data` 长度 / 块对齐，否则按不合规拒绝（明细 `WavDetail::Fact`）；
-  - 覆盖的拒绝情形：缺少、在 `data` 之后、重复、帧数不一致；
-  - ffmpeg 输出到管道时的样子（RIFF 与 `data` 长度为占位值 0xFFFFFFFF、没有 `fact`）同样按缺少 `fact` 拒绝；W1 对整数 PCM 的占位长度容错不用于浮点；
-  - 以后按真实样例逐条加容错（同 W1）。
+- **`fact` chunk**：可有可无（用户 2026-10-16 决定；RIFF 1991 原文只要求压缩格式与 `wavl` LIST 有 `fact`，见 [specs.md](specs.md)）。
+  - 没有 `fact`：照常播放，帧数按 `data` 长度计算；`data` 长度为占位值时按 W1 R2 延伸到源末尾（ffmpeg 输出到管道的浮点 WAV 因此可以播放，修正写入报告）；
+  - `data` 之前有 `fact`：只能有一个，声明的帧数必须等于 `data` 的完整帧数；`data` 长度为占位值而有 `fact` 时无法核对。这三种按不合规拒绝（明细 `WavDetail::Fact`）；
+  - `data` 之后的块不读取（同 PCM），其中的 `fact` 不核对。
+  - 原先（2026-10-15）缺少 `fact` 一律拒绝，比原文严格。
 - **样本**：
   - 小端位模式按位放入 `pcm()`，不做数值运算；
   - binary32 每个样本 1 个 `i32`，binary64 每个样本 2 个 `i32`（低字在前）；
@@ -78,18 +78,19 @@ WASAPI 与 ALSA 真机上的浮点独占播放、MCU 实物都未运行（见 §
 
 ## 4. 夹具与参考
 
-- **生成器**：`tools/qy-gen-fixtures`（`wav_float.rs`，纯 Rust），在 `qy-codec-wav/tests/fixtures/float` 下生成 16 个夹具。
-  - 可播放的 7 个：
+- **生成器**：`tools/qy-gen-fixtures`（`wav_float.rs`，纯 Rust），在 `qy-codec-wav/tests/fixtures/float` 下生成 17 个夹具。
+  - 可播放的 10 个：
     - `f32_stereo_44k_tag3`、`f32_mono_48k_ext`；
     - `f64_stereo_96k_tag3`、`f64_51_48k_ext`（5.1 掩码）；
     - `f32_fact_first_list`（`fact` 在前、`LIST` 在中间）；
-    - `f32_specials`、`f64_specials`。
+    - `f32_specials`、`f64_specials`；
+    - 没有 `fact` 的 `f32_no_fact`、`fact` 在 `data` 之后的 `f32_fact_after_data`、长度为占位值且没有 `fact` 的 `f32_pipe_placeholder`（2026-10-16 起可播放）。
   - 特殊值覆盖：0、−0、±1.0、略大于 1.0、次正规数、最小/最大有限值、静默与信号 NaN、±∞，以及由 16/24 位整数生成的值与任意值。
-  - 拒绝情形的 9 个：
+  - 拒绝情形的 7 个：
     - 16/24 位浮点；
     - EXTENSIBLE 有效位为 24；
-    - 缺少 `fact`、`fact` 在 `data` 之后、重复、帧数不一致；
-    - 占位长度、截断。
+    - `fact` 重复、帧数不一致、`fact` 与占位长度同时出现；
+    - 截断。
 - **独立期望**：生成器直接写出位模式（`.expect`），测试逐位比较。
 - **第二参考 ffmpeg**：
   - `-f f32le` / `-f f64le` 原样输出，与解码结果按位一致；
@@ -104,7 +105,7 @@ WASAPI 与 ALSA 真机上的浮点独占播放、MCU 实物都未运行（见 §
 
 | 项 | 结果 |
 | --- | --- |
-| 1 解码与参考 | 7 个可播放夹具与独立期望按位一致，与 ffmpeg 第二参考一致；9 个拒绝情形的类别与明细符合期望 |
+| 1 解码与参考 | 10 个可播放夹具与独立期望按位一致，与 ffmpeg 第二参考一致；7 个拒绝情形的类别与明细符合期望 |
 | 2 任意分块 | 1 字节、随机、整块三种分块结果相同 |
 | 3 转换 | 与独立公式逐样本一致；V = 16 / 32 在 [−1, 1) 内与 ffmpeg 一致；限幅与不精确计数正确 |
 | 4 fuzz | 见 §6 |
@@ -157,6 +158,6 @@ WASAPI 与 ALSA 真机上的浮点独占播放、MCU 实物都未运行（见 §
   - MCU 实物。
 - **规范原文核对**（用户 2026-10-16 提供，见 [specs.md](specs.md)）：
   - IEEE 754-2019 §3.4 的编码规则、Table 3.5 的参数与 §4.3.1 roundTiesToEven 都与实现一致；所给 PDF 不含 §5.8 与 §6.2；
-  - RIFF 1991 原文只要求压缩格式（以及 `wavl` LIST）有 `fact`，也没有定义格式码 3。所以“浮点 WAV 必须有 `fact`”是任务卡的规定，比原文严格，原文中没有依据。当前实现仍按任务卡拒绝缺少 `fact` 的浮点 WAV，是否放宽待用户决定。
-- **`fact` 无容错**：缺少或不一致一律拒绝，以后按真实样例逐条加。
+  - RIFF 1991 原文只要求压缩格式（以及 `wavl` LIST）有 `fact`，也没有定义格式码 3。原先“浮点 WAV 必须有 `fact`”是任务卡的规定，原文中没有依据；用户 2026-10-16 决定改为可有可无（§1）。
+- **`fact` 与 `data` 矛盾时不容错**：重复或帧数不一致一律拒绝，以后按真实样例逐条加。
 - **AIFF-C 的 `fl32` / `fl64`**：照旧按“规范之外的扩展”拒绝（任务卡 §8 决定 1）。

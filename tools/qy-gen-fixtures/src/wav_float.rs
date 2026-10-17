@@ -166,9 +166,22 @@ fn ok(
     bits: Vec<u64>,
     convert: bool,
 ) {
+    ok_raw(cs, name, riff(&chunks), fmt, mask, bits, convert);
+}
+
+/// 同 [`ok`]，文件字节由调用方给出（例如长度为占位值）。
+fn ok_raw(
+    cs: &mut Vec<Case>,
+    name: &'static str,
+    data: Vec<u8>,
+    fmt: (u32, u16, Enc),
+    mask: Option<u32>,
+    bits: Vec<u64>,
+    convert: bool,
+) {
     cs.push(Case {
         name,
-        data: riff(&chunks),
+        data,
         result: "ok",
         fmt: Some(fmt),
         mask,
@@ -303,15 +316,47 @@ fn build() -> Vec<Case> {
         false,
     );
 
-    // ---- 不合规：fact ----
-    let d = encode(&finite(6, 20, Enc::F32), Enc::F32);
-    bad(
+    // ---- fact 可有可无（用户 2026-10-16 决定：RIFF 1991 原文只要求压缩格式有 fact）----
+    let fb = finite(6, 20, Enc::F32);
+    let d = encode(&fb, Enc::F32);
+    ok(
         c,
         "f32_no_fact",
-        riff(&[fmt_tag3(2, 44_100, 32), chunk(b"data", &d)]),
-        "Malformed",
-        "fact:none:10:0",
+        vec![fmt_tag3(2, 44_100, 32), chunk(b"data", &d)],
+        (44_100, 2, Enc::F32),
+        None,
+        fb.clone(),
+        false,
     );
+    // data 之后的块不读取（同 PCM）。
+    ok(
+        c,
+        "f32_fact_after_data",
+        vec![fmt_tag3(2, 44_100, 32), chunk(b"data", &d), fact(10)],
+        (44_100, 2, Enc::F32),
+        None,
+        fb.clone(),
+        false,
+    );
+    // ffmpeg 输出到管道时的样子：RIFF 与 data 长度为占位值、没有 fact。data 按 W1 R2 延伸到源末尾。
+    let pipe = |chunks: &[Vec<u8>]| {
+        let mut b = riff(chunks);
+        b[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        let at = b.len() - d.len() - 4;
+        b[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        b
+    };
+    ok_raw(
+        c,
+        "f32_pipe_placeholder",
+        pipe(&[fmt_float_ext(2, 44_100, Enc::F32, 0x3), chunk(b"data", &d)]),
+        (44_100, 2, Enc::F32),
+        Some(0x3),
+        fb.clone(),
+        false,
+    );
+
+    // ---- 不合规：fact 与 data 矛盾或无法核对 ----
     bad(
         c,
         "f32_fact_mismatch",
@@ -331,24 +376,17 @@ fn build() -> Vec<Case> {
         "Malformed",
         "fact:10:10:1",
     );
+    // 有 fact 而 data 长度为占位值：声明的帧数无法核对。
     bad(
         c,
-        "f32_fact_after_data",
-        riff(&[fmt_tag3(2, 44_100, 32), chunk(b"data", &d), fact(10)]),
+        "f32_fact_placeholder",
+        pipe(&[
+            fmt_float_ext(2, 44_100, Enc::F32, 0x3),
+            fact(10),
+            chunk(b"data", &d),
+        ]),
         "Malformed",
-        "fact:none:10:0",
-    );
-    // ffmpeg 输出到管道时的样子：RIFF 与 data 长度为占位值、没有 fact。
-    let mut pipe = riff(&[fmt_float_ext(2, 44_100, Enc::F32, 0x3), chunk(b"data", &d)]);
-    pipe[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
-    let at = pipe.len() - d.len() - 4;
-    pipe[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
-    bad(
-        c,
-        "f32_pipe_placeholder",
-        pipe,
-        "Malformed",
-        "fact:none:none:0",
+        "fact:10:none:0",
     );
     // EXTENSIBLE 浮点的有效位不等于容器。
     bad(
