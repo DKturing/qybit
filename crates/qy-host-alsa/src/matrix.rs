@@ -294,7 +294,7 @@ impl MatrixReport {
         o.push_str("{\n  \"report\": \"qybit-alsa-device-matrix\",\n");
         let _ = writeln!(o, "  \"backend\": {},", json_str(&self.backend));
         let _ = writeln!(o, "  \"device\": {},", json_str(&self.device));
-        o.push_str("  \"note\": \"记录请求格式、alsa-lib 返回与 hw_params_current 读回；接口成功与播放统计只证明兼容与运行，不证明 DAC 输入样本逐位一致\",\n");
+        o.push_str("  \"note\": \"记录请求格式、设备返回与设置后由内核读回的参数；接口成功与播放统计只证明兼容与运行，不证明 DAC 输入样本逐位一致\",\n");
         o.push_str("  \"entries\": [\n");
         for (i, e) in self.entries.iter().enumerate() {
             let it = &e.item;

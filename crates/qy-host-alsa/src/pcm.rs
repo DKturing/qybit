@@ -1,12 +1,13 @@
-//! ALSA PCM 的最小操作集合（与 alsa-lib 一一对应），真实实现见 `linux::real`，
-//! 测试用假实现见 [`crate::testing`]。错误一律为 alsa-lib 调用名与正 errno。
+//! ALSA PCM 的最小操作集合（语义与 alsa-lib 同名函数一一对应），真实实现为内核直连的
+//! `linux::KernelPcm`（另有可选的 alsa-lib 实现 `linux::alsalib`），测试用假实现见
+//! [`crate::testing`]。错误一律为调用名（内核 ioctl 或 alsa-lib 函数）与正 errno。
 
 use std::fmt;
 
 use qy_pcm_format::ChannelLayout;
 use qy_pcm_format::alsa::{AlsaFormat, ChmapType, HwApplied, HwRequest};
 
-/// alsa-lib 调用失败：调用名与正 errno。
+/// 调用失败：调用名与正 errno。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PcmError {
     pub call: &'static str,
@@ -87,7 +88,7 @@ pub trait Pcm: Send + 'static {
     /// [`AlsaFormat::ALL`] 的顺序。
     fn supported_formats(&mut self) -> Result<Vec<AlsaFormat>, PcmError>;
     /// 设置硬件参数（访问方式、格式、声道、精确采样率、关闭重采样、周期、缓冲），
-    /// 应用后用 `snd_pcm_hw_params_current` 读回；并设置软件参数：只由显式 `start`
+    /// 应用后读回已应用参数（内核把最终参数写回 `HW_PARAMS` 的结构体）；并设置软件参数：只由显式 `start`
     /// 启动、可写阈值为一个周期。
     fn configure(&mut self, plan: &HwPlan) -> Result<Configured, PcmError>;
     /// 释放硬件参数（换下一个候选格式前）。

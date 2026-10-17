@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use qy_host_alsa::AlsaBackend;
-use qy_host_alsa::linux::RealOpener;
+use qy_host_alsa::linux::KernelOpener;
 use qy_host_alsa::linux::priority::RtPriority;
 use qy_player::render::RenderEnd;
 use qy_player::signal::write_test_wav;
@@ -27,7 +27,7 @@ fn play_one(file: PathBuf, frames: u64) {
     let Ok(mut res) = HostResources::new() else {
         panic!("资源分配失败");
     };
-    let mut backend = AlsaBackend::new(dev.clone(), RealOpener, RtPriority::default());
+    let mut backend = AlsaBackend::new(dev.clone(), KernelOpener, RtPriority::default());
     let report = play(&mut backend, &mut res, &[file]);
     println!("设备 {dev}\n{}", report.summary());
     assert!(

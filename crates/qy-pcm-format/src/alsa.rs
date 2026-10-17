@@ -461,7 +461,8 @@ pub struct HwRequest {
     pub buffer_frames: u32,
 }
 
-/// `snd_pcm_hw_params_current` 读回的已应用参数。
+/// 设置后读回的已应用参数（A1 起为内核 `HW_PARAMS` 写回的值，与 alsa-lib
+/// `snd_pcm_hw_params_current` 读到的是同一组字段）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HwApplied {
     pub access: Access,

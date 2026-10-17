@@ -1,4 +1,6 @@
-//! 真实 alsa-lib PCM（alsa crate 0.12.1，安全封装；本模块不含 `unsafe`）。
+//! alsa-lib PCM（alsa crate 0.12.1，安全封装；本模块不含 `unsafe`）。A1 起只在默认关闭的
+//! `alsa-lib` 特性下编译，供 A 层回环测试使用 alsa-lib 的 `file` 插件；发布版用
+//! [`super::KernelPcm`]。
 //!
 //! 参数设置（出处：alsa-lib PCM hw_params 文档）：
 //! - `snd_pcm_hw_params_set_access(RW_INTERLEAVED)`、`set_format`、`set_channels`（精确）；

@@ -12,11 +12,11 @@ pub struct Attempt {
     pub alsa_format: AlsaFormat,
     /// 请求的设备格式（由 ALSA 格式、源采样率与声道构成）。
     pub format: DeviceFormat,
-    /// 设置参数时失败的 alsa-lib 调用。
+    /// 设置参数时失败的调用（内核 ioctl 或 alsa-lib 函数）。
     pub error: Option<PcmError>,
     /// 实际请求（含设备接受的周期/缓冲）。
     pub request: Option<HwRequest>,
-    /// `snd_pcm_hw_params_current` 读回值。
+    /// 应用后读回的参数（内核 `HW_PARAMS` 写回值；alsa-lib 后端为 `snd_pcm_hw_params_current`）。
     pub applied: Option<HwApplied>,
     /// 读回与请求不一致项的说明。
     pub mismatch: Option<String>,
@@ -80,7 +80,7 @@ impl AttemptRecord for Attempt {
             format,
             buffer_frames: Some(a.buffer_frames),
             period_frames: Some(a.period_frames),
-            note: Some("由 snd_pcm_hw_params_current 读回"),
+            note: Some("设置后由内核读回"),
         })
     }
 }

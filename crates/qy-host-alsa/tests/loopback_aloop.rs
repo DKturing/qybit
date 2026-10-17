@@ -6,7 +6,7 @@
 //! 可用 `QYBIT_ALOOP_CARD`（默认 `Loopback`）与 `QYBIT_ALOOP_SUBDEV`（默认 0）指定设备。
 //!
 //! 每个用例先以与播放端相同的格式打开 `hw:<卡>,1,<子设备>` 回录，再经真实播放路径
-//! （核心 → 自有解码 → pack → 短写渲染 → alsa-lib → 内核）向 `hw:<卡>,0,<子设备>` 播放
+//! （核心 → 自有解码 → pack → 短写渲染 → 内核 ALSA 接口）向 `hw:<卡>,0,<子设备>` 播放
 //! 同步曲目 + 待测曲目，按同步序列对齐后逐字节比对。N > V 的用例须在设备选择阶段被拒绝。
 //!
 //! 这是虚拟回环：经过 ALSA 内核路径，但不证明真实 DAC 输入样本逐位一致。
@@ -19,12 +19,16 @@ use std::time::Duration;
 
 use common::{cases, device_bytes, make_tracks, report_dir, sync_samples, test_samples, write_wav};
 use qy_host_alsa::AlsaBackend;
-use qy_host_alsa::linux::RealOpener;
+use qy_host_alsa::linux::KernelOpener;
 use qy_host_alsa::linux::capture::start_capture;
 use qy_host_alsa::linux::priority::RtPriority;
 use qy_host_alsa::loopback::{Layer, LoopCase, LoopEntry, LoopReport, Verdict, align_and_compare};
 use qy_pcm_format::alsa::AlsaFormat;
 use qy_player::{HostResources, play};
+
+/// 尾部静音垫片的时长：采样率 / 10 帧（100 ms），远大于 snd-aloop 一次复制的量（一个定时器
+/// 间隔，不超过一个周期 = 10 ms）。
+const PAD_DIVISOR: u32 = 10;
 
 struct Devices {
     playback: String,
@@ -68,9 +72,35 @@ fn loop_once(
             return entry;
         }
     };
-    let mut b = AlsaBackend::new(dev.playback.clone(), RealOpener, RtPriority::default());
+    // 尾部垫片：同格式的静音曲目接在最后（同一个流内无缝衔接），比对范围不含它。
+    // 原因：snd-aloop 在播放端排空（DRAINING）时，最后一次复制把超出 appl_ptr 的部分清零，
+    // 但清零从本次复制之前的回录位置开始（sound/drivers/aloop.c：copy_play_buf 调用
+    // clear_capture_buf，后者以 capt->buf_pos 为起点，而 buf_pos 在复制之后才前移），
+    // 于是刚复制进回录缓冲的最后一段被静音覆盖。内核 v6.1、v6.8、v6.12 与 master（2026-10）
+    // 都如此；任何播放程序经 snd-aloop 排空都会丢掉这一段，与 QyBit 无关（播放端的
+    // appl_ptr 已含全部帧）。垫片让待测数据在排空开始前就完整经过回环。
+    let pad = files
+        .first()
+        .and_then(|f| f.parent())
+        .map(|d| {
+            d.join(format!(
+                "pad-{}-{}-{}.wav",
+                case.rate, case.channels, case.source_bits
+            ))
+        })
+        .unwrap_or_else(|| PathBuf::from("pad.wav"));
+    write_wav(
+        &pad,
+        case.rate,
+        case.channels,
+        case.source_bits,
+        &vec![0; (case.rate / PAD_DIVISOR) as usize * usize::from(case.channels)],
+    );
+    let mut all = files.to_vec();
+    all.push(pad);
+    let mut b = AlsaBackend::new(dev.playback.clone(), KernelOpener, RtPriority::default());
     b.forced = forced;
-    let r = play(&mut b, res, files);
+    let r = play(&mut b, res, &all);
     // 等回录取走最后的数据。
     std::thread::sleep(Duration::from_millis(150));
     let captured = capture.finish();
@@ -125,7 +155,7 @@ fn aloop_loopback_matrix() {
         if case.source_bits > case.format.valid_bits() {
             // N > V：设备选择阶段即须拒绝，不打开回录。
             let tracks = make_tracks(&dir, &format!("c{i}"), &case, 256, 2000 + i as u64);
-            let mut b = AlsaBackend::new(dev.playback.clone(), RealOpener, RtPriority::default());
+            let mut b = AlsaBackend::new(dev.playback.clone(), KernelOpener, RtPriority::default());
             b.forced = Some(case.format);
             let r = play(&mut b, &mut res, &[tracks.test_path]);
             let verdict = if r.streams.is_empty() && !r.open_failures.is_empty() {

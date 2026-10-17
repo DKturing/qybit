@@ -9,8 +9,11 @@
 //! 进程内改 `HOME`/`ALSA_CONFIG_PATH` 又需要 `unsafe` 的 `set_var`；alsa-lib 内置的
 //! `pcm.file` 定义与之等价（同为 type file、slave null），并能按每次打开指定文件路径。
 //!
+//! A1 起发布版直接使用内核接口、不含 alsa-lib；这一层只在 `--features alsa-lib` 下编译运行（CI），
+//! 用 alsa-lib 后端核对同一条软件路径。
+//!
 //! 这一层不经过任何驱动，只证明软件路径提交正确，不证明设备端 bit-perfect。
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "alsa-lib"))]
 
 mod common;
 
@@ -23,7 +26,7 @@ use common::{
 };
 use qy_host_alsa::AlsaBackend;
 use qy_host_alsa::attempt::PlaybackReport;
-use qy_host_alsa::linux::{RealOpener, RealPcm};
+use qy_host_alsa::linux::alsalib::{RealOpener, RealPcm};
 use qy_host_alsa::loopback::{Layer, LoopEntry, LoopReport, Verdict, align_and_compare};
 use qy_host_alsa::pcm::{Configured, HwPlan, Opener, Pcm, PcmError};
 use qy_pcm_format::alsa::{AlsaFormat, ChmapType};

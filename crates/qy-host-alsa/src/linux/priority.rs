@@ -1,8 +1,9 @@
 //! 渲染线程实时调度（`SCHED_FIFO`）。只作尝试：失败（常见为无 `CAP_SYS_NICE` 或
 //! `RLIMIT_RTPRIO` 为 0 时的 `EPERM`）写入报告，不阻止播放；结束时恢复原调度策略。
 //!
-//! 出处：Linux `sched_setscheduler(2)`、`sched_getscheduler(2)`、`sched_getparam(2)`：
-//! pid 为 0 时作用于调用线程。
+//! 出处：POSIX `pthread_getschedparam(3)`、`pthread_setschedparam(3)`（作用于调用线程）。
+//! 不用 `sched_setscheduler(2)`：musl 按 POSIX 的进程级语义不实现它（固定返回 `ENOSYS`），
+//! 而线程级的 pthread 接口在 glibc 与 musl 中都直接对线程 id 调用内核（A1 静态程序用 musl）。
 #![allow(unsafe_code)]
 
 use qy_player::render::{ErrorCode, ThreadPriority};
@@ -15,8 +16,13 @@ pub struct RtPriority {
     saved: Option<(i32, i32)>,
 }
 
-fn last_errno() -> ErrorCode {
-    ErrorCode::Errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+/// pthread 接口直接返回错误号（不设 errno）。
+fn check(r: i32) -> Result<(), ErrorCode> {
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(ErrorCode::Errno(r))
+    }
 }
 
 impl ThreadPriority for RtPriority {
@@ -25,24 +31,23 @@ impl ThreadPriority for RtPriority {
     }
 
     fn register(&mut self) -> Result<(), ErrorCode> {
-        // SAFETY: 只查询调用线程（pid 0）的调度策略与参数；param 为本地变量。
+        // SAFETY: 只查询调用线程（pthread_self）的调度策略与参数；输出为本地变量。
         let (policy, prio) = unsafe {
-            let policy = libc::sched_getscheduler(0);
+            let mut policy = 0;
             let mut param: libc::sched_param = std::mem::zeroed();
-            if policy < 0 || libc::sched_getparam(0, &mut param) != 0 {
-                return Err(last_errno());
-            }
+            check(libc::pthread_getschedparam(
+                libc::pthread_self(),
+                &mut policy,
+                &mut param,
+            ))?;
             (policy, param.sched_priority)
         };
         // SAFETY: 只修改调用线程的调度策略；param 为有效的本地变量。
-        let r = unsafe {
+        check(unsafe {
             let mut param: libc::sched_param = std::mem::zeroed();
             param.sched_priority = RT_PRIORITY;
-            libc::sched_setscheduler(0, libc::SCHED_FIFO, &param)
-        };
-        if r != 0 {
-            return Err(last_errno());
-        }
+            libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param)
+        })?;
         self.saved = Some((policy, prio));
         Ok(())
     }
@@ -52,14 +57,10 @@ impl ThreadPriority for RtPriority {
             return Ok(());
         };
         // SAFETY: 恢复调用线程注册前的调度策略与参数。
-        let r = unsafe {
+        check(unsafe {
             let mut param: libc::sched_param = std::mem::zeroed();
             param.sched_priority = prio;
-            libc::sched_setscheduler(0, policy, &param)
-        };
-        if r != 0 {
-            return Err(last_errno());
-        }
-        Ok(())
+            libc::pthread_setschedparam(libc::pthread_self(), policy, &param)
+        })
     }
 }

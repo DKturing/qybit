@@ -428,7 +428,7 @@ fn decode_fault_drains_and_summary_reports_readback() {
         "{s}"
     );
     assert!(
-        s.contains("已应用参数：格式 44100 Hz / 2 声道 / 容器 16 位 / 有效 16 位，缓冲 1764 帧，周期 441 帧（由 snd_pcm_hw_params_current 读回）"),
+        s.contains("已应用参数：格式 44100 Hz / 2 声道 / 容器 16 位 / 有效 16 位，缓冲 1764 帧，周期 441 帧（设置后由内核读回）"),
         "{s}"
     );
     assert!(s.contains("提交方式：短写"), "{s}");

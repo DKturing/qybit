@@ -161,7 +161,7 @@ fn run(cmd: Command) -> ExitCode {
 #[cfg(target_os = "linux")]
 fn run(cmd: Command) -> ExitCode {
     use qy_host_alsa::AlsaBackend;
-    use qy_host_alsa::linux::RealOpener;
+    use qy_host_alsa::linux::KernelOpener;
     use qy_host_alsa::linux::devices::list_playback;
     use qy_host_alsa::linux::priority::RtPriority;
     match cmd {
@@ -205,7 +205,7 @@ fn run(cmd: Command) -> ExitCode {
             };
             apply_channel_policy(&mut res, mono_to_stereo);
             apply_float_policy(&mut res, float_to_int);
-            let mut backend = AlsaBackend::new(device, RealOpener, RtPriority::default());
+            let mut backend = AlsaBackend::new(device, KernelOpener, RtPriority::default());
             let stop = interrupt_flag(qy_host_alsa::linux::interrupt::install());
             let report = play_live(&mut backend, &mut res, &files, stop);
             ExitCode::from(report.exit_code())
