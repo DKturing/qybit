@@ -753,7 +753,8 @@ pub struct Engine<D: Decoder + Resources, S: FrameSink> {
     /// `FLOAT_FALLBACK_BITS[k − 1]` 位整数）。
     configuring: Option<SourceFormat>,
     float_stage: u8,
-    /// 当前设备不接受、已改为转换的浮点源格式（同格式的后续曲目据此续用设备）。
+    /// 当前设备不接受、已改为转换的浮点源格式（同格式的后续曲目据此续用设备）。只在一次播放
+    /// 期间有效：停止与重新开始时清除（下一次播放可能是另一台设备）。
     rejected_float: Option<SourceFormat>,
     /// 当前输出曲目的浮点统计（第一次入队时开始，关闭时给出）。
     float_track: Option<(u32, FloatReport)>,
@@ -1012,6 +1013,7 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
     fn start(&mut self, first: u32, count: u32, frame: u64) {
         self.track_count = count;
         self.reject = None;
+        self.rejected_float = None;
         self.marks_len = 0;
         self.track_frame = frame;
         self.announced = None;
@@ -1045,6 +1047,7 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
         }
         self.paused = false;
         self.reject = None;
+        self.rejected_float = None;
         self.mode = Mode::Idle;
     }
 

@@ -564,3 +564,58 @@ fn float_over_capacity_converts_when_enabled() {
         r.fault
     );
 }
+
+/// “设备不接受该浮点格式”的记录只在当前设备的生命周期内有效：同一宿主先在只接受整数的设备 A 上
+/// 播放浮点（转换），再在接受 binary32 的设备 B 上播放“整数、同格式浮点”，第二首必须按位原样送到
+/// 浮点设备，不能沿用设备 A 的拒绝记录直接转换。
+#[test]
+fn float_rejection_does_not_outlive_device() {
+    let mut h = host(FloatPolicy::ToInt);
+    let fl = fx("f32_stereo_44k_tag3");
+    let int_wav = read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../qy-codec-wav/tests/fixtures/pcm16_stereo_44k.wav"),
+    );
+    // 设备 A：只接受 16 位整数。
+    let r = run(
+        &mut h,
+        &scenario(
+            1,
+            DeviceModel::Wasapi,
+            vec![spec(&fl.data)],
+            &[(16, 16)],
+            &[],
+            ErrorPolicy::Stop,
+        ),
+    );
+    clean(&r, "设备 A");
+    assert_eq!(r.float_converted, vec![(0, 16)], "设备 A 转换");
+    // 设备 B：接受 16 位整数与 binary32。
+    for device in DEVICES {
+        let r = run(
+            &mut h,
+            &scenario(
+                2,
+                device,
+                vec![spec(&int_wav), spec(&fl.data)],
+                &[(16, 16)],
+                &[SampleEncoding::Float32],
+                ErrorPolicy::Stop,
+            ),
+        );
+        clean(&r, "设备 B");
+        assert!(
+            r.float_converted.is_empty(),
+            "设备 B 不应转换：{:?}",
+            r.float_converted
+        );
+        let last = r.segments.last().map(|s| s.format.encoding());
+        assert_eq!(last, Some(SampleEncoding::Float32), "设备 B 第二首应为浮点");
+        assert!(
+            r.segments
+                .last()
+                .is_some_and(|s| s.valid == float_bytes(&fl)),
+            "设备 B 浮点按位"
+        );
+    }
+}

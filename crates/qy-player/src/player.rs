@@ -181,12 +181,10 @@ struct Player<'a, B: Backend, S: TrackSource> {
     last_status: Option<(Status, Instant)>,
     /// 当前流已置 EOF、等待渲染线程播完（排空期间照常处理控制命令与状态）。
     draining: bool,
-    /// 最近解码过的曲目与其源格式（按解码顺序，至多 [`FORMAT_HISTORY`] 条）：解码可能已领先到
-    /// 下一首，状态显示按正在播放的曲目查找。
+    /// 仍在播放或排队的曲目与其源格式（按解码顺序）：解码可能领先正在播放的曲目若干首（至多引擎
+    /// 队列可容纳的曲目边界数），状态显示按正在播放的曲目查找。记录新曲目时只淘汰已经播完的曲目。
     formats: std::collections::VecDeque<(u32, SourceFormat)>,
 }
-
-const FORMAT_HISTORY: usize = 8;
 
 /// 依次播放 `files`，直到完成、失败或设备出错。
 pub fn play<B: Backend>(
@@ -240,7 +238,7 @@ pub fn play_with<'a, B: Backend, S: TrackSource>(
         count,
         last_status: None,
         draining: false,
-        formats: std::collections::VecDeque::with_capacity(FORMAT_HISTORY),
+        formats: std::collections::VecDeque::new(),
     };
     p.run();
     p.status(true);
@@ -367,9 +365,11 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
         };
         let entry = (e.track(), f);
         if self.formats.back() != Some(&entry) {
-            if self.formats.len() == FORMAT_HISTORY {
-                self.formats.pop_front();
-            }
+            // 引擎按顺序播放：仍需要的是正在播放的曲目到正在解码的曲目之间的各首（切歌后正在解码的
+            // 曲目可能在前，此时只保留这两首）。
+            let (playing, decoding) = (e.playing_progress().0, e.track());
+            let keep = |t: u32| t == playing || t == decoding || (playing..=decoding).contains(&t);
+            self.formats.retain(|(t, _)| keep(*t));
             self.formats.push_back(entry);
         }
     }
@@ -1269,6 +1269,65 @@ mod tests {
         }
     }
 
+    /// “设备不接受该浮点格式”的记录不能跨播放会话：同一组宿主资源（GUI 中跨会话复用）先在只接受
+    /// 整数的设备 A 上转换播放浮点，再在接受 32 位浮点的设备 B 上播放“16 位整数、同格式浮点”，第二首
+    /// 必须按位原样送到浮点格式，不能沿用设备 A 的拒绝记录直接转成整数。
+    #[test]
+    fn float_rejection_does_not_outlive_session() {
+        use crate::testing::FAKE_FLOAT32;
+        let name = "float/f32_stereo_44k_tag3.wav";
+        let raw = data_chunk(&fixture(name));
+        let Ok(mut res) = HostResources::new() else {
+            panic!("res");
+        };
+        res.engine.set_float_policy(FloatPolicy::ToInt);
+        for device in DEVICES {
+            // 设备 A：只接受整数，浮点转换。
+            let mut a = backend(&ALL, device);
+            let files = [fixture_path(name)];
+            let r = play_with(
+                &mut a,
+                &mut res,
+                &mut Files(&files),
+                PlayControl {
+                    on_line: &mut |_: &str| {},
+                    stop: None,
+                    commands: None,
+                    first: 0,
+                    on_status: None,
+                },
+            );
+            assert_eq!(r.samples_altered, vec![(0, 32)], "{}", r.summary());
+            // 设备 B：16 位整数与 32 位浮点。
+            let mut b = backend(&[(16, 16), FAKE_FLOAT32], device);
+            let files = [fixture_path("pcm16_stereo_44k.wav"), fixture_path(name)];
+            let r = play_with(
+                &mut b,
+                &mut res,
+                &mut Files(&files),
+                PlayControl {
+                    on_line: &mut |_: &str| {},
+                    stop: None,
+                    commands: None,
+                    first: 0,
+                    on_status: None,
+                },
+            );
+            assert!(r.samples_altered.is_empty(), "{}", r.summary());
+            let outs = b.outputs();
+            let Some(last) = outs.last() else {
+                panic!("无输出");
+            };
+            assert_eq!(
+                last.format.encoding(),
+                SampleEncoding::Float32,
+                "{}",
+                r.summary()
+            );
+            check_output(last, &raw);
+        }
+    }
+
     #[test]
     fn mono_to_stereo_duplicates_and_reports_altered() {
         let raw = data_chunk(&fixture("pcm16_mono_8k_fmt18.wav"));
@@ -1829,6 +1888,29 @@ mod tests {
         }
         assert!(tracks.contains(&0) && tracks.contains(&1), "{tracks:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 连续的短曲目：引擎可以在第 1 首仍在播放时解析到第 9 首以后。状态快照中正在播放的曲目必须
+    /// 始终带有源格式（格式记录按仍在播放或排队的曲目保留，不按条数淘汰）。
+    #[test]
+    fn status_keeps_source_of_playing_track_with_many_short_tracks() {
+        let dir = track_dir("short");
+        let files: Vec<PathBuf> = (0..20)
+            .map(|i| {
+                let p = dir.join(format!("short{i:02}.wav"));
+                assert!(crate::signal::write_test_wav(&p, 44_100, 2, 16, 300).is_ok());
+                p
+            })
+            .collect();
+        let mut b = backend(&ALL, FakeDevice::Clock);
+        let (r, _, seen) = run_ctl(&mut b, &files, |_, _| {});
+        assert!(r.finished, "{}", r.summary());
+        let missing: Vec<&Status> = seen
+            .iter()
+            .filter(|s| s.active && s.device.is_some() && s.source.is_none())
+            .collect();
+        assert!(missing.is_empty(), "缺少源格式的快照：{missing:?}");
+        assert!(seen.iter().any(|s| s.track >= 9 && s.source.is_some()));
     }
 
     /// O1 命令：设备不接受单声道。严格路径下打开失败、播放停止；另一次播放在第 1 首（立体声）
