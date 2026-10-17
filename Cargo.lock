@@ -410,6 +410,7 @@ dependencies = [
  "qy-codec-flac",
  "qy-core",
  "qy-player",
+ "windows",
 ]
 
 [[package]]

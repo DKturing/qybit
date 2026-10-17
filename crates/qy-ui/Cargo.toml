@@ -17,5 +17,9 @@ qy-player.workspace = true
 [dev-dependencies]
 qy-player = { workspace = true, features = ["test-support"] }
 
+# L1 测量（tests/l1_measure.rs）：Windows 上读进程 CPU 时间（GetProcessTimes）。
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [lints]
 workspace = true

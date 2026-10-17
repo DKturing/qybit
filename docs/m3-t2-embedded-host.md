@@ -208,7 +208,7 @@ STM32F4 的 SPI/I²S 数据寄存器是 16 位。经 16 位 DMA 发送 32 位槽
 | --- | --- |
 | SD 卡 | SDIO 4 位，HAL 低速初始化后切到 24 MHz；读错后下次访问重新初始化 |
 | I²S | SPI2/I²S2 主发送，飞利浦标准；DMA1 Stream4 双缓冲，三块 2 KiB 缓冲；传输完成中断里填空闲缓冲后用 `next_transfer` 换入 |
-| 串口 | USART2 115200；空闲时轮询（接收没有用中断或 DMA，WFI 期间会丢字符） |
+| 串口 | USART2 115200；RXNE 中断接收进有界队列（L1），空闲时 WFI，由 DMA 或串口中断唤醒（见 [l1-low-power.md](l1-low-power.md)） |
 
 **槽位**：
 

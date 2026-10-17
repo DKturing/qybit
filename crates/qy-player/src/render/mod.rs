@@ -278,3 +278,50 @@ fn with_priority<P: ThreadPriority>(
     }
     report
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+
+    /// L1：渲染侧的唤醒只在生产端登记等待且队列降到阈值以下时发生，每次等待至多一次；循环
+    /// 结束（含 panic 展开）时置位并唤醒。生产端用不带超时的 `park`：漏掉唤醒时测试会永久阻塞
+    /// （Miri 报告死锁）。
+    #[test]
+    fn producer_is_woken_once_per_wait_and_at_end() {
+        let ctl = Arc::new(RenderControl::for_producer(std::thread::current()));
+        ctl.wake_below_frames.store(100, Ordering::Release);
+        // 未登记等待：不唤醒，也不清除任何状态。
+        ctl.space_freed(10);
+        assert!(!ctl.space_wanted.load(Ordering::Acquire));
+        // 登记后，队列仍高于阈值时不唤醒；降到阈值时唤醒一次并清除登记。
+        ctl.space_wanted.store(true, Ordering::SeqCst);
+        let render = {
+            let ctl = Arc::clone(&ctl);
+            std::thread::spawn(move || {
+                ctl.space_freed(101);
+                assert!(ctl.space_wanted.load(Ordering::Acquire));
+                ctl.space_freed(100);
+                assert!(!ctl.space_wanted.load(Ordering::Acquire));
+                ctl.space_freed(0);
+            })
+        };
+        std::thread::park();
+        assert!(render.join().is_ok());
+        assert!(!ctl.space_wanted.load(Ordering::Acquire));
+        // 渲染循环 panic：展开时仍置位结束并唤醒。
+        let render = {
+            let ctl = Arc::clone(&ctl);
+            std::thread::spawn(move || {
+                let _end = EndGuard(&ctl);
+                panic!("渲染循环出错");
+            })
+        };
+        while !ctl.ended.load(Ordering::Acquire) {
+            std::thread::park();
+        }
+        assert!(render.join().is_err());
+    }
+}

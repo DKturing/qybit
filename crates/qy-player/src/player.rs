@@ -1858,6 +1858,26 @@ mod tests {
 
     // —— L1：生产端按事件等待 ——
 
+    /// 命令发送端唤醒已登记的生产端；未登记时命令留在通道中。生产端用不带超时的 `park`：漏掉
+    /// 唤醒时测试会永久阻塞（Miri 报告死锁）。
+    #[test]
+    fn command_sender_wakes_registered_producer() {
+        let (tx, rx) = command_channel();
+        assert!(tx.send(Command::Pause).is_ok());
+        assert_eq!(rx.try_recv(), Ok(Command::Pause));
+        rx.register(Some(std::thread::current()));
+        let sender = std::thread::spawn(move || tx.send(Command::Resume).is_ok());
+        let got = loop {
+            match rx.try_recv() {
+                Ok(c) => break c,
+                Err(_) => std::thread::park(),
+            }
+        };
+        assert_eq!(got, Command::Resume);
+        assert!(sender.join().unwrap_or(false));
+        rx.register(None);
+    }
+
     /// 带收到时刻的状态快照（控制线程读取）。
     type Seen = Arc<Mutex<Vec<(Instant, Status)>>>;
 

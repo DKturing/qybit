@@ -1,0 +1,32 @@
+# L1：低功耗宿主测量（只在手动运行时执行，不阻塞提交）。界面模型 + 播放线程在按真实时间消费的
+# 假设备上，记录空闲、播放、暂停各 QY_L1_SECS 秒的进程 CPU 时间、生产端唤醒次数与命令响应时间。
+# 数值只对运行的 runner 成立。记录见 docs/l1-low-power.md。
+name: measure
+
+on:
+  workflow_dispatch:
+    inputs:
+      secs:
+        description: 每个状态的时长（秒）
+        default: "20"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  l1-windows:
+    name: L1 测量（Windows）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - name: 空闲、播放、暂停与命令响应
+        shell: bash
+        env:
+          QY_L1_SECS: ${{ inputs.secs }}
+        run: |
+          cargo test --locked --release -p qy-ui --test l1_measure -- --ignored --nocapture | tee l1.txt
+          {
+            echo "## L1 测量（Windows，每个状态 ${QY_L1_SECS} s）"
+            grep -E '^\||欠载' l1.txt
+          } >> "$GITHUB_STEP_SUMMARY"
