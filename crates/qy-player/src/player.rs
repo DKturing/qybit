@@ -639,6 +639,7 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 self.report.fault = Some((track, fault));
                 let mut details = Vec::new();
                 let d = self.res.engine.decoder();
+                #[cfg(feature = "flac")]
                 if let Some(e) = d.flac_error() {
                     details.push(format!("FLAC 错误明细：{e:?}"));
                 }
@@ -650,6 +651,9 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
                 }
                 if let Some(u) = d.unrecognized() {
                     details.push(format!("无法识别的文件：{u}"));
+                }
+                if let Some(name) = d.disabled() {
+                    details.push(format!("本构建未启用 {name} 解码器，按不支持拒绝"));
                 }
                 self.line(&format!(
                     "  曲目 {} 失败：{}",
@@ -864,10 +868,12 @@ impl<B: Backend, S: TrackSource> Player<'_, B, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "flac")]
+    use crate::testing::flac_reference;
     use crate::testing::{
         FakeBackend, FakeDevice, FakeOutput, Negotiator, NoMonoNegotiator, TestAttempt, WCall,
         check_calls, check_write_calls, data_chunk, ffmpeg_reference, fixture, fixture_path,
-        flac_fixture_path, flac_reference, place,
+        flac_fixture_path, place,
     };
     use qy_core::engine::EngineFault;
     use qy_core::{DecodeError, Fault, SampleEncoding};
@@ -1546,6 +1552,7 @@ mod tests {
     }
 
     /// M1 T3：FLAC 与 WAV 按文件头识别混排；期望字节由 libFLAC 参考样本按独立公式放置。
+    #[cfg(feature = "flac")]
     #[test]
     fn flac_and_wav_mixed_playlist() {
         let names = [
@@ -1599,6 +1606,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "flac")]
     #[test]
     fn flac_decode_error_drains_verified_frames() {
         for device in DEVICES {
@@ -1637,6 +1645,7 @@ mod tests {
 
     /// F1：多声道 FLAC（5.1 后环绕、5.1 侧环绕、3.0）经播放器与假设备：设备格式携带源布局
     /// （掩码顺序），布局不同则重开；有效字节等于 libFLAC 参考按独立公式放置。
+    #[cfg(feature = "flac")]
     #[test]
     fn multichannel_streams_keep_layout() {
         let names = [
@@ -1672,6 +1681,36 @@ mod tests {
                 assert_eq!(o.format.sample_rate(), *rate);
                 check_output(o, bytes);
             }
+        }
+    }
+
+    /// B1：WAV-only 构建（`--no-default-features`）中 FLAC 曲目按“不支持”拒绝并说明原因；
+    /// 之前的 WAV 曲目照常完整播放。
+    #[cfg(not(feature = "flac"))]
+    #[test]
+    fn wav_only_build_rejects_flac_with_reason() {
+        let wav = data_chunk(&fixture("pcm16_stereo_44k.wav"));
+        for device in DEVICES {
+            let mut b = backend(&ALL, device);
+            let (r, outs) = run(
+                &mut b,
+                &["pcm16_stereo_44k.wav", "cli_16_stereo_44k_default.flac"],
+            );
+            assert_eq!(
+                r.fault,
+                Some((
+                    1,
+                    EngineFault::Core(Fault::Decode(DecodeError::Unsupported))
+                )),
+                "{device:?} {r:?}"
+            );
+            assert_eq!(
+                r.messages,
+                ["本构建未启用 FLAC 解码器，按不支持拒绝"],
+                "{device:?}"
+            );
+            assert_eq!(outs.len(), 1);
+            check_output(&outs[0], &wav);
         }
     }
 

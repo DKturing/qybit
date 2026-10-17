@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 qy-core.workspace = true
-qy-codec-auto.workspace = true
+qy-codec-auto = { workspace = true, features = ["wav", "flac", "aiff"] }
 qy-pcm-format = { workspace = true, features = ["ring"] }
 # 假后端（按真实时间消费的整包假设备）与渲染循环。
 qy-player = { workspace = true, features = ["test-support"] }

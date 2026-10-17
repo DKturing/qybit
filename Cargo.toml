@@ -34,7 +34,8 @@ qy-core = { path = "crates/qy-core" }
 qy-codec-wav = { path = "crates/qy-codec-wav" }
 qy-codec-flac = { path = "crates/qy-codec-flac" }
 qy-codec-aiff = { path = "crates/qy-codec-aiff" }
-qy-codec-auto = { path = "crates/qy-codec-auto" }
+# 各成员自行声明链接哪些解码器（B1：最小配置可组装）。
+qy-codec-auto = { path = "crates/qy-codec-auto", default-features = false }
 qy-pcm-format = { path = "crates/qy-pcm-format" }
 qy-host-sim = { path = "crates/qy-host-sim" }
 qy-player = { path = "crates/qy-player" }

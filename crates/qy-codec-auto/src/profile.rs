@@ -214,6 +214,21 @@ pub const DESKTOP: Profile =
         .with_max_channels(qy_core::MAX_CHANNELS)
         .with_convert(PCM_WORK_SAMPLES);
 
+/// 桌面最小配置（B1）：与 [`DESKTOP`] 相同的能力与队列，只链接 WAV 与 AIFF（不需要 `flac` 特性），
+/// 没有 FLAC 工作区；FLAC 文件按“不支持”拒绝。
+pub const DESKTOP_WAV: Profile = Profile::new(
+    "Desktop (WAV/AIFF)",
+    u32::MAX,
+    768_000,
+    2,
+    32,
+    4,
+    500,
+    QueueKind::Ring,
+)
+.with_max_channels(qy_core::MAX_CHANNELS)
+.with_convert(PCM_WORK_SAMPLES);
+
 /// 嵌入式完整版：WAV + AIFF + FLAC，≤ 96 kHz、双声道、≤ 24 位（I²S 32 位槽位），
 /// FLAC 块 ≤ 4608（[`Capacity::MCU`]），预填 250 ms（暂定），静态队列；提供浮点转整数工作区
 /// （F3：I²S 只输出整数，浮点文件只在明确开启转换时播放）。
@@ -323,5 +338,23 @@ mod tests {
             Err(CapabilityError::Bits { bits: 32, max: 24 })
         );
         assert_eq!(EMBEDDED_LITE.caps.check(&fmt(44_100, 2, 16)), Ok(()));
+    }
+}
+
+/// 桌面最小配置（B1）不依赖 `flac` 特性：没有 FLAC 工作区，队列与转换工作区与桌面相同（手算：
+/// 768 000 Hz × 0.5 s × 2 声道 × 4 字节 = 3 072 000 字节；转换工作区 8192 × 4 = 32 768 字节）。
+#[cfg(test)]
+mod desktop_wav {
+    use super::*;
+
+    #[test]
+    fn no_flac_buffers_same_queue() {
+        let b = DESKTOP_WAV.budget();
+        assert_eq!((b.flac_workspace, b.flac_pcm), (0, 0));
+        assert_eq!(b.queue, 3_072_000);
+        assert_eq!(b.convert, 32_768);
+        #[cfg(feature = "flac")]
+        assert_eq!(DESKTOP_WAV.flac_capacity(), None);
+        assert_eq!(DESKTOP_WAV.caps.max_channels, qy_core::MAX_CHANNELS);
     }
 }

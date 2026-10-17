@@ -9,14 +9,17 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
+default = ["flac"]
+# FLAC 解码（B1：关闭后为 WAV / AIFF 的最小配置，不链接 FLAC 代码）。
+flac = ["qy-codec-auto/flac", "dep:qy-codec-flac"]
 # 测试设施（夹具读取、独立参考、假平台 API 与假后端）；供本 crate 与各平台宿主的测试使用。
 test-support = []
 
 [dependencies]
 qy-core.workspace = true
 qy-codec-wav.workspace = true
-qy-codec-flac.workspace = true
-qy-codec-auto.workspace = true
+qy-codec-flac = { workspace = true, optional = true }
+qy-codec-auto = { workspace = true, features = ["wav", "aiff"] }
 qy-pcm-format = { workspace = true, features = ["ring"] }
 
 [lints]

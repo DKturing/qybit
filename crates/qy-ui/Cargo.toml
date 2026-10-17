@@ -10,7 +10,7 @@ publish.workspace = true
 
 [dependencies]
 qy-core.workspace = true
-qy-codec-auto.workspace = true
+qy-codec-auto = { workspace = true, features = ["wav", "flac", "aiff"] }
 qy-codec-flac.workspace = true
 qy-player.workspace = true
 

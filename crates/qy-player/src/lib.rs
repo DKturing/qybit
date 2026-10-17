@@ -2,7 +2,7 @@
 //!
 //! 各平台宿主（WASAPI、ALSA）共用的部分：
 //! - [`HostResources`]：输入窗口、解码工作区、pack 暂存区与设备帧队列按配置档（桌面为
-//!   `qy_codec_auto::profile::DESKTOP`）在启动时一次性分配，整程序复用（与模拟宿主同一契约）；
+//!   `qy_codec_auto::profile::DESKTOP`，不含 `flac` 特性时为 `DESKTOP_WAV`）按需组装、在启动时一次性分配，整程序复用（与模拟宿主同一契约）；
 //! - [`player`]：生产端播放驱动：执行 `qy_core::engine` 的宿主操作（读文件、开关设备），
 //!   播放规则由引擎负责（M3 T1），对输出后端泛型；
 //! - [`backend`]：后端 trait；
@@ -31,7 +31,7 @@ pub use report::{
     source_bits_text,
 };
 
-use qy_codec_auto::profile::{DESKTOP, Profile};
+use qy_codec_auto::profile::{self, Profile};
 use qy_codec_auto::{AutoDecoder, AutoInitError};
 use qy_core::engine::{Engine, EngineConfig, ErrorPolicy, ReusePolicy};
 use qy_core::{Core, DeviceFormat, PCM_WORK_SAMPLES};
@@ -47,13 +47,40 @@ pub enum HostError {
     Ring(RingError),
     /// 队列消费端仍在渲染线程中。
     ConsumerBusy,
-    /// 配置档未启用 FLAC（桌面宿主要求 WAV 与 FLAC 都启用）。
-    Profile,
 }
 
 /// 一次性分配零初始化切片并泄漏为 `'static`。只在宿主启动时调用。
 fn leak_zeroed<T: Copy + Default>(len: usize) -> &'static mut [T] {
     Box::leak(vec![T::default(); len].into_boxed_slice())
+}
+
+/// 按配置档组装解码器：只加入配置档启用、且本构建已链接的格式。
+fn decoder_for(profile: &Profile) -> Result<AutoDecoder, HostError> {
+    let mut d = AutoDecoder::empty();
+    if profile.wav_enabled() || profile.aiff_enabled() {
+        // WAV 与 AIFF 共用一块流式 PCM 工作区（F2）。
+        let pcm = leak_zeroed::<i32>(PCM_WORK_SAMPLES);
+        d = if profile.wav_enabled() {
+            d.with_wav(pcm)
+        } else {
+            d.with_stream_pcm(pcm)
+        }
+        .map_err(HostError::Decoder)?;
+        if profile.aiff_enabled() {
+            d = d.with_aiff().map_err(HostError::Decoder)?;
+        }
+    }
+    #[cfg(feature = "flac")]
+    if let Some(cap) = profile.flac_capacity() {
+        d = d
+            .with_flac(
+                cap,
+                leak_zeroed::<i64>(cap.workspace_len()),
+                leak_zeroed::<i32>(cap.pcm_len()),
+            )
+            .map_err(HostError::Decoder)?;
+    }
+    Ok(d)
 }
 
 /// 宿主长期资源：整程序生命期复用。
@@ -67,22 +94,22 @@ pub struct HostResources {
 }
 
 impl HostResources {
-    /// 按桌面配置档（[`DESKTOP`]）启动时一次性分配：WAV 工作区、FLAC 桌面容量工作区、
-    /// 1 MiB 输入窗口、pack 暂存区与 3 072 000 字节设备帧队列。
+    /// 按桌面配置档启动时一次性分配：启用 `flac` 特性时为 `DESKTOP`（WAV 工作区、FLAC 桌面
+    /// 容量工作区、整帧输入窗口），否则为 [`DESKTOP_WAV`](profile::DESKTOP_WAV)（只有 WAV / AIFF）；另有 pack 暂存区与
+    /// 3 072 000 字节设备帧队列。
     pub fn new() -> Result<Self, HostError> {
-        Self::with_profile(DESKTOP)
+        #[cfg(feature = "flac")]
+        return Self::with_profile(profile::DESKTOP);
+        #[cfg(not(feature = "flac"))]
+        return Self::with_profile(profile::DESKTOP_WAV);
     }
 
-    /// 按配置档一次性分配。设备复用策略为 [`ReusePolicy::Accepts`]，出错即停止。
+    /// 按配置档一次性分配，只组装配置档启用且本构建已链接的部分（B1）：WAV 与 AIFF 共用的流式
+    /// 工作区、FLAC 容量（`flac` 特性）、浮点转换工作区（`convert_samples` 为 0 时不提供）与
+    /// 队列大小（`caps.queue_bytes`）。设备复用策略为 [`ReusePolicy::Accepts`]，出错即停止。
+    /// 未组装的格式按“不支持”拒绝。
     pub fn with_profile(profile: Profile) -> Result<Self, HostError> {
-        let cap = profile.flac_capacity().ok_or(HostError::Profile)?;
-        let decoder = AutoDecoder::new(
-            leak_zeroed::<i32>(PCM_WORK_SAMPLES),
-            cap,
-            leak_zeroed::<i64>(cap.workspace_len()),
-            leak_zeroed::<i32>(cap.pcm_len()),
-        )
-        .map_err(HostError::Decoder)?;
+        let decoder = decoder_for(&profile)?;
         let window = decoder.required_window();
         let input = leak_zeroed::<u8>(window);
         let core = Core::with_window(input, window, decoder).map_err(HostError::Core)?;
@@ -137,11 +164,17 @@ mod tests {
             Some(PCM_WORK_SAMPLES)
         );
         // F1：桌面配置档用多声道 FLAC 容量（8 声道），窗口为 8 声道不压缩帧上界。
-        assert_eq!(
-            d.flac().map(|f| f.capacity()),
-            Some(qy_codec_flac::Capacity::DESKTOP_MULTICHANNEL)
-        );
-        assert_eq!(d.required_window(), 2_097_146);
+        #[cfg(feature = "flac")]
+        {
+            assert_eq!(
+                d.flac().map(|f| f.capacity()),
+                Some(qy_codec_flac::Capacity::DESKTOP_MULTICHANNEL)
+            );
+            assert_eq!(d.required_window(), 2_097_146);
+        }
+        // B1：WAV-only 构建不分配 FLAC 工作区，窗口为核心最小窗口。
+        #[cfg(not(feature = "flac"))]
+        assert_eq!(d.required_window(), qy_core::INPUT_WINDOW_BYTES);
         assert_eq!(r.profile.budget().queue, 3_072_000);
         let Ok(f) = DeviceFormat::wasapi(192_000, 2, 32, 32) else {
             panic!("fmt");

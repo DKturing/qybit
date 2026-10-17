@@ -12,7 +12,7 @@ publish.workspace = true
 qy-core.workspace = true
 qy-codec-wav.workspace = true
 qy-codec-flac.workspace = true
-qy-codec-auto.workspace = true
+qy-codec-auto = { workspace = true, features = ["wav", "flac", "aiff"] }
 qy-pcm-format = { workspace = true, features = ["ring"] }
 
 [lints]

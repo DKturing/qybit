@@ -361,6 +361,19 @@ impl AutoDecoder {
         })
     }
 
+    /// 当前曲目是可识别的容器，但本构建未链接或宿主未启用其解码器时，给出格式名
+    /// （`"WAV"`、`"AIFF"`、`"FLAC"`），供宿主说明拒绝原因（B1）。
+    pub fn disabled(&self) -> Option<&'static str> {
+        if self.codec != Codec::Disabled {
+            return None;
+        }
+        Some(match &self.magic {
+            b"fLaC" => "FLAC",
+            b"FORM" => "AIFF",
+            _ => "WAV",
+        })
+    }
+
     /// 当前曲目开头跳过的 ID3v2 标签字节数（没有标签时为 0）。
     pub fn skipped_tag_bytes(&self) -> u64 {
         self.tag_bytes

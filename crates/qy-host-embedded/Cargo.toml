@@ -16,7 +16,7 @@ embedded-storage.workspace = true
 
 [dev-dependencies]
 embedded-storage.workspace = true
-qy-codec-auto.workspace = true
+qy-codec-auto = { workspace = true, features = ["wav", "flac", "aiff"] }
 qy-codec-flac.workspace = true
 qy-fat-image = { path = "../../tools/qy-fat-image" }
 
