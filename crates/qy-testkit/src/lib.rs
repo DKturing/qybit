@@ -16,7 +16,8 @@
 //! - **定位**（[`check_seek`]）：支持时只输出目标帧及之后的样本，与完整解码的对应部分相同；
 //!   目标等于或超过长度时返回 `PastEnd`；不支持时返回 `Unsupported`，核心改为顺序解码。
 //!
-//! 停止后迟到的 I/O 回报由核心按代次拒绝，解码器不需要处理（见 `qy-core` 的测试）。
+//! 停止后迟到的 I/O 回报由核心按代次拒绝，解码器不需要处理（见 `qy-core` 的测试与
+//! `examples/qy-ext-demo/tests/late_events.rs`）。
 
 use qy_core::{DecodeError, Decoder, Progress, SeekError, SourceFormat, Status};
 

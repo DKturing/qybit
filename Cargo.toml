@@ -20,6 +20,7 @@ members = [
     "tools/qy-gen-fixtures",
     "tools/qy-fat-image",
     "tools/qy-bench",
+    "examples/qy-ext-demo",
 ]
 
 [workspace.package]
@@ -44,6 +45,7 @@ qy-player = { path = "crates/qy-player" }
 qy-ui = { path = "crates/qy-ui" }
 qy-host-wasapi = { path = "crates/qy-host-wasapi" }
 qy-host-alsa = { path = "crates/qy-host-alsa" }
+qy-host-embedded = { path = "crates/qy-host-embedded" }
 # 成熟 SPSC 环形队列：存放已 pack 的完整设备帧字节（AGENTS §2，不自行编写无锁缓冲）。
 rtrb = { version = "=0.4.0", default-features = false }
 # 成熟静态 SPSC BipBuffer（no_std 无 alloc）：MCU 宿主的设备帧队列（M3 T1）。关闭默认特性：

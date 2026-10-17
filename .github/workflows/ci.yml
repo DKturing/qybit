@@ -24,13 +24,13 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked -p qy-core -p qy-codec-wav -p qy-codec-flac -p qy-codec-aiff -p qy-codec-auto -p qy-pcm-format -p qy-host-sim -p qy-player -p qy-ui -p qy-host-alsa -p qy-host-embedded -p qy-gen-fixtures -p qy-fat-image -p qy-bench --all-targets -- -D warnings
+      - run: cargo clippy --locked -p qy-core -p qy-codec-wav -p qy-codec-flac -p qy-codec-aiff -p qy-codec-auto -p qy-pcm-format -p qy-host-sim -p qy-player -p qy-ui -p qy-host-alsa -p qy-host-embedded -p qy-gen-fixtures -p qy-fat-image -p qy-bench -p qy-testkit -p qy-ext-demo --all-targets -- -D warnings
       - run: cargo clippy --locked -p qy-player --features test-support --all-targets -- -D warnings
       # B1 §4 组合 1：WAV-only（不链接 FLAC）。单独选包，特性不与其他成员合并。
       - run: cargo clippy --locked -p qy-player --no-default-features --features test-support --all-targets -- -D warnings
       - run: cargo test --locked -p qy-player --no-default-features --features test-support
       - run: cargo clippy --locked -p qy-codec-flac --features static-cell,test-metrics --all-targets -- -D warnings
-      - run: cargo test --locked -p qy-core -p qy-codec-wav -p qy-codec-aiff -p qy-codec-auto -p qy-host-sim -p qy-player -p qy-ui -p qy-host-alsa -p qy-host-embedded -p qy-fat-image
+      - run: cargo test --locked -p qy-core -p qy-codec-wav -p qy-codec-aiff -p qy-codec-auto -p qy-host-sim -p qy-player -p qy-ui -p qy-host-alsa -p qy-host-embedded -p qy-fat-image -p qy-testkit -p qy-ext-demo
       - run: cargo test --locked -p qy-codec-flac
       # R1 §3：基于模型的随机命令与故障测试，500 个种子（release 构建，约数秒）。
       - run: cargo test --locked --release -p qy-host-embedded --test model_random

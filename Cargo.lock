@@ -328,6 +328,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "qy-ext-demo"
+version = "0.0.0"
+dependencies = [
+ "qy-codec-auto",
+ "qy-codec-flac",
+ "qy-core",
+ "qy-host-embedded",
+ "qy-pcm-format",
+ "qy-player",
+ "qy-testkit",
+]
+
+[[package]]
 name = "qy-fat-image"
 version = "0.0.0"
 dependencies = [

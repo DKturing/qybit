@@ -1,0 +1,25 @@
+[package]
+name = "qy-ext-demo"
+description = "QyBit 外部扩展示例（X1）：仓库外视角，只用公开接口接入一个新格式（示例专用的 QYT1）、内存音源与无硬件输出；不发布"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+qy-core.workspace = true
+qy-codec-auto = { workspace = true, features = ["wav", "flac", "aiff"] }
+qy-codec-flac.workspace = true
+qy-player.workspace = true
+# 帧队列消费端类型（后端在渲染线程中使用）。
+qy-pcm-format = { workspace = true, features = ["ring", "static-queue"] }
+# 嵌入式组装（`embedded` 模块）：存储、输出与喂数器的接口。
+qy-host-embedded.workspace = true
+
+[dev-dependencies]
+qy-testkit.workspace = true
+
+[lints]
+workspace = true
