@@ -137,7 +137,7 @@ cargo build --release -p qybit --target aarch64-unknown-linux-musl
 | musl x86_64（原生运行） | `qy-core`、三个解码器、`qy-codec-auto`、`qy-pcm-format`、`qy-player`、`qy-host-alsa`、`qybit` 共 225 项 | 通过 |
 | `qemu-user`（aarch64、armv7、loongarch64、riscv64） | 同一组测试（release + 溢出检查与 debug 断言） | 每个架构 225 项通过；`qybit --version` 运行 |
 | QEMU 虚拟机 x86_64（Ubuntu 6.8.0-147，snd-aloop） | §8.1 | 通过 |
-| QEMU 虚拟机 aarch64（同版本 arm64 内核，aarch64 原生与 armv7 经 32 位兼容层） | §8.1 | 见下方说明 |
+| QEMU 虚拟机 aarch64（同版本 arm64 内核，aarch64 原生与 armv7 经 32 位兼容层） | §8.1 | 通过（回录缓冲加大后） |
 | 用户机器真实声卡 | `list-devices`、矩阵、顺序播放 | **未运行**（§9） |
 | loongarch64、riscv64 真实内核；32 位 ARM 原生内核；任何实机 | — | **未运行** |
 
@@ -167,7 +167,11 @@ x86_64（开发机上软件仿真）结果：
   - 4 轮各有 1 项因播放端欠载失败，每次都如实报告（如“欠载 1 次 / 747 帧”），没有当作逐字节一致。原因是软件仿真 CPU 下设备缓冲只有 40 ms；这几次也走通了真实内核上的 xrun → `PREPARE` 恢复路径。有 KVM 时预计不会出现，CI 的结果见作业记录。
   - 另有 1 轮是附加检查“三种格式依次重新打开”失败，当时没有保留细节，原因未确认。
 
-aarch64 结果：（运行中，完成后补记）
+aarch64（同版本 arm64 内核，qemu virt，软件仿真）结果：
+
+- aarch64 程序与 armv7 程序（经 64 位内核的 32 位兼容层）都通过：设备列表、内核直连单元测试、设备矩阵 48 项、顺序换曲、WAV/FLAC 播放（SCHED_FIFO 注册成功），B 层 88 项逐字节一致、40 项拒绝、两项附加检查通过。
+- 首次运行时 aarch64 的 B 层有 1 项因**回录端**溢出失败（192 kHz，当时回录缓冲为 8 个周期 = 80 ms）。回录只用于核对，缓冲加大到 32 个周期后复测全部通过。
+- armv7 经兼容层运行，内核走的是 32 位兼容处理函数；这与 32 位 ARM 原生内核不是同一条代码，原生内核**未运行**。
 
 虚拟回环经过真实内核 ALSA 路径，但不经过任何真实驱动与 DAC，不证明设备端 bit-perfect。
 
