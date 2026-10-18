@@ -2,7 +2,7 @@
 
 任务卡：[tasks/X1.md](../tasks/X1.md)。本文写给要给 QyBit 增加新格式、新音源、新输出或新存储的人（包括用 AI 辅助编写扩展的情况）：每个扩展点要实现什么、必须遵守哪些约定、怎样接入，以及怎样用契约测试证明扩展写对了。
 
-扩展只在**编译期**接入：扩展是一个普通的 Rust crate，实现下面的 trait，在组装层（应用的 `main` 或板级代码）与已有组件组合，静态分发。不需要、也不允许为扩展改核心状态机。运行时动态插件（加载 `.dll` / `.so`、ABI 稳定、版本协商）不在当前范围，以后在桌面宿主外层另行设计，MCU 核心不承担它的成本（X1 §6）。按 2026-10-17 的决定，暂不做任何音频格式插件，也不接入 FFmpeg 等外部解码器；以后的格式插件同样用纯 Rust 自行编写，按本文的接口接入（AGENTS §1）。
+扩展只在**编译期**接入：扩展是一个普通的 Rust crate，实现下面的 trait，在组装层（应用的 `main` 或板级代码）与已有组件组合，静态分发。不需要、也不允许为扩展改核心状态机。运行时动态插件（加载 `.dll` / `.so`、ABI 稳定、版本协商）不在当前范围，以后在桌面宿主外层另行设计，MCU 核心不承担它的成本（X1 §6）。不接入 FFmpeg 等外部解码器。按 2026-10-18 的决定，基础格式之外的格式（Lite：ALAC、AAC-LC、MP3；Full：再加 HE-AAC、WavPack、APE、Vorbis、Opus、DSD）由用户另建的插件仓库用纯 Rust 实现，按本文的接口接入，不合并进本仓库；本仓库为它们提供的公共接口见 [tasks/FORMATS.md](../tasks/FORMATS.md)“公共接口”（AGENTS §1）。
 
 完整的可运行示例：[`examples/qy-ext-demo`](../examples/qy-ext-demo)。
 
@@ -11,8 +11,8 @@
 | 层 | 包含 | 规则 |
 | --- | --- | --- |
 | **核心** | `qy-core`（sans-IO 核心与 `engine` 播放调度） | 不含任何格式：没有解码代码，也不按格式分支；依赖只有 `qy-pcm-format`（PCM 表示、pack 与帧队列接口，不涉及文件格式）。能力不足与播放计划只按资源描述，格式的叫法由解码器给出（B1）。 |
-| **官方解码器** | `qy-codec-wav`、`qy-codec-flac`、`qy-codec-aiff`，以后 FORMATS 路线上的格式（ALAC、WavPack、APE 等）各一个 `qy-codec-*` crate | 由项目维护，按规范自行实现，`no_std`、无 `alloc`；每个格式各自可选（`qy-codec-auto` 的 `wav` / `flac` / `aiff` 特性，`qy-player` 的 `flac` 特性）；在仓库内接受完整验证（独立参考逐样本核对、`qy-testkit` 契约测试、fuzz、`no_std` 目标编译，适用处 Kani 与 cargo-mutants）。默认发行版包含：桌面 CLI 与 GUI 默认链接 WAV、FLAC、AIFF；MCU 配置档按资源选择（Embedded Lite 不链接 FLAC）。 |
-| **第三方扩展** | 仓库外的格式插件（包括以后自己写的纯 Rust 插件）、音源、输出后端、存储与外设适配 | 按本文的契约编写，在组装层（应用的 `main` 或板级代码）接入，不修改核心；用 `qy-testkit` 证明遵守接口约定。规范之外的格式变体（如 AIFF-C 的 `sowt` / `twos`、AIFF-C 浮点）与以后的有损格式属于这一层。 |
+| **官方解码器** | `qy-codec-wav`、`qy-codec-flac`、`qy-codec-aiff`：基础格式（未压缩 PCM 与 FLAC，含 RF64/BW64 与 AIFF-C `twos`/`sowt`/`fl32`/`fl64`，见 [tasks/FORMATS.md](../tasks/FORMATS.md)） | 由项目维护，按规范自行实现，`no_std`、无 `alloc`；每个格式各自可选（`qy-codec-auto` 的 `wav` / `flac` / `aiff` 特性，`qy-player` 的 `flac` 特性）；在仓库内接受完整验证（独立参考逐样本核对、`qy-testkit` 契约测试、fuzz、`no_std` 目标编译，适用处 Kani 与 cargo-mutants）。默认发行版包含：桌面 CLI 与 GUI 默认链接 WAV、FLAC、AIFF；MCU 配置档按资源选择（Embedded Lite 不链接 FLAC）。 |
+| **第三方扩展** | 仓库外的格式插件（包括以后自己写的纯 Rust 插件）、音源、输出后端、存储与外设适配 | 按本文的契约编写，在组装层（应用的 `main` 或板级代码）接入，不修改核心；用 `qy-testkit` 证明遵守接口约定。Lite / Full 插件仓库（ALAC、AAC、MP3、WavPack、APE、Vorbis、Opus、DSD 等，2026-10-18 决定）属于这一层。 |
 
 宿主（`qy-player`、`qy-host-*`）与应用（`qybit`、`qybit-gui`、板级程序）不属于这三层：它们是组装层，把核心、官方解码器与扩展组合起来，只执行 I/O 与设备操作。
 
