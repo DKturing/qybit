@@ -100,6 +100,8 @@ pub struct Playing {
     pub session: u64,
     /// 会话的曲目（条目编号，按播放顺序）。
     pub entries: Vec<u64>,
+    /// 会话从第几首开始（还没有状态快照时，正在打开的就是这一首）。
+    pub first: u32,
     /// 会话开始前收到的命令（会话开始后按顺序发出）。
     pending: Vec<Command>,
     commands: Option<CommandSender>,
@@ -266,7 +268,7 @@ impl Model {
     /// 正在播放的条目编号（尚无状态时为会话的第一首）。
     pub fn playing_entry(&self) -> Option<u64> {
         let p = self.playing.as_ref()?;
-        let k = p.status.map_or(0, |s| s.track) as usize;
+        let k = p.status.map_or(p.first, |s| s.track) as usize;
         p.entries.get(k).copied()
     }
 
@@ -584,6 +586,7 @@ impl Ui {
         }
         self.model.playing = Some(Playing {
             session,
+            first: u32::try_from(index).unwrap_or(u32::MAX),
             entries,
             pending: Vec::new(),
             commands: None,
@@ -599,6 +602,41 @@ impl Ui {
             session: true,
             ..Default::default()
         }
+    }
+
+    /// 选择输出设备（`None` 为默认设备）。正在播放时立即换到新设备：停止当前会话，在新设备上从
+    /// 同一曲目、同一位置继续，暂停状态保持；没有播放时只记为之后的会话所用的设备。正在进行的会话
+    /// 不能中途换设备（设备在会话开始时打开），不重新开始的话新设备要到下一次播放才生效，而切歌、
+    /// 定位都还在旧设备上，看起来像换了设备却仍从旧设备输出。
+    pub fn set_device(&mut self, device: Option<String>) -> Changes {
+        if device == self.model.device {
+            return Changes::default();
+        }
+        self.model.device = device;
+        let active = self.model.playing.as_ref().is_some_and(|p| !p.stopping);
+        let Some(index) = self
+            .model
+            .playing_entry()
+            .filter(|_| active)
+            .and_then(|id| self.model.index_of(id))
+        else {
+            return Changes::default();
+        };
+        let position = self.model.playing_position().map(|(pos, _, _)| pos);
+        let paused = self.model.is_paused();
+        self.stop_session();
+        let mut c = self.play_from(index);
+        if let Some(frame) = position.filter(|&f| f > 0) {
+            self.seek(frame);
+        }
+        if paused {
+            self.pause();
+        }
+        let name = self.model.device.as_deref().unwrap_or("默认输出设备");
+        c.merge(self.note(&format!(
+            "输出设备已更换为 {name}：停止原设备上的播放，在新设备上从当前位置继续"
+        )));
+        c
     }
 
     /// 播放/暂停：未播放时从 `selected`（或第一首）开始；播放中切换暂停与继续。

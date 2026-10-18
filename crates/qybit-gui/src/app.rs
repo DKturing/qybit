@@ -421,8 +421,8 @@ impl App {
             Input::Activate(i) => self.ui.play_from(i),
             Input::Delete(rows) => self.ui.remove(&rows),
             Input::Device(i) => {
-                self.ui.model.device = self.devices.get(i).and_then(|d| d.0.clone());
-                Changes::default()
+                let device = self.devices.get(i).and_then(|d| d.0.clone());
+                self.ui.set_device(device)
             }
             Input::Mono(on) => self.ui.set_mono_to_stereo(on),
             Input::Float(on) => self.ui.set_float_to_int(on),

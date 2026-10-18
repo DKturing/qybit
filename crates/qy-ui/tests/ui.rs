@@ -258,6 +258,72 @@ fn stop_then_new_session_ignores_stale_events() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 播放中更换输出设备：停止原设备上的会话，在新设备上从同一曲目、不早于换设备时的位置继续，
+/// 暂停状态保持；没有播放时只记下设备，不开始播放。
+#[test]
+fn changing_device_while_playing_restarts_on_new_device() {
+    let dir = temp("device");
+    let files = tracks(&dir, 2, 88_200);
+    let opened: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+    let log = opened.clone();
+    let b = clock_backend();
+    let mut ui = Ui::new(
+        move |device: Option<&str>| {
+            if let Ok(mut v) = log.lock() {
+                v.push(device.map(str::to_string));
+            }
+            Ok(b.clone())
+        },
+        Arc::new(|| {}),
+    );
+    ui.add_paths(files);
+    assert!(until(&mut ui, 10, all_probed));
+    // 没有播放：只记下设备。
+    let _ = ui.set_device(Some("A".into()));
+    assert_eq!(ui.model.device.as_deref(), Some("A"));
+    assert!(ui.model.playing.is_none());
+    ui.play_from(1);
+    assert!(until(&mut ui, 10, |u| u
+        .model
+        .playing
+        .as_ref()
+        .and_then(|p| p.status)
+        .is_some_and(|s| s.position_frames >= 2 * TENTH)));
+    ui.pause();
+    assert!(until(&mut ui, 10, |u| u.model.is_paused()));
+    let before = ui.model.playing_position().map_or(0, |p| p.0);
+    let old = ui.model.playing.as_ref().map(|p| p.session);
+    let _ = ui.set_device(Some("B".into()));
+    let new = ui.model.playing.as_ref().map(|p| p.session);
+    assert_ne!(old, new, "应开始新会话");
+    assert!(until(&mut ui, 10, |u| u
+        .model
+        .playing
+        .as_ref()
+        .and_then(|p| p.status)
+        .is_some_and(|s| s.paused && s.user_seeks >= 1)));
+    let s = ui.model.playing.as_ref().and_then(|p| p.status);
+    assert_eq!(
+        s.map(|s| s.track),
+        Some(1),
+        "新会话从同一曲目（列表第 2 首）开始"
+    );
+    assert_eq!(ui.model.playing_entry(), Some(ui.model.entries[1].id));
+    let after = ui.model.playing_position().map_or(0, |p| p.0);
+    assert!(after >= before && before >= 2 * TENTH, "{before} → {after}");
+    assert!(
+        ui.model
+            .log
+            .iter()
+            .any(|l| l.contains("输出设备已更换为 B"))
+    );
+    let devices = opened.lock().map(|v| v.clone()).unwrap_or_default();
+    assert_eq!(devices, [Some("A".to_string()), Some("B".to_string())]);
+    ui.stop();
+    assert!(until(&mut ui, 10, |u| u.model.playing.is_none()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 输出设备失效与设备不可用：结束报告给出原因，界面回到非播放状态。
 #[test]
 fn device_failures_are_reported() {

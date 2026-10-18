@@ -56,6 +56,12 @@ struct Front {
     /// 最近一次读到的设备（标识）。
     device_ids: Vec<String>,
     sim: bool,
+    /// 日志与状态同时写到标准错误：模拟设备模式（CI 核对）或环境变量 `QYBIT_GUI_TRACE=1`（诊断）。
+    trace: bool,
+    /// 已写到标准错误的日志行（只写新增的行）。
+    traced: Vec<String>,
+    /// 已写到标准错误的状态栏（相同内容不重复写）。
+    traced_status: String,
     visible: bool,
     quit: bool,
     /// 已收到、尚未重送的 Expose 区域。
@@ -89,6 +95,13 @@ pub fn run() -> ExitCode {
         None => (1000, 700),
     };
     let mut canvas = Canvas::new(w, h, x.scale);
+    if !canvas.has_fonts() {
+        eprintln!(
+            "错误：系统中没有任何字体，无法显示界面文字。请安装字体（如 Debian / Ubuntu 的 fonts-noto-cjk \
+             或 fonts-dejavu-core），或把字体文件放到 ~/.local/share/fonts/ 下，然后重新启动 qybit-gui"
+        );
+        return ExitCode::FAILURE;
+    }
     if !canvas.has_cjk_font() {
         notes.push(
             "系统中没有找到中文字体，界面中的中文可能显示为方块：请安装中文字体（如 Debian / Ubuntu 的 \
@@ -152,6 +165,9 @@ pub fn run() -> ExitCode {
         volume,
         device_ids,
         sim: sim.is_some(),
+        trace: sim.is_some() || std::env::var("QYBIT_GUI_TRACE").is_ok_and(|v| v == "1"),
+        traced: Vec::new(),
+        traced_status: String::new(),
         visible: true,
         quit: false,
         exposed: Vec::new(),
@@ -186,6 +202,7 @@ pub fn run() -> ExitCode {
     // 再按一次按默认方式结束进程。
     let interrupted = qy_host_alsa::linux::interrupt::install().ok();
     let mut next_poll = Instant::now() + DEVICE_POLL;
+    let mut traffic = (Instant::now(), 0u64);
     while !f.quit {
         let wait = next_poll
             .saturating_duration_since(Instant::now())
@@ -211,6 +228,15 @@ pub fn run() -> ExitCode {
             }
         }
         f.repaint();
+        // 诊断：每 10 秒写一次界面更新的数据量（经 SSH 的 X11 转发时界面响应受它影响）。
+        if f.trace && traffic.0.elapsed() >= Duration::from_secs(10) {
+            let kib = (f.x.sent_bytes - traffic.1) / 1024;
+            eprintln!(
+                "界面更新：{:.0} KiB/s",
+                kib as f64 / traffic.0.elapsed().as_secs_f64()
+            );
+            traffic = (Instant::now(), f.x.sent_bytes);
+        }
     }
     f.save_settings();
     // 释放界面模型：停止播放并等待后台线程结束；播放线程释放后端时恢复设备硬件音量。
@@ -420,18 +446,21 @@ impl Front {
                 fidelity,
                 format,
             } => {
-                // 模拟设备模式（只供界面核对）：状态栏的变化同时写到标准错误，CI 据此核对。
-                if self.sim {
-                    eprintln!("状态栏：{status} | {fidelity}");
+                // 模拟设备模式（CI 据此核对）或 QYBIT_GUI_TRACE=1（诊断）：状态栏的变化同时写到
+                // 标准错误。
+                if self.trace {
+                    let line = format!("状态栏：{status} | {fidelity}");
+                    if line != self.traced_status {
+                        eprintln!("{line}");
+                        self.traced_status = line;
+                    }
                 }
                 self.view.set_status(status, fidelity, format);
                 self.show_volume();
             }
             Op::Log(t) => {
-                if self.sim
-                    && let Some(last) = t.rsplit("\r\n").next()
-                {
-                    eprintln!("日志：{last}");
+                if self.trace {
+                    self.trace_log(&t);
                 }
                 self.view.set_log(t);
             }
@@ -443,7 +472,7 @@ impl Front {
             Op::About => self.view.about(about_text()),
             Op::Close => self.quit = true,
             Op::Rate { lamp, text } => {
-                if self.sim {
+                if self.trace {
                     eprintln!("指示灯：{text}");
                 }
                 self.view.set_rate(lamp, text);
@@ -501,6 +530,24 @@ impl Front {
                 self.dispatch(Input::Note(note));
             }
         }
+    }
+
+    /// 把新增的日志行写到标准错误（日志最多保留若干行，开头的行会被移除；清除日志后从头写）。
+    fn trace_log(&mut self, text: &str) {
+        let lines: Vec<String> = text
+            .split("\r\n")
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        let old = &self.traced;
+        // 找出旧内容的末尾在新内容中的位置：新内容 = 旧内容（可能去掉了开头若干行）+ 新增行。
+        let start = (0..=old.len())
+            .find(|&k| lines.len() >= old.len() - k && lines[..old.len() - k] == old[k..])
+            .map_or(0, |k| old.len() - k);
+        for l in &lines[start..] {
+            eprintln!("日志：{l}");
+        }
+        self.traced = lines;
     }
 
     /// 音量标签与滑块。

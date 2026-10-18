@@ -154,7 +154,7 @@ impl Volume {
     /// 播放线程：会话开始（创建后端）时调用。
     fn begin(&self, device: &str) {
         let mut g = self.lock();
-        let mut notes = Vec::new();
+        let mut notes = vec![format!("输出设备：{device}")];
         let guard = if g.enabled {
             match PlaybackVolume::apply(device, g.percent, None) {
                 Ok((v, line)) => {

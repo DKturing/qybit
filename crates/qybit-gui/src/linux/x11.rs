@@ -130,6 +130,8 @@ pub struct X {
     drag_source: u32,
     /// 已抓取的媒体键键码。
     grabbed: Vec<u8>,
+    /// 累计提交的像素字节数（诊断：经 SSH 转发时界面更新的数据量）。
+    pub sent_bytes: u64,
     pub scale: f32,
 }
 
@@ -332,6 +334,7 @@ impl X {
             clipboard: String::new(),
             drag_source: 0,
             grabbed: Vec::new(),
+            sent_bytes: 0,
             scale,
         })
     }
@@ -358,7 +361,7 @@ impl X {
     }
 
     /// 把画布的一块送到窗口（ZPixmap，24 位深度、32 位每像素）。
-    pub fn put(&self, canvas: &Canvas, r: Rect) -> Res<()> {
+    pub fn put(&mut self, canvas: &Canvas, r: Rect) -> Res<()> {
         let r = r.intersect(&canvas.bounds());
         if r.is_empty() {
             return Ok(());
@@ -397,6 +400,7 @@ impl X {
                 24,
                 &data,
             )?;
+            self.sent_bytes += data.len() as u64;
             y += n;
         }
         Ok(())

@@ -108,6 +108,11 @@ impl Canvas {
         }
     }
 
+    /// 系统中是否有任何字体（一个都没有时无法排版文字，cosmic-text 会 panic）。
+    pub fn has_fonts(&self) -> bool {
+        self.fonts.db().faces().next().is_some()
+    }
+
     /// 系统字体中是否有能显示常用汉字的字体（没有时界面中文显示为方块，前端在日志中说明）。
     pub fn has_cjk_font(&mut self) -> bool {
         let db = self.fonts.db();

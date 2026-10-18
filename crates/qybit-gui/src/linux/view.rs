@@ -78,6 +78,9 @@ enum Area {
     Log = 64,
     Status = 128,
     Splitter = 256,
+    /// 只有进度条滑块移动（播放进度）：整行重画到画布，只提交滑块经过的一段（`seek_span`），
+    /// 经 SSH 的 X11 转发时大幅减少数据量。不在 `ALL` 中：整行重绘时不需要它。
+    SeekThumb = 512,
 }
 const ALL: u16 = 0x1ff;
 
@@ -290,6 +293,8 @@ pub struct View {
     modal: Modal,
     /// 文件对话框上次所在的目录。
     last_dir: Option<std::path::PathBuf>,
+    /// 播放进度移动时需要提交的一段（见 `Area::SeekThumb`）。
+    seek_span: Option<Rect>,
 }
 
 impl View {
@@ -356,6 +361,7 @@ impl View {
             popup: Popup::None,
             modal: Modal::None,
             last_dir: None,
+            seek_span: None,
         }
     }
 
@@ -421,11 +427,30 @@ impl View {
         } else {
             pos.unwrap_or(0)
         };
-        if enabled != self.seek.enabled || value != self.seek.value {
+        if enabled != self.seek.enabled {
             self.seek.enabled = enabled;
             self.seek.value = value;
             self.mark(Area::Seek);
+        } else if value != self.seek.value {
+            let before = self.thumb_rect(&self.seek);
+            self.seek.value = value;
+            let after = self.thumb_rect(&self.seek);
+            let span = before.union(&after);
+            self.seek_span = Some(self.seek_span.map_or(span, |s| s.union(&span)));
+            self.mark(Area::SeekThumb);
         }
+    }
+
+    /// 滑块所在的一段（含进度填充的两端与滑块本身）。
+    fn thumb_rect(&self, sl: &Slider) -> Rect {
+        let (a, b) = sl.track(self.s);
+        let x = a + if sl.max == 0 {
+            0
+        } else {
+            ((i64::from(b - a) * i64::from(sl.value.min(sl.max))) / i64::from(sl.max)) as i32
+        };
+        let half = self.px(8);
+        Rect::new(x - half, sl.rect.y, 2 * half, sl.rect.h)
     }
 
     pub fn set_volume(&mut self, text: String, pos: Option<u32>) {
@@ -685,7 +710,11 @@ impl View {
     ) -> Vec<Rect> {
         self.layout(c);
         let mut out = Vec::new();
-        let d = std::mem::take(&mut self.dirty);
+        let mut d = std::mem::take(&mut self.dirty);
+        let thumb_span = self.seek_span.take();
+        if d & Area::Seek as u16 != 0 {
+            d &= !(Area::SeekThumb as u16);
+        }
         let parts: [(Area, Rect); 9] = [
             (Area::Menu, self.menu_rect),
             (
@@ -724,6 +753,20 @@ impl View {
             (Area::Log, self.log_rect),
             (Area::Status, self.status_rect),
         ];
+        if d & Area::SeekThumb as u16 != 0
+            && let Some(span) = thumb_span
+        {
+            let row = Rect::new(
+                0,
+                self.seek.rect.y,
+                self.w,
+                self.list_rect.y - self.seek.rect.y,
+            );
+            c.fill(row, BG);
+            let sl = self.seek;
+            self.paint_slider(c, &sl);
+            out.push(span.intersect(&row));
+        }
         for (a, r) in parts {
             if d & a as u16 == 0 || r.is_empty() {
                 continue;
@@ -742,6 +785,7 @@ impl View {
                 Area::Splitter => c.fill(r, BG),
                 Area::Log => self.paint_log(c),
                 Area::Status => self.paint_status(c),
+                Area::SeekThumb => {}
             }
             out.push(r);
         }
