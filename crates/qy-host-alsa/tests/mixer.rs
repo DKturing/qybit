@@ -58,12 +58,21 @@ fn dummy_mixer_list_and_playback_volume() {
     );
 
     // 缺省按标准名称选 Master；40% → 原始值 41（−17.70 dB）；恢复后与播放前完全相同。
-    let g = apply(&dev, 40, None);
+    let mut g = apply(&dev, 40, None);
     let during = list(&dev);
     assert!(
         during.contains("Master：音量 41（范围 -50..100），40%，-17.70 dB"),
         "{during}"
     );
+    // 播放中改为 60%（界面拖动音量滑块）：原始值 65（−10.50 dB，与命令行 --volume 60% 相同），
+    // 恢复的仍是播放前的值。
+    match g.set_percent(60) {
+        Ok(l) => assert!(
+            l.contains("音量 65（范围 -50..100），60%，-10.50 dB"),
+            "{l}"
+        ),
+        Err(e) => panic!("{e}"),
+    }
     match g.restore() {
         Ok(l) => println!("{l}"),
         Err(e) => panic!("{e}"),

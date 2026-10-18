@@ -1,5 +1,5 @@
 //! Win32 边界：窗口、控件、消息循环、文件对话框与拖放。本前端的全部 `unsafe` 集中在此，
-//! 每处注明前提。界面逻辑在 [`super::app`]（安全代码）：窗口过程把消息转成 [`Input`]，在
+//! 每处注明前提。界面逻辑在 [`crate::app`]（安全代码）：窗口过程把消息转成 [`Input`]，在
 //! 不持有状态借用的情况下执行 [`App`] 返回的 [`Op`]，因此控件同步回发的消息不会重入状态。
 #![allow(unsafe_code)]
 
@@ -73,14 +73,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
-use super::app::{
+use super::volume::VolumeView;
+use crate::app::{
     App, COLUMNS, ID_ABOUT, ID_ADD_FILES, ID_ADD_FOLDER, ID_CLEAR, ID_CLEAR_LOG, ID_EXIT, ID_LAST,
     ID_MEDIA_KEYS, ID_MOVE_DOWN, ID_MOVE_UP, ID_NEXT, ID_PLAY, ID_PREV, ID_REMEMBER, ID_REMOVE,
     ID_SORT_ADDED, ID_SORT_FORMAT, ID_SORT_LENGTH, ID_SORT_NAME, ID_STOP, ID_TOGGLE_LOG,
     IDC_DEVICE, IDC_FLOAT, IDC_FORMAT, IDC_LIST, IDC_LOG, IDC_MONO, IDC_SEEK, IDC_STATUS,
-    IDC_VOLUME, IDC_VOLUME_LABEL, Input, Media, Op, VolumeView, about_text, column_key,
+    IDC_VOLUME, IDC_VOLUME_LABEL, Input, Media, Op, about_text, column_key,
 };
-use super::sim::Sim;
+use crate::app::{DefaultDevice, Device};
+use crate::sim::Sim;
 use qy_host_wasapi::endpoints::EndpointInfo;
 use qy_host_wasapi::volume::EndpointVolume;
 use qy_host_wasapi::watch::EndpointWatcher;
@@ -199,7 +201,7 @@ thread_local! {
     /// 可见性定时器已启动。
     static VIS_TIMER: Cell<bool> = const { Cell::new(false) };
     /// 模拟设备模式下的端点（不枚举真实设备）。
-    static SIM_ENDPOINT: RefCell<Option<EndpointInfo>> = const { RefCell::new(None) };
+    static SIM_ENDPOINT: RefCell<Option<Device>> = const { RefCell::new(None) };
 }
 
 /// 端点变化通知已投递未处理（合并连续通知）。
@@ -368,18 +370,23 @@ fn notify() {
 
 /// 输出设备：系统默认端点与全部活动端点。端点枚举使用多线程套间，放在单独的线程中完成；模拟
 /// 设备模式下只有模拟端点。
-fn enumerate() -> (Option<EndpointInfo>, Vec<EndpointInfo>) {
+fn enumerate() -> (Option<Device>, Vec<Device>) {
     if let Some(e) = SIM_ENDPOINT.with_borrow(Clone::clone) {
         return (Some(e), Vec::new());
     }
-    std::thread::spawn(|| {
+    let device = |e: EndpointInfo| Device {
+        id: e.id,
+        name: e.name,
+    };
+    let (default, list) = std::thread::spawn(|| {
         (
             qy_host_wasapi::endpoints::default_render_endpoint().ok(),
             qy_host_wasapi::endpoints::list_render_endpoints().unwrap_or_default(),
         )
     })
     .join()
-    .unwrap_or_default()
+    .unwrap_or_default();
+    (default.map(device), list.into_iter().map(device).collect())
 }
 
 /// 端点变化后重新枚举并更新下拉框与音量显示（GUI T6）。
@@ -481,7 +488,7 @@ pub fn run() -> ExitCode {
                 Some(s) => (s.ui(Arc::new(notify)), s.files()),
                 None => (wasapi_ui(), Vec::new()),
             };
-            let mut app = App::new(ui, default, endpoints);
+            let mut app = App::new(ui, DefaultDevice::System, default, endpoints);
             if let Some(p) = &saved {
                 app.restore(&p.settings, p.ignored);
             }

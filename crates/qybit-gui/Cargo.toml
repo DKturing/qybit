@@ -1,6 +1,6 @@
 [package]
 name = "qybit-gui"
-description = "QyBit 图形界面（GUI T2/T3）：Windows 原生控件前端，播放走与 CLI 相同的核心、自有解码与 WASAPI 独占输出"
+description = "QyBit 图形界面：Windows 原生控件前端（WASAPI 独占）与 Linux 自绘前端（X11，ALSA hw）；播放走与 CLI 相同的核心与自有解码"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -37,6 +37,17 @@ windows = { workspace = true, features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+qy-core.workspace = true
+qy-player.workspace = true
+qy-host-alsa.workspace = true
+x11rb.workspace = true
+tiny-skia.workspace = true
+cosmic-text.workspace = true
+
+[dev-dependencies]
+qy-player = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

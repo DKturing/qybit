@@ -65,6 +65,14 @@ alsa = { version = "=0.12.1", default-features = false, features = ["std"] }
 libc = { version = "=0.2.190", default-features = false }
 # Windows SDK 绑定（WASAPI / COM），仅 Windows 目标使用。
 windows = { version = "=0.62.2", default-features = false }
+# Linux 图形界面（qybit-gui，docs/gui-linux-prototype.md）：X11 协议的纯 Rust 实现（不链接 libX11 /
+# libxcb，不启用 allow-unsafe-code，程序可 musl 完全静态链接）。
+x11rb = { version = "=0.13.2", default-features = false }
+# Linux 图形界面的软件绘制：抗锯齿的形状（圆角、三角形图标）。
+tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "simd"] }
+# Linux 图形界面的文字：排版、字体回退与字形光栅化（fontdb 直接读系统字体目录与 fontconfig 配置
+# 文件，不链接 libfontconfig；swash 光栅化）。
+cosmic-text = { version = "=0.15.0" }
 # `windows` 的核心 crate：COM 接口实现宏 `#[implement]` 的生成代码按此名引用（与 `windows` 的依赖同版本）。
 windows-core = { version = "=0.62.2", default-features = false, features = ["std"] }
 

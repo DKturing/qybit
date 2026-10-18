@@ -99,6 +99,7 @@ qybit --device hw:CARD=Generic_1,DEV=0 --volume-control Headphone a.flac
 | `linux/sys.rs`、`linux/ctl.rs` | `ELEM_LIST` 的系统调用边界；元素列表、信息、读写与 TLV |
 | `linux/mixer.rs` | 列表、`PlaybackVolume`（设置并保存原值，`restore` 或析构时恢复并读回核对）、播放前提示 |
 | `qybit` | `qybit mixer --device`（只读）；播放的 `--volume` / `--volume-control`，默认 40% |
+| `qybit-gui`（Linux） | 音量滑块为播放期间的百分比（默认 40%），播放中拖动即写入，结束时恢复；“播放”菜单可关闭（[gui-linux.md](gui-linux.md) §2） |
 
 | 层 | 内容 | 结果 |
 |---|---|---|
@@ -110,7 +111,7 @@ qybit --device hw:CARD=Generic_1,DEV=0 --volume-control Headphone a.flac
 虚拟机中的检查，期望值按 `sound/drivers/dummy.c` 与 alsamixer 公式独立算出：`Master Volume` 范围 −50..100，−45 dB 起每档 0.30 dB，dB 范围 45 dB，按对数映射。
 
 - 列表：初始原始值 0 显示为 `17%，-30.00 dB`。
-- 缺省选 Master：40% → 原始值 41、−17.70 dB；恢复后列表与之前完全相同。
+- 缺省选 Master：40% → 原始值 41、−17.70 dB；播放中改为 60%（Linux 图形界面拖动音量滑块，`PlaybackVolume::set_percent`）→ 原始值 65、−10.50 dB；恢复后列表与之前完全相同（2026-10-18 x86_64 虚拟机通过）。
 - 0%：播放前提示列出 `Master（0%，-45.00 dB）`；守卫析构时也恢复。
 - 指定 Synth：100% → 0 dB。
 - 与当前相同（17%）时不写入，恢复时“无需恢复”。

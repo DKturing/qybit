@@ -10,7 +10,8 @@ use qy_pcm_format::alsa::check_device_name;
 use super::ctl::{Ctl, resolve_card};
 use crate::kernel::abi::{
     ELEM_ACCESS_READ, ELEM_ACCESS_TLV_READ, ELEM_IFACE_MIXER, ELEM_TYPE_BOOLEAN,
-    ELEM_TYPE_ENUMERATED, ELEM_TYPE_INTEGER, ELEM_TYPE_INTEGER64, ElemValue, Zeroed, c_text,
+    ELEM_TYPE_ENUMERATED, ELEM_TYPE_INTEGER, ELEM_TYPE_INTEGER64, ElemId, ElemValue, Zeroed,
+    c_text,
 };
 use crate::kernel::mixer::{
     Control, Kind, Role, groups, playback_volume_group, raw_for_percent, silent_playback,
@@ -188,8 +189,12 @@ pub fn playback_hint(device: &str) -> Option<String> {
 /// 或析构时恢复原值。进程被强制结束（如第二次 Ctrl+C、SIGKILL）时来不及恢复。
 pub struct PlaybackVolume {
     mixer: CardMixer,
-    /// 改动过的元素与原值。
+    /// 改动过的元素与原值（播放前的值）。
     saved: Vec<(Control, Vec<i64>)>,
+    /// 所选的一组控制中的音量元素（播放中改变百分比时只写这些）。
+    volumes: Vec<ElemId>,
+    /// 这组控制的名称（如 `Master`）。
+    name: String,
 }
 
 impl PlaybackVolume {
@@ -228,6 +233,12 @@ impl PlaybackVolume {
         let mut guard = PlaybackVolume {
             mixer,
             saved: Vec::new(),
+            volumes: plan
+                .iter()
+                .filter(|(c, _)| matches!(c.kind, Kind::Integer { .. }))
+                .map(|(c, _)| c.id)
+                .collect(),
+            name: split_name(&group[0].name).0.to_string(),
         };
         for (c, v) in &plan {
             if c.values != *v {
@@ -248,6 +259,37 @@ impl PlaybackVolume {
             before.join("；")
         );
         Ok((guard, line))
+    }
+
+    /// 播放中改变音量（如界面拖动音量滑块）：只写这组控制的音量元素，原值仍为播放前的值，
+    /// 结束时一并恢复。返回设置后的读数。
+    pub fn set_percent(&mut self, percent: u32) -> Result<String, String> {
+        let controls = self.mixer.controls()?;
+        for c in controls.iter().filter(|c| self.volumes.contains(&c.id)) {
+            let Kind::Integer { min, max, step, .. } = c.kind else {
+                continue;
+            };
+            let raw = raw_for_percent(min, max, step, c.db.as_ref(), percent);
+            let want = vec![raw; c.values.len()];
+            if c.values != want {
+                if !self.saved.iter().any(|(s, _)| s.id == c.id) {
+                    self.saved.push((c.clone(), c.values.clone()));
+                }
+                self.mixer.write(c, &want)?;
+            }
+        }
+        self.describe()
+    }
+
+    /// 这组音量控制当前的读数，如 `Master：音量 59（范围 0..87），40%，-21.00 dB`。
+    pub fn describe(&self) -> Result<String, String> {
+        let controls = self.mixer.controls()?;
+        let now: Vec<String> = controls
+            .iter()
+            .filter(|c| self.volumes.contains(&c.id))
+            .map(Control::describe)
+            .collect();
+        Ok(format!("{}：{}", self.name, now.join("；")))
     }
 
     /// 恢复原值，返回一行说明。

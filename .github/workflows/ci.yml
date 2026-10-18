@@ -526,15 +526,18 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y qemu-user-static
       - name: 构建
         run: |
-          cargo build --locked --release -p qybit --target ${{ matrix.target }}
-          mkdir -p "$RUNNER_TEMP/out" && cp target/${{ matrix.target }}/release/qybit "$RUNNER_TEMP/out/"
+          cargo build --locked --release -p qybit -p qybit-gui --target ${{ matrix.target }}
+          mkdir -p "$RUNNER_TEMP/out"
+          cp target/${{ matrix.target }}/release/qybit target/${{ matrix.target }}/release/qybit-gui "$RUNNER_TEMP/out/"
       - name: 核对为静态程序
         run: |
-          f=target/${{ matrix.target }}/release/qybit
-          file "$f"
-          if readelf -lW "$f" | grep -q INTERP; then echo "::error::有程序解释器（动态链接）"; exit 1; fi
-          if readelf -dW "$f" | grep -q NEEDED; then echo "::error::依赖动态库"; readelf -dW "$f"; exit 1; fi
-          echo "${{ matrix.target }}：$(stat -c %s "$f") 字节，无解释器、无动态库依赖" >> "$GITHUB_STEP_SUMMARY"
+          for name in qybit qybit-gui; do
+            f=target/${{ matrix.target }}/release/$name
+            file "$f"
+            if readelf -lW "$f" | grep -q INTERP; then echo "::error::$name 有程序解释器（动态链接）"; exit 1; fi
+            if readelf -dW "$f" | grep -q NEEDED; then echo "::error::$name 依赖动态库"; readelf -dW "$f"; exit 1; fi
+            echo "${{ matrix.target }} $name：$(stat -c %s "$f") 字节，无解释器、无动态库依赖" >> "$GITHUB_STEP_SUMMARY"
+          done
       - name: 运行 qybit --version
         run: ${{ matrix.runner }} target/${{ matrix.target }}/release/qybit --version
       - name: 单元测试
@@ -545,7 +548,7 @@ jobs:
           fi
           cargo test --locked --release --target ${{ matrix.target }} \
             -p qy-core -p qy-codec-wav -p qy-codec-flac -p qy-codec-aiff -p qy-codec-auto \
-            -p qy-pcm-format -p qy-player -p qy-host-alsa -p qybit
+            -p qy-pcm-format -p qy-player -p qy-host-alsa -p qybit -p qybit-gui
       # B 层回环测试程序（静态，自带测试曲目生成）随构件发布，供用户在能加载 snd-aloop 的机器上运行。
       - name: 收集回环测试程序
         run: cp "$(ls -t target/${{ matrix.target }}/release/deps/loopback_aloop-* | grep -v '\.d$' | head -1)" "$RUNNER_TEMP/out/qybit-loopback-aloop"
@@ -554,6 +557,32 @@ jobs:
           name: qybit-linux-${{ matrix.arch }}
           path: ${{ runner.temp }}/out/
           if-no-files-found: error
+
+  # Linux 图形界面（自绘，X11）：模拟设备在 Xvfb 中运行（真实核心、自有解码、pack 与渲染循环，只模拟
+  # 设备与时间），xdotool 操作并核对状态栏与指示灯、单声道的严格拒绝与明确开启的复制、拖动调整顺序、
+  # XDND 文件拖放、记住设置与恢复；截图作为构件（scripts/gui-linux-check.sh）。
+  gui-linux:
+    name: Linux 图形界面（Xvfb，模拟设备）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - name: 安装 Xvfb、xdotool、ImageMagick 与中文字体
+        run: sudo apt-get update && sudo apt-get install -y xvfb xdotool imagemagick fonts-wqy-zenhei
+      - run: cargo clippy --locked -p qybit-gui --all-targets -- -D warnings
+      - run: cargo clippy --locked -p qybit-gui --features sim --all-targets -- -D warnings
+      - run: cargo test --locked -p qybit-gui --features sim
+      - name: 构建（模拟设备）与测试拖放源
+        run: |
+          cargo build --locked --release -p qybit-gui --features sim
+          cargo build --locked --release --manifest-path tools/gui-proto-linux/Cargo.toml --bin xdnd-send
+      - name: 界面核对
+        run: scripts/gui-linux-check.sh target/release/qybit-gui tools/gui-proto-linux/target/release/xdnd-send "$RUNNER_TEMP/gui-linux"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qybit-gui-linux-shots
+          path: ${{ runner.temp }}/gui-linux
 
   # M2 T4 B 层与 A1 内核路径：GitHub runner 不能加载内核模块，在 QEMU 虚拟机（Ubuntu 通用内核 +
   # snd-aloop）中运行 musl 静态测试程序（scripts/aloop-vm.sh）：设备枚举、内核直连单元测试、设备矩阵

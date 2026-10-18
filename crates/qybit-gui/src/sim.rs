@@ -20,7 +20,7 @@ pub use disabled::Sim;
 mod disabled {
     use std::path::PathBuf;
 
-    use qy_host_wasapi::endpoints::EndpointInfo;
+    use crate::app::Device;
     use qy_ui::Ui;
     use qy_ui::session::Notify;
 
@@ -33,7 +33,7 @@ mod disabled {
         pub fn title(&self) -> String {
             match *self {}
         }
-        pub fn endpoint(&self) -> EndpointInfo {
+        pub fn endpoint(&self) -> Device {
             match *self {}
         }
         pub fn files(&self) -> Vec<PathBuf> {
@@ -52,7 +52,7 @@ pub use enabled::Sim;
 mod enabled {
     use std::path::PathBuf;
 
-    use qy_host_wasapi::endpoints::EndpointInfo;
+    use crate::app::Device;
     use qy_player::signal::{write_test_wav, write_test_wav_float};
     use qy_player::testing::{FakeBackend, FakeDevice, NoMonoNegotiator};
     use qy_ui::Ui;
@@ -104,13 +104,10 @@ mod enabled {
             )
         }
 
-        pub fn endpoint(&self) -> EndpointInfo {
-            EndpointInfo {
+        pub fn endpoint(&self) -> Device {
+            Device {
                 id: "sim".into(),
                 name: Some("模拟设备（不接受单声道）".into()),
-                interface_name: None,
-                description: None,
-                driver_version: None,
             }
         }
 

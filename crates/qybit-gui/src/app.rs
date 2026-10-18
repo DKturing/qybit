@@ -1,8 +1,9 @@
-//! 界面逻辑（安全代码）：把控件输入转成 `qy-ui` 的操作，把模型变化转成显示操作。
+//! 界面逻辑（安全代码，Windows 与 Linux 前端共用）：把控件输入转成 `qy-ui` 的操作，把模型变化转成
+//! 显示操作。平台前端只负责把 [`Input`] 交进来、执行返回的 [`Op`]，菜单命令、选项、排序、设备列表
+//! 与设置的行为在两个平台上相同。
 
 use std::path::PathBuf;
 
-use qy_host_wasapi::endpoints::EndpointInfo;
 use qy_ui::settings::Settings;
 use qy_ui::text::RateLamp;
 use qy_ui::{Changes, Deferred, SortKey, Ui, text};
@@ -33,20 +34,31 @@ pub const ID_REMEMBER: u16 = 119;
 /// 播放菜单：全局媒体键（窗口不在前台时也响应）。
 pub const ID_MEDIA_KEYS: u16 = 120;
 /// 菜单命令的最大编号。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const ID_LAST: u16 = ID_MEDIA_KEYS;
 /// 控件。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const IDC_LIST: u16 = 201;
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const IDC_DEVICE: u16 = 202;
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const IDC_MONO: u16 = 203;
 /// 浮点转整数（F3，明确开启的非严格选项）。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const IDC_FLOAT: u16 = 210;
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const IDC_LOG: u16 = 204;
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const IDC_STATUS: u16 = 205;
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const IDC_FORMAT: u16 = 206;
 /// 进度条（S1 定位）：范围 0–1000（千分比）。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const IDC_SEEK: u16 = 207;
 /// 设备硬件音量（GUI T5）：滑块范围 0–100 与读数标签。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const IDC_VOLUME: u16 = 208;
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const IDC_VOLUME_LABEL: u16 = 209;
 
 /// 播放列表的列：标题与宽度（96 DPI 下的像素）。
@@ -83,6 +95,7 @@ pub fn column_key(col: usize) -> Option<SortKey> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Media {
     PlayPause,
+    #[cfg_attr(not(windows), allow(dead_code))]
     Play,
     Pause,
     Stop,
@@ -126,12 +139,13 @@ pub enum Input {
     Media(Media),
     /// 端点变化通知后重新枚举的结果。
     Devices {
-        default: Option<EndpointInfo>,
-        endpoints: Vec<EndpointInfo>,
+        default: Option<Device>,
+        endpoints: Vec<Device>,
     },
     /// Win32 边界给出的说明（写入日志区）。
     Note(String),
     /// 重画状态栏与格式行（拖动提示结束后恢复）。
+    #[cfg_attr(not(windows), allow(dead_code))]
     Redraw,
 }
 
@@ -191,7 +205,9 @@ pub struct App {
     /// 设备下拉框各项对应的端点标识（第 0 项为默认设备）与显示名。
     devices: Vec<(Option<String>, String)>,
     /// 最近一次枚举的默认设备与端点（重建下拉框用）。
-    enumerated: (Option<EndpointInfo>, Vec<EndpointInfo>),
+    enumerated: (Option<Device>, Vec<Device>),
+    /// 下拉框第 0 项的含义。
+    default_kind: DefaultDevice,
     /// 当前的列表排序（列标题箭头）；手动调整顺序或加入条目后清除。
     sort: Option<(SortKey, bool)>,
     /// 记住播放列表与设置（GUI T6，默认关闭）。
@@ -200,14 +216,38 @@ pub struct App {
     media_keys: bool,
 }
 
-/// 端点的显示名。
-fn endpoint_name(e: &EndpointInfo) -> String {
+/// 一个输出设备：平台的设备标识（Windows 为端点 ID，Linux 为 `hw:CARD=…,DEV=…`）与显示名。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Device {
+    pub id: String,
+    pub name: Option<String>,
+}
+
+/// 设备下拉框第 0 项的含义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultDevice {
+    /// 系统默认输出设备（Windows：默认渲染端点，播放时再查询）。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    System,
+    /// 没有系统默认设备（Linux 内核直连 ALSA）：第 0 项为“未选择”，播放前须选定设备。
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    None,
+}
+
+/// 设备的显示名。
+fn device_name(e: &Device) -> String {
     e.name.clone().unwrap_or_else(|| e.id.clone())
 }
 
 impl App {
-    pub fn new(ui: Ui, default: Option<EndpointInfo>, endpoints: Vec<EndpointInfo>) -> Self {
+    pub fn new(
+        ui: Ui,
+        default_kind: DefaultDevice,
+        default: Option<Device>,
+        endpoints: Vec<Device>,
+    ) -> Self {
         let mut app = Self {
+            default_kind,
             ui,
             view: Deferred::default(),
             log_visible: true,
@@ -223,25 +263,22 @@ impl App {
 
     /// 重建设备下拉框的项。选定的设备不在列表中（已拔出或停用）时保留该项并标明“未连接”，
     /// 不自动换到别的设备。返回选中项的位置。
-    fn set_devices(
-        &mut self,
-        default: Option<EndpointInfo>,
-        endpoints: Vec<EndpointInfo>,
-    ) -> usize {
+    fn set_devices(&mut self, default: Option<Device>, endpoints: Vec<Device>) -> usize {
         self.enumerated = (default, endpoints);
         let (default, endpoints) = (&self.enumerated.0, &self.enumerated.1);
         let old = std::mem::take(&mut self.devices);
         self.devices.push((
             None,
-            match default {
-                Some(d) => format!("默认输出设备（{}）", endpoint_name(d)),
-                None => "默认输出设备".to_string(),
+            match (self.default_kind, default) {
+                (DefaultDevice::System, Some(d)) => format!("默认输出设备（{}）", device_name(d)),
+                (DefaultDevice::System, None) => "默认输出设备".to_string(),
+                (DefaultDevice::None, _) => "（请选择输出设备）".to_string(),
             },
         ));
         self.devices.extend(
             endpoints
                 .iter()
-                .map(|e| (Some(e.id.clone()), endpoint_name(e))),
+                .map(|e| (Some(e.id.clone()), device_name(e))),
         );
         let current = self.ui.model.device.clone();
         if let Some(id) = current {
@@ -309,6 +346,7 @@ impl App {
     }
 
     /// 当前选定的输出设备（端点标识；`None` 为默认设备）。
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn device_id(&self) -> Option<String> {
         self.ui.model.device.clone()
     }
@@ -620,46 +658,21 @@ impl App {
 /// “关于”对话框的文字（含许可）。
 pub fn about_text() -> String {
     format!(
-        "QyBit {}\n\n本地无损播放器：WAV / FLAC / AIFF，自有解码；WASAPI 独占输出。\n严格路径不重采样、不改动样本、不混音；\
+        "QyBit {}\n\n本地无损播放器：WAV / FLAC / AIFF，自有解码；{}。\n严格路径不重采样、不改动样本、不混音；\
          欠载与错误如实报告。播放成功只说明软件路径与协商正常，不证明设备端 bit-perfect。\n\n\
-         许可：MIT 或 Apache-2.0\n界面：Windows 原生控件",
-        env!("CARGO_PKG_VERSION")
+         许可：MIT 或 Apache-2.0\n界面：{}",
+        env!("CARGO_PKG_VERSION"),
+        if cfg!(windows) {
+            "WASAPI 独占输出"
+        } else {
+            "ALSA hw 独占输出（内核接口）"
+        },
+        if cfg!(windows) {
+            "Windows 原生控件"
+        } else {
+            "自绘（X11）"
+        }
     )
-}
-
-/// 输出设备的音量状态（GUI T5）。只调节设备在硬件上实现的音量，送到设备的数据不变。
-#[derive(Debug, Clone, PartialEq)]
-pub enum VolumeView {
-    /// 设备在硬件上实现了音量：位置 0.0–1.0、读回的 dB 值、硬件静音。
-    Hardware { scalar: f32, db: f32, muted: bool },
-    /// 设备没有硬件音量（系统的软件音量对独占流无效，QyBit 也不使用它）。
-    NoHardware,
-    /// 读不到（无设备、模拟设备、系统接口失败）。
-    Unavailable(String),
-}
-
-impl VolumeView {
-    /// 标签文字。
-    pub fn text(&self) -> String {
-        match self {
-            Self::Hardware { db, muted, .. } => {
-                let mute = if *muted { "（已静音）" } else { "" };
-                format!("设备硬件音量 {db:.1} dB{mute}")
-            }
-            Self::NoHardware => "设备没有硬件音量，请在 DAC 或功放上调节".to_string(),
-            Self::Unavailable(why) => format!("设备音量不可用：{why}"),
-        }
-    }
-
-    /// 滑块位置（0–100）；不可调节时为 `None`（滑块不可用）。
-    pub fn position(&self) -> Option<u32> {
-        match self {
-            Self::Hardware { scalar, .. } if scalar.is_finite() => {
-                Some((scalar.clamp(0.0, 1.0) * 100.0).round() as u32)
-            }
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -667,30 +680,30 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use qy_host_wasapi::endpoints::EndpointInfo;
-    use qy_host_wasapi::wasapi::WasapiBackend;
+    use qy_player::testing::FakeBackend;
     use qy_ui::settings::Settings;
     use qy_ui::{SortKey, Ui};
 
-    use super::{App, ID_MEDIA_KEYS, ID_REMEMBER, ID_SORT_NAME, Input, Media, Op, VolumeView};
+    use super::{
+        App, DefaultDevice, Device, ID_MEDIA_KEYS, ID_REMEMBER, ID_SORT_NAME, Input, Media, Op,
+    };
 
     /// 没有输出设备的界面模型（只测界面逻辑，不播放）。
     fn app(endpoints: &[(&str, &str)]) -> App {
         let ui = Ui::new(
-            |_d: Option<&str>| -> Result<WasapiBackend, String> {
+            |_d: Option<&str>| -> Result<FakeBackend, String> {
                 Err("测试中没有设备".into())
             },
             Arc::new(|| {}),
         );
         let eps = endpoints
             .iter()
-            .map(|(id, name)| EndpointInfo {
+            .map(|(id, name)| Device {
                 id: (*id).into(),
                 name: Some((*name).into()),
-                ..EndpointInfo::default()
             })
             .collect();
-        App::new(ui, None, eps)
+        App::new(ui, DefaultDevice::System, None, eps)
     }
 
     fn devices(ops: &[Op]) -> Option<(Vec<String>, usize)> {
@@ -747,10 +760,9 @@ mod tests {
         let ops = a.handle(
             Input::Devices {
                 default: None,
-                endpoints: vec![EndpointInfo {
+                endpoints: vec![Device {
                     id: "id-a".into(),
                     name: Some("设备 A".into()),
-                    ..EndpointInfo::default()
                 }],
             },
             &[],
@@ -763,10 +775,9 @@ mod tests {
         let ops = a.handle(
             Input::Devices {
                 default: None,
-                endpoints: vec![EndpointInfo {
+                endpoints: vec![Device {
                     id: "id-b".into(),
                     name: Some("设备 B".into()),
-                    ..EndpointInfo::default()
                 }],
             },
             &[],
@@ -774,6 +785,23 @@ mod tests {
         );
         let (names, sel) = devices(&ops).unwrap_or_default();
         assert_eq!((names[sel].as_str(), sel), ("设备 B", 1));
+    }
+
+    #[test]
+    fn no_system_default_device() {
+        let ui = Ui::new(
+            |_d: Option<&str>| -> Result<FakeBackend, String> {
+                Err("测试中没有设备".into())
+            },
+            Arc::new(|| {}),
+        );
+        let dev = Device {
+            id: "hw:CARD=A,DEV=0".into(),
+            name: Some("声卡 A".into()),
+        };
+        let a = App::new(ui, DefaultDevice::None, Some(dev.clone()), vec![dev]);
+        assert_eq!(a.device_names(), ["（请选择输出设备）", "声卡 A"]);
+        assert_eq!(a.device_id(), None);
     }
 
     #[test]
@@ -832,34 +860,5 @@ mod tests {
         assert!(!ops.iter().any(|o| matches!(o, Op::PlayLabel(_))));
         let ops = a.handle(Input::Media(Media::Play), &[], true);
         assert!(ops.contains(&Op::PlayLabel("暂停")), "{ops:?}");
-    }
-
-    #[test]
-    fn volume_view_text_and_position() {
-        let v = VolumeView::Hardware {
-            scalar: 0.456,
-            db: -12.34,
-            muted: false,
-        };
-        assert_eq!(v.text(), "设备硬件音量 -12.3 dB");
-        assert_eq!(v.position(), Some(46));
-        let m = VolumeView::Hardware {
-            scalar: 1.5,
-            db: 0.0,
-            muted: true,
-        };
-        assert_eq!(m.text(), "设备硬件音量 0.0 dB（已静音）");
-        assert_eq!(m.position(), Some(100));
-        let nan = VolumeView::Hardware {
-            scalar: f32::NAN,
-            db: 0.0,
-            muted: false,
-        };
-        assert_eq!(nan.position(), None);
-        assert_eq!(VolumeView::NoHardware.position(), None);
-        assert!(VolumeView::NoHardware.text().contains("没有硬件音量"));
-        let u = VolumeView::Unavailable("模拟设备".into());
-        assert_eq!(u.text(), "设备音量不可用：模拟设备");
-        assert_eq!(u.position(), None);
     }
 }
