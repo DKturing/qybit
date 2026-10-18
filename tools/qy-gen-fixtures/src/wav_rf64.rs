@@ -435,20 +435,44 @@ pub fn cases(cs: &mut Vec<Case>) -> Result<()> {
         "Malformed",
         "RiffTooSmall { riff: 10 }",
     );
-    // data 的 32 位长度 32 与 ds64 的 64 不同。
-    let mut two = some.clone();
-    two.extend_from_slice(&some);
+    // BS.2088-2 §2.4：data 的 32 位长度不是 0xFFFFFFFF 时用这个 32 位值，即使 ds64 的 dataSize
+    // 不同（这里 ds64 写的是过时的 64）。
+    let vals = samples(410, 8, 2, 16);
     let f = rf64(
         b"RF64",
         ds64(AUTO, 64, 16, &[], &[]),
-        &[fmt.clone(), data(32, &two)],
+        &[fmt.clone(), data(32, &some)],
     );
-    bad(
+    ok(
         cs,
-        "rf64_data_conflict",
+        "rf64_data32_used",
         f,
-        "Malformed",
-        "DataConflict { chunk: 32, ds64: 64 }",
+        (44_100, 2, 16),
+        16,
+        None,
+        vals.clone(),
+        false,
+        vec![],
+    );
+    // 同一规则用于 RIFF 长度：BW64 头的 32 位长度是文件的实际长度（§3.2 要求写 0xFFFFFFFF，
+    // §2.4 规定不是 0xFFFFFFFF 时用 32 位值），ds64 的 bw64Size 为 0 也不按占位处理。
+    let mut f = rf64(
+        b"BW64",
+        ds64(0, 32, 8, &[], &[]),
+        &[fmt.clone(), data(u32::MAX, &some)],
+    );
+    let len = (f.len() - 8) as u32;
+    f[4..8].copy_from_slice(&len.to_le_bytes());
+    ok(
+        cs,
+        "bw64_riff32_used",
+        f,
+        (44_100, 2, 16),
+        16,
+        None,
+        vals,
+        false,
+        vec![],
     );
     // LIST 的长度为 0xFFFFFFFF，表中没有它。
     let mut l = chunk_head(b"LIST", u32::MAX);

@@ -10,10 +10,11 @@
 //! - RIFF/WAVE，小端；格式码 1（PCM）、3（`WAVE_FORMAT_IEEE_FLOAT`）与 0xFFFE（EXTENSIBLE，子格式
 //!   PCM 或 `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`）。
 //! - RF64 / BW64（F4，tasks/F4.md）：结构与 RIFF/WAVE 相同，长度由紧接 `WAVE` 的 `ds64` 块给出
-//!   （riffSize、dataSize、sampleCount 各 64 位，其后为块大小表），支持超过 4 GiB 的 data。32 位
-//!   RIFF 长度字段按规范为 0xFFFFFFFF（“不使用”），不读取；data 的 32 位长度为 0xFFFFFFFF 时用
-//!   `ds64.dataSize`，不是时必须与之相等；其他块的长度为 0xFFFFFFFF 时按块标识查 `ds64` 表。
-//!   浮点文件的 `fact` 为 0xFFFFFFFF 时帧数取 `ds64.sampleCount`。流式写入程序（ffmpeg 输出到管道）
+//!   （riffSize、dataSize、第三个 64 位值，其后为块大小表），支持超过 4 GiB 的 data。按 ITU-R
+//!   BS.2088-2 §2.4：RIFF 与 data 的 32 位长度不是 0xFFFFFFFF 时用 32 位值，是时用 ds64 的 64 位值；
+//!   其他块的长度为 0xFFFFFFFF 时按块标识查 `ds64` 表。第三个 64 位值在 RF64（EBU Tech 3306 v1）
+//!   中是 `fact` 的帧数，浮点文件的 `fact` 为 0xFFFFFFFF 时取它；在 BW64 中是 dummy，读取时忽略
+//!   （§4.2）。流式写入程序（ffmpeg 输出到管道）
 //!   留下的 `ds64` 全零按 W1 的 R1/R2 处理。块大小表最多存 [`DS64_TABLE`] 项（不分配内存），超出且
 //!   后面确实需要查表时按容量不足拒绝并写明。
 //! - 浮点（F3）：32 / 64 位 IEEE 754，小端，样本按位输出（binary32 每样本 1 个 `i32`，binary64 每样本
@@ -54,9 +55,9 @@
 //! 出错后解码器保持该错误，直到 [`Decoder::reset`]。
 //!
 //! 规范出处：Microsoft “Multimedia Programming Interface and Data
-//! Specifications 1.0”（RIFF chunk 与 WORD 对齐填充）；EBU Tech 3306 v1.1 与 ITU-R BS.2088-1
-//! （RF64 / BW64 的 `ds64`；原文尚未取得，结构按 FFmpeg n7.1 `wavdec.c` 与 libsndfile 1.2.2
-//! `rf64.c` 交叉核对，见 docs/specs.md）；
+//! Specifications 1.0”（RIFF chunk 与 WORD 对齐填充）；EBU Tech 3306 v2 与 ITU-R BS.2088-2
+//! （RF64 / BW64 的 `ds64`；EBU Tech 3306 v2 指定以 BS.2088 为准，按 BS.2088-2 核对，另以
+//! FFmpeg n7.1 `wavdec.c` 与 libsndfile 1.2.2 `rf64.c` 交叉核对，见 docs/specs.md）；
 //! `WAVEFORMATEX`、`WAVEFORMATEXTENSIBLE`（mmreg.h / ksmedia.h，
 //! 有效位、声道掩码、`KSDATAFORMAT_SUBTYPE_PCM`）。
 #![no_std]
@@ -244,8 +245,6 @@ pub enum Ds64Problem {
     Duplicate,
     /// `ds64` 声明的 RIFF 长度容纳不下 `ds64` 块本身。
     RiffTooSmall { riff: u64 },
-    /// data 的 32 位长度不是 0xFFFFFFFF，又与 `ds64` 的 64 位长度不同：两处声明互相矛盾。
-    DataConflict { chunk: u32, ds64: u64 },
     /// 块长度为 0xFFFFFFFF，`ds64` 表中没有该块的长度。
     NoTableEntry { chunk: [u8; 4] },
     /// `ds64` 表有 `entries` 项，超过本解码器能存放的 `capacity` 项，而后面的块需要查表。
@@ -443,10 +442,6 @@ impl core::fmt::Display for Ds64Problem {
             Self::RiffTooSmall { riff } => {
                 write!(f, "ds64 声明的 RIFF 长度 {riff} 字节容纳不下 ds64 块本身")
             }
-            Self::DataConflict { chunk, ds64 } => write!(
-                f,
-                "data 块的 32 位长度 {chunk} 与 ds64 声明的 64 位长度 {ds64} 不同，两处声明互相矛盾"
-            ),
             Self::NoTableEntry { chunk } => write!(
                 f,
                 "块 '{}' 的长度为 0xFFFFFFFF，但 ds64 表中没有它的长度",
@@ -474,8 +469,10 @@ pub struct WavDecoder {
     table: [TableEntry; DS64_TABLE],
     table_len: usize,
     table_declared: u32,
-    /// RIFF 声明的长度（RF64 / BW64 为 `ds64.riffSize`）。
+    /// RIFF 声明的长度（RF64 / BW64 的 32 位字段为 0xFFFFFFFF 时为 `ds64.riffSize`）。
     riff_declared: u64,
+    /// RF64 / BW64 的 32 位 RIFF 长度不是 0xFFFFFFFF，按 BS.2088-2 §2.4 使用它（F4）。
+    riff_from_32: bool,
     /// data 的声明长度原值（R2 报告用：RIFF 为 0xFFFFFFFF，RF64 为 `ds64.dataSize`）。
     data_declared: u64,
     /// RIFF 长度为占位值（R1）。
@@ -535,6 +532,7 @@ impl WavDecoder {
             table_len: 0,
             table_declared: 0,
             riff_declared: 0,
+            riff_from_32: false,
             data_declared: 0,
             riff_placeholder: false,
             riff_short: false,
@@ -742,13 +740,23 @@ impl WavDecoder {
             return Err(DecodeError::Malformed);
         }
         self.magic = magic;
+        let size = u32_at(b, 4);
         if self.container == Container::Rf64 {
-            // F4：32 位 RIFF 长度字段按规范为 0xFFFFFFFF（“不使用”），长度见紧接其后的 ds64；
-            // 读到 ds64 之前不以 RIFF 长度为界。
+            // F4（BS.2088-2 §2.4）：32 位长度字段不是 0xFFFFFFFF 时用这个 32 位值；是 0xFFFFFFFF
+            // 时用 ds64 的 64 位值（§3.2 要求 BW64 头写 0xFFFFFFFF）。读到 ds64 之前不以 RIFF 长度
+            // 为界。
             self.riff = Riff::Open;
+            if size != LENGTH_PLACEHOLDER {
+                self.riff_from_32 = true;
+                self.riff_declared = u64::from(size);
+                self.riff = Riff::Bounded(
+                    u64::from(size)
+                        .checked_sub(4)
+                        .ok_or(DecodeError::Malformed)?,
+                );
+            }
             return Ok(());
         }
-        let size = u32_at(b, 4);
         self.riff_declared = u64::from(size);
         if size == LENGTH_PLACEHOLDER {
             // R1：流式写入程序未回填的占位值。
@@ -819,22 +827,12 @@ impl WavDecoder {
         // data 长度为占位值（R2）：RIFF 为 0xFFFFFFFF；RF64 为 0xFFFFFFFF 且 ds64 的 RIFF 与 data
         // 长度都是 0（流式写入程序未回填 ds64，F4）。
         let mut placeholder = false;
+        // BS.2088-2 §2.4：32 位长度不是 0xFFFFFFFF 时用这个 32 位值（即使与 ds64 不同），是时用
+        // ds64 的 64 位值。
         let size: u64 = match self.ds64 {
-            Some(ds) if is_data => {
-                if size32 == LENGTH_PLACEHOLDER {
-                    placeholder = ds.data == 0 && self.riff_placeholder;
-                    ds.data
-                } else if u64::from(size32) == ds.data {
-                    ds.data
-                } else {
-                    return Err(self.ds64_fail(
-                        Ds64Problem::DataConflict {
-                            chunk: size32,
-                            ds64: ds.data,
-                        },
-                        DecodeError::Malformed,
-                    ));
-                }
+            Some(ds) if is_data && size32 == LENGTH_PLACEHOLDER => {
+                placeholder = ds.data == 0 && self.riff_placeholder;
+                ds.data
             }
             Some(_) if size32 == LENGTH_PLACEHOLDER => self.table_size(id)?,
             _ => {
@@ -939,8 +937,11 @@ impl WavDecoder {
                 DecodeError::Malformed,
             ));
         }
-        self.riff_declared = ds.riff;
-        if ds.riff == 0 {
+        if self.riff_from_32 {
+            // RIFF 长度来自 32 位字段（§2.4），ds64 的 bw64Size 不用；扣除 ds64 固定部分。
+            self.take_riff(DS64_FIXED)?;
+        } else if ds.riff == 0 {
+            self.riff_declared = 0;
             self.riff_placeholder = true;
             self.riff = Riff::Open;
         } else {
@@ -951,6 +952,7 @@ impl WavDecoder {
                     DecodeError::Malformed,
                 )
             })?;
+            self.riff_declared = ds.riff;
             self.riff = Riff::Bounded(left);
         }
         self.ds64 = Some(ds);
@@ -1208,9 +1210,13 @@ impl WavDecoder {
                         self.fact_duplicate = true;
                     } else {
                         let v = u32_at(avail, 0);
-                        // F4：RF64 / BW64 的 fact 为 0xFFFFFFFF 时帧数见 ds64.sampleCount。
+                        // F4：RF64 的 fact 为 0xFFFFFFFF 时帧数见 ds64 的第三个 64 位值（EBU Tech 3306
+                        // v1 的 sampleCount）。BW64 中这个值是 dummy，“读取时必须忽略”（BS.2088-2
+                        // §4.2），fact 按 32 位原值核对。
                         self.fact = Some(match self.ds64 {
-                            Some(ds) if v == LENGTH_PLACEHOLDER => ds.samples,
+                            Some(ds) if v == LENGTH_PLACEHOLDER && &self.magic == b"RF64" => {
+                                ds.samples
+                            }
                             _ => u64::from(v),
                         });
                     }
@@ -1405,6 +1411,7 @@ impl Decoder for WavDecoder {
         self.table_len = 0;
         self.table_declared = 0;
         self.riff_declared = 0;
+        self.riff_from_32 = false;
         self.data_declared = 0;
         self.riff_placeholder = false;
         self.riff_short = false;

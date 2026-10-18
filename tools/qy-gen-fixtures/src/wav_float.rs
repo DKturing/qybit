@@ -454,17 +454,21 @@ fn build() -> Vec<Case> {
     });
     let c = &mut cs;
     // ---- F4：RF64 浮点。ffmpeg `-rf64 always` 的结构：fact 为 0xFFFFFFFF，帧数见 ds64.sampleCount ----
+    let rf_as =
+        |magic: &[u8; 4], body: &[u8], samples: u64, fact_value: Option<u32>, fmt: Vec<u8>| {
+            let mut chunks = vec![fmt];
+            if let Some(v) = fact_value {
+                chunks.push(chunk(b"fact", &v.to_le_bytes()));
+            }
+            chunks.push(super::wav_rf64::data(u32::MAX, body));
+            super::wav_rf64::rf64(
+                magic,
+                super::wav_rf64::ds64(super::wav_rf64::AUTO, body.len() as u64, samples, &[], &[]),
+                &chunks,
+            )
+        };
     let rf = |body: &[u8], samples: u64, fact_value: Option<u32>, fmt: Vec<u8>| {
-        let mut chunks = vec![fmt];
-        if let Some(v) = fact_value {
-            chunks.push(chunk(b"fact", &v.to_le_bytes()));
-        }
-        chunks.push(super::wav_rf64::data(u32::MAX, body));
-        super::wav_rf64::rf64(
-            b"RF64",
-            super::wav_rf64::ds64(super::wav_rf64::AUTO, body.len() as u64, samples, &[], &[]),
-            &chunks,
-        )
+        rf_as(b"RF64", body, samples, fact_value, fmt)
     };
     let b = finite(31, 120 * 2, Enc::F32);
     let body = encode(&b, Enc::F32);
@@ -493,6 +497,21 @@ fn build() -> Vec<Case> {
         ),
         "Malformed",
         "fact:121:120:0",
+    );
+    // BW64：ds64 的第三个 64 位值是 dummy，读取时忽略（BS.2088-2 §4.2）；fact 的 0xFFFFFFFF 按原值
+    // 核对，与 120 帧不符。
+    bad(
+        c,
+        "bw64_f32_fact_dummy_ignored",
+        rf_as(
+            b"BW64",
+            &body,
+            120,
+            Some(u32::MAX),
+            fmt_float_ext(2, 44_100, Enc::F32, 3),
+        ),
+        "Malformed",
+        "fact:4294967295:120:0",
     );
     let b = finite(32, 77, Enc::F64);
     ok_raw(
