@@ -11,7 +11,8 @@
 //!   （Windows 前端为 `PostMessageW`）；后台线程从不等待界面线程，界面卡顿不影响播放；
 //! - [`text`] 给出各前端共用的显示文字（格式、时长、状态、保真结论）。
 //!
-//! 平台前端只把模型映射到各自的控件：Windows 原生控件（`qybit-gui`），Linux 阶段为 GTK4。
+//! 平台前端只把模型映射到各自的控件（`qybit-gui`：Windows 原生控件、Linux 自绘）。格式由组装层给出
+//! （[`Ui::with_formats`]，E2）；[`Ui::new`] 用官方解码器。
 
 pub mod model;
 pub mod probe;
@@ -20,5 +21,5 @@ pub mod settings;
 pub mod text;
 
 pub use model::{Changes, Deferred, Entry, Model, Outcome, Playing, SortKey, Ui};
-pub use probe::{Kind, Probe, TrackInfo};
+pub use probe::{Probe, TrackInfo};
 pub use session::UiEvent;

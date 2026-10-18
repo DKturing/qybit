@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "qybit-gui"
 path = "src/main.rs"
@@ -15,11 +18,11 @@ path = "src/main.rs"
 [features]
 # GUI T3 界面核对：用模拟设备代替 WASAPI（真实核心、自有解码、pack 与渲染循环，只模拟设备与时间）。
 # 只在 CI 截图核对时编译，发布产物不含。
-sim = ["dep:qy-player"]
+sim = ["qy-player/test-support"]
 
 [dependencies]
 qy-ui.workspace = true
-qy-player = { workspace = true, features = ["test-support"], optional = true }
+qy-player.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 qy-host-wasapi.workspace = true
@@ -40,7 +43,6 @@ windows = { workspace = true, features = [
 
 [target.'cfg(target_os = "linux")'.dependencies]
 qy-core.workspace = true
-qy-player.workspace = true
 qy-host-alsa.workspace = true
 x11rb.workspace = true
 tiny-skia.workspace = true

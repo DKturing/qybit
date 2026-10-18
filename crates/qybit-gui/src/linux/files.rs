@@ -1,7 +1,7 @@
 //! 自绘的文件选择面板（“添加文件…”“添加文件夹…”）：没有系统文件对话框可用（自绘界面、
 //! 精简系统上没有 xdg-desktop-portal），按 Windows 前端的文件对话框提供相同的选择方式。
 //!
-//! - 目录在前、文件在后，按名称排序（不区分大小写）；默认只列音频文件（WAV、FLAC、AIFF，与
+//! - 目录在前、文件在后，按名称排序（不区分大小写）；默认只列音频文件（格式集合的扩展名，与
 //!   Windows 对话框的筛选相同）与目录，可切换为显示所有文件（含隐藏文件）。
 //! - 单击选中，Ctrl / Shift 多选，双击目录进入、双击文件加入；回车同双击；Backspace 上一级；
 //!   Esc 取消。路径栏可输入路径后回车或“转到”。
@@ -14,8 +14,6 @@ use std::time::{Duration, Instant};
 
 use super::paint::{Align, Canvas, Rect};
 use super::x11::{Mods, keysym};
-
-const AUDIO: [&str; 8] = ["wav", "wave", "rf64", "bw64", "flac", "aif", "aiff", "aifc"];
 
 /// 面板交给主视图的结果。
 pub enum FileResult {
@@ -50,6 +48,8 @@ struct Geom {
 
 pub struct FileDialog {
     folder: bool,
+    /// 默认只列这些扩展名的文件（E2：来自格式集合）。
+    filter: crate::app::FileFilter,
     dir: PathBuf,
     items: Vec<Item>,
     selected: Vec<bool>,
@@ -69,9 +69,10 @@ pub struct FileDialog {
 }
 
 impl FileDialog {
-    pub fn new(dir: PathBuf, folder: bool) -> Self {
+    pub fn new(dir: PathBuf, folder: bool, filter: crate::app::FileFilter) -> Self {
         let mut d = Self {
             folder,
+            filter,
             dir: PathBuf::new(),
             items: Vec::new(),
             selected: Vec::new(),
@@ -115,10 +116,7 @@ impl FileDialog {
                 if hidden {
                     continue;
                 }
-                let audio = Path::new(&name)
-                    .extension()
-                    .and_then(|x| x.to_str())
-                    .is_some_and(|x| AUDIO.contains(&x.to_ascii_lowercase().as_str()));
+                let audio = self.filter.accepts(Path::new(&name));
                 if !dir && (!audio || self.folder) {
                     continue;
                 }
@@ -322,17 +320,12 @@ impl FileDialog {
         c.fill(bx, 0xf0f0f0);
         c.frame(bx, 0x707070);
         c.fill(title, 0xe6e6e6);
-        c.text_bold(
-            title,
-            pad,
-            if self.folder {
-                "添加文件夹"
-            } else {
-                "添加文件（WAV、FLAC、AIFF）"
-            },
-            0x1a1a1a,
-            Align::Left,
-        );
+        let heading = if self.folder {
+            "添加文件夹".to_string()
+        } else {
+            format!("添加文件（{}）", self.filter.names)
+        };
+        c.text_bold(title, pad, &heading, 0x1a1a1a, Align::Left);
         // 路径栏
         c.fill(path, 0xffffff);
         c.frame(path, if self.path_focus { 0x0078d7 } else { 0xadadad });
@@ -725,6 +718,13 @@ fn human_size(b: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn builtin() -> crate::app::FileFilter {
+        crate::app::FileFilter {
+            extensions: qy_player::assembly::BUILTIN_EXTENSIONS.to_vec(),
+            names: "WAV / FLAC / AIFF".into(),
+        }
+    }
+
     use std::path::PathBuf;
 
     use super::{FileDialog, FileResult, human_size};
@@ -737,28 +737,28 @@ mod tests {
         for f in ["b.FLAC", "a.wav", "c.txt", ".hidden.wav", "d.aiff"] {
             let _ = std::fs::write(dir.join(f), b"x");
         }
-        let mut d = FileDialog::new(dir.clone(), false);
+        let mut d = FileDialog::new(dir.clone(), false, builtin());
         let names: Vec<&str> = d.items.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(names, ["子目录", "a.wav", "b.FLAC", "d.aiff"]);
         d.show_all = true;
         d.reload();
         assert_eq!(d.items.len(), 6);
         // 文件夹模式只列目录；没有选中时加入当前目录。
-        let mut f = FileDialog::new(dir.clone(), true);
+        let mut f = FileDialog::new(dir.clone(), true, builtin());
         assert_eq!(f.items.len(), 1);
         match f.add() {
             FileResult::Add(_, p) => assert_eq!(p, vec![dir.clone()]),
             _ => panic!("应加入当前目录"),
         }
         // 打开文件：加入该文件。
-        let mut g = FileDialog::new(dir.clone(), false);
+        let mut g = FileDialog::new(dir.clone(), false, builtin());
         match g.open(1) {
             FileResult::Add(_, p) => assert_eq!(p, vec![dir.join("a.wav")]),
             _ => panic!("应加入文件"),
         }
         let _ = std::fs::remove_dir_all(&dir);
         assert!(matches!(
-            FileDialog::new(PathBuf::from("/nonexistent-qybit"), false)
+            FileDialog::new(PathBuf::from("/nonexistent-qybit"), false, builtin())
                 .dir
                 .to_str(),
             Some("/")

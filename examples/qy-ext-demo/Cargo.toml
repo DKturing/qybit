@@ -17,9 +17,27 @@ qy-player.workspace = true
 qy-pcm-format = { workspace = true, features = ["ring", "static-queue"] }
 # 嵌入式组装（`embedded` 模块）：存储、输出与喂数器的接口。
 qy-host-embedded.workspace = true
+# 应用组装（E2）：带示例格式的命令行与图形界面。
+qybit.workspace = true
+qybit-gui = { workspace = true, optional = true }
+
+[features]
+# 图形界面组装（`qybit-ext-gui`）；默认只组装命令行，测试不需要窗口系统。
+gui = ["dep:qybit-gui"]
+
+[[bin]]
+name = "qybit-ext"
+path = "src/bin/qybit-ext.rs"
+
+[[bin]]
+name = "qybit-ext-gui"
+path = "src/bin/qybit-ext-gui.rs"
+required-features = ["gui"]
 
 [dev-dependencies]
 qy-testkit.workspace = true
+qy-ui.workspace = true
+qy-player = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

@@ -12,6 +12,7 @@
 //!
 //! `test-support` 特性提供 [`testing`]：夹具、独立参考、假平台 API 与假后端。
 
+pub mod assembly;
 pub mod backend;
 pub mod player;
 pub mod render;
@@ -21,6 +22,7 @@ pub mod signal;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
+pub use assembly::{Builtin, Formats, Probe, TrackInfo};
 pub use backend::{Backend, PendingStream, RunningStream};
 pub use player::{
     Command, CommandReceiver, CommandSender, PlayControl, STATUS_INTERVAL, Status, TrackSource,
@@ -53,6 +55,14 @@ pub enum HostError {
 /// 一次性分配零初始化切片并泄漏为 `'static`。只在宿主启动时调用。
 fn leak_zeroed<T: Copy + Default>(len: usize) -> &'static mut [T] {
     Box::leak(vec![T::default(); len].into_boxed_slice())
+}
+
+/// 桌面配置档：启用 `flac` 特性时为 `DESKTOP`，否则为 `DESKTOP_WAV`。
+pub(crate) const fn desktop_profile() -> Profile {
+    #[cfg(feature = "flac")]
+    return profile::DESKTOP;
+    #[cfg(not(feature = "flac"))]
+    return profile::DESKTOP_WAV;
 }
 
 /// 按配置档组装解码器：只加入配置档启用、且本构建已链接的格式。
@@ -96,11 +106,26 @@ pub trait Diagnostics {
     fn skipped_tag_bytes(&self) -> u64 {
         0
     }
+
+    /// 当前曲目的补充说明（格式的子类型等，如“AIFF-C sowt（小端整数）”），每条一行；文件头解析
+    /// 完成后有效。`qybit decode` 输出。
+    fn source_notes(&self, out: &mut Vec<String>) {
+        let _ = out;
+    }
 }
 
 impl Diagnostics for AutoDecoder {
     fn skipped_tag_bytes(&self) -> u64 {
         AutoDecoder::skipped_tag_bytes(self)
+    }
+
+    fn source_notes(&self, out: &mut Vec<String>) {
+        // F5：AIFF-C 的非 NONE 未压缩类型写明类型码。
+        if let Some(t) = self.aiff().and_then(|a| a.sample_type())
+            && !t.is_plain()
+        {
+            out.push(format!("样本类型：{}", t.describe()));
+        }
     }
 
     fn failure_details(&self, out: &mut Vec<String>) {
@@ -139,10 +164,7 @@ impl HostResources {
     /// 容量工作区、整帧输入窗口），否则为 [`DESKTOP_WAV`](profile::DESKTOP_WAV)（只有 WAV / AIFF）；另有 pack 暂存区与
     /// 3 072 000 字节设备帧队列。
     pub fn new() -> Result<Self, HostError> {
-        #[cfg(feature = "flac")]
-        return Self::with_profile(profile::DESKTOP);
-        #[cfg(not(feature = "flac"))]
-        return Self::with_profile(profile::DESKTOP_WAV);
+        Self::with_profile(desktop_profile())
     }
 
     /// 按配置档一次性分配，只组装配置档启用且本构建已链接的部分（B1）：WAV 与 AIFF 共用的流式

@@ -4,6 +4,6 @@
 mod sys;
 mod volume;
 
-pub fn run() -> std::process::ExitCode {
-    sys::run()
+pub fn run<F: qy_player::Formats>(formats: F) -> std::process::ExitCode {
+    sys::run(formats)
 }

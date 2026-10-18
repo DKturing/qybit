@@ -92,6 +92,11 @@ impl Qyt1Decoder {
         Ok(d)
     }
 
+    /// 文件头声明的总帧数（文件头解析完成后有效；不可信，只用于显示时长）。
+    pub fn declared_frames(&self) -> Option<u64> {
+        self.format.map(|_| self.total)
+    }
+
     /// 当前曲目的失败明细。
     pub fn last_detail(&self) -> Option<Qyt1Detail> {
         self.failed

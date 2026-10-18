@@ -2,12 +2,13 @@
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = "\
+/// 帮助文字的模板；`{formats}` 由 [`usage`] 换成格式名称（E2）。
+const USAGE: &str = "\
 用法:
   qybit list-devices                         列出可用输出设备（Windows：端点 ID 与名称；Linux：hw 设备名）
   qybit --device <设备> [--container 16|24|32] [--mono-to-stereo] [--float-to-int]
         [--volume <N>%|off] [--volume-control <控制>] <文件>...
-                                             按顺序播放 WAV/FLAC/AIFF（按文件头识别）；Ctrl+C 停止并输出报告
+                                             按顺序播放 {formats}（按文件头识别）；Ctrl+C 停止并输出报告
   qybit matrix --device <设备> [--out <目录>]
                                              运行设备格式矩阵，写出 JSON/CSV 报告
   qybit mixer --device <设备>                Linux：列出声卡的硬件混音器（静音开关、音量、dB），只读
@@ -97,7 +98,13 @@ pub enum Command {
 }
 
 /// 解析参数（不含程序名）。
-pub fn parse(args: &[String]) -> Result<Command, String> {
+/// 帮助文字（`names` 为格式名称，如 `"WAV / FLAC / AIFF"`）。
+pub fn usage(names: &str) -> String {
+    USAGE.replace("{formats}", names)
+}
+
+/// 解析命令行；`exts` 为可播放的扩展名（小写，不含点），用于识别没传进来的设备 ID。
+pub fn parse(args: &[String], exts: &[&str]) -> Result<Command, String> {
     let mut it = args.iter().map(String::as_str);
     match it.next() {
         None | Some("-h" | "--help" | "help") => Ok(Command::Help),
@@ -178,7 +185,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             let mut out = None;
             while let Some(a) = it.next() {
                 match a {
-                    "--device" => device = Some(device_value(&mut it)?),
+                    "--device" => device = Some(device_value(&mut it, exts)?),
                     "--out" => out = Some(PathBuf::from(value(&mut it, "--out")?)),
                     x => return Err(format!("未知参数：{x}")),
                 }
@@ -192,7 +199,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             let mut device = None;
             while let Some(a) = it.next() {
                 match a {
-                    "--device" => device = Some(device_value(&mut it)?),
+                    "--device" => device = Some(device_value(&mut it, exts)?),
                     x => {
                         return Err(format!(
                             "mixer 只用于查看，不接受参数 {x}；播放音量用 --volume 指定"
@@ -205,7 +212,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             })
         }
         Some("--device") => {
-            let device = device_value(&mut it)?;
+            let device = device_value(&mut it, exts)?;
             let mut files = Vec::new();
             let mut container = None;
             let mut mono_to_stereo = false;
@@ -246,7 +253,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 }
             }
             if files.is_empty() {
-                return Err("至少需要一个音频文件（WAV 或 FLAC）".into());
+                return Err("至少需要一个音频文件".into());
             }
             Ok(Command::Play {
                 device,
@@ -267,14 +274,15 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
 
 /// `--device` 的值。值看起来是音频文件时说明设备 ID 没有传进来：最常见的原因是 PowerShell 把
 /// 未加引号的 `{…}`（WASAPI 端点 ID 的写法）当成脚本块吞掉了，直接给出原因而不是“找不到设备”。
-fn device_value<'a>(it: &mut impl Iterator<Item = &'a str>) -> Result<String, String> {
+fn device_value<'a>(
+    it: &mut impl Iterator<Item = &'a str>,
+    exts: &[&str],
+) -> Result<String, String> {
     let v = value(it, "--device")?;
     let lower = v.to_ascii_lowercase();
-    if [
-        ".wav", ".rf64", ".bw64", ".flac", ".fla", ".aif", ".aiff", ".aifc",
-    ]
-    .iter()
-    .any(|e| lower.ends_with(e))
+    if exts
+        .iter()
+        .any(|e| lower.rsplit_once('.').is_some_and(|(_, x)| x == *e))
     {
         return Err(format!(
             "--device 的值 {v} 看起来是音频文件，设备 ID 没有传进来。\
@@ -297,7 +305,10 @@ mod tests {
     use super::*;
 
     fn p(a: &[&str]) -> Result<Command, String> {
-        parse(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        parse(
+            &a.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            &qy_player::assembly::BUILTIN_EXTENSIONS,
+        )
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::time::Duration;
 use qy_core::engine::EngineFault;
 use qy_core::{Fault, SourceFormat};
 use qy_player::report::{AttemptRecord, fault_text};
-use qy_player::{Backend, Command, CommandSender, PlaybackReport, Status};
+use qy_player::{Backend, Command, CommandSender, Formats, PlaybackReport, Status};
 
 use crate::probe::{self, Probe, ProbeRequest};
 use crate::session::{self, Notify, PlayRequest, UiEvent};
@@ -220,7 +220,7 @@ fn sort_cmp(key: SortKey, a: &Entry, b: &Entry, descending: bool) -> Ordering {
             let k = |e: &Entry| {
                 info(e).map(|i| {
                     (
-                        i.kind.label(),
+                        i.label,
                         i.format.sample_rate(),
                         i.format.bits(),
                         i.format.encoding().is_float(),
@@ -374,16 +374,34 @@ pub struct Ui {
     play_tx: Option<Sender<PlayRequest>>,
     probe_tx: Option<Sender<ProbeRequest>>,
     threads: Vec<JoinHandle<()>>,
+    /// 格式集合的扩展名与名称（E2）。
+    extensions: Vec<&'static str>,
+    names: String,
 }
 
 impl Ui {
-    /// 启动播放线程与读取线程。`make_backend` 在播放线程中按设备标识创建输出后端；`notify` 在
-    /// 后台线程每发出一个事件后调用（前端据此安排一次 [`Ui::pump`]）。
+    /// 用官方解码器（[`qy_player::Builtin`]）启动，见 [`Ui::with_formats`]。
     pub fn new<B, F>(make_backend: F, notify: Notify) -> Self
     where
         B: Backend + 'static,
         F: FnMut(Option<&str>) -> Result<B, String> + Send + 'static,
     {
+        Self::with_formats(qy_player::Builtin, make_backend, notify)
+    }
+
+    /// 启动播放线程与读取线程（E2：格式由调用方给出）。`make_backend` 在播放线程中按设备标识
+    /// 创建输出后端；`notify` 在后台线程每发出一个事件后调用（前端据此安排一次 [`Ui::pump`]）。
+    /// 播放资源与文件信息读取器分别在两个线程里由 `formats` 创建。
+    pub fn with_formats<S, B, F>(formats: S, make_backend: F, notify: Notify) -> Self
+    where
+        S: Formats,
+        B: Backend + 'static,
+        F: FnMut(Option<&str>) -> Result<B, String> + Send + 'static,
+    {
+        let extensions = formats.extensions().to_vec();
+        let names = formats.names().to_string();
+        let formats = std::sync::Arc::new(formats);
+        let f2 = formats.clone();
         let (ev_tx, events) = channel();
         let (play_tx, play_rx) = channel();
         let (probe_tx, probe_rx) = channel();
@@ -392,10 +410,10 @@ impl Ui {
         let threads = vec![
             std::thread::Builder::new()
                 .name("qybit-play".into())
-                .spawn(move || session::run(play_rx, e1, n1, make_backend)),
+                .spawn(move || session::run(formats, play_rx, e1, n1, make_backend)),
             std::thread::Builder::new()
                 .name("qybit-probe".into())
-                .spawn(move || probe::run(probe_rx, e2, n2)),
+                .spawn(move || probe::run(f2, probe_rx, e2, n2)),
         ]
         .into_iter()
         .filter_map(Result::ok)
@@ -410,7 +428,26 @@ impl Ui {
             play_tx: Some(play_tx),
             probe_tx: Some(probe_tx),
             threads,
+            extensions,
+            names,
         }
+    }
+
+    /// 可加入播放列表、文件对话框中列出的扩展名（小写，不含点）。
+    pub fn extensions(&self) -> &[&'static str] {
+        &self.extensions
+    }
+
+    /// 格式名称（“关于”文字用，如 `"WAV / FLAC / AIFF"`）。
+    pub fn format_names(&self) -> &str {
+        &self.names
+    }
+
+    /// `path` 的扩展名是否可以加入播放列表。
+    pub fn is_audio_path(&self, path: &std::path::Path) -> bool {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| self.extensions.iter().any(|x| e.eq_ignore_ascii_case(x)))
     }
 
     /// 加入文件或文件夹（文件夹在读取线程中扫描）。不是音频扩展名的文件忽略。
@@ -421,7 +458,7 @@ impl Ui {
                 if let Some(tx) = &self.probe_tx {
                     let _ = tx.send(ProbeRequest::Folder(p));
                 }
-            } else if probe::is_audio_path(&p) {
+            } else if self.is_audio_path(&p) {
                 files.push(p);
             }
         }

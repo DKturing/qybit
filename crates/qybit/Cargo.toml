@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "qybit"
 path = "src/main.rs"
@@ -16,7 +19,6 @@ path = "src/main.rs"
 qy-player.workspace = true
 # 诊断子命令（decode/tone）：自有解码器、pack 与 WAVE 格式描述。
 qy-core.workspace = true
-qy-codec-auto = { workspace = true, features = ["wav", "flac", "aiff"] }
 qy-pcm-format.workspace = true
 qy-host-wasapi.workspace = true
 

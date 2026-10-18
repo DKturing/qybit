@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use qy_player::Formats;
 use qy_player::signal::write_test_wav;
 use qy_player::testing::{FakeBackend, FakeDevice, NoMonoNegotiator};
-use qy_ui::probe::{Prober, scan_folder};
-use qy_ui::{Changes, Deferred, Kind, Probe, Ui, text};
+use qy_ui::probe::scan_folder;
+use qy_ui::{Changes, Deferred, Probe, Ui, text};
 
 const ALL: [(u8, u8); 4] = [(16, 16), (24, 24), (32, 24), (32, 32)];
 
@@ -72,14 +73,14 @@ const TENTH: u64 = 4_410;
 /// 文件头读取：格式与声明的帧数与独立参考一致；无法识别的文件给出原因。
 #[test]
 fn probe_reads_format_and_declared_frames() {
-    let mut p = match Prober::new() {
+    let mut p = match qy_player::Builtin.prober() {
         Ok(p) => p,
         Err(e) => panic!("{e}"),
     };
     // FLAC：参考来自 .meta（flac 命令行生成时记录）。
     let flac = p.probe(&root().join("qy-codec-flac/tests/fixtures/cli_16_3ch_48k.flac"));
     let Ok(info) = flac else { panic!("{flac:?}") };
-    assert_eq!(info.kind, Kind::Flac);
+    assert_eq!(info.label, "FLAC");
     assert_eq!(
         (
             info.format.sample_rate(),
@@ -101,7 +102,7 @@ fn probe_reads_format_and_declared_frames() {
         .unwrap_or(0);
     let r = p.probe(&aiff.with_extension("aiff"));
     let Ok(info) = r else { panic!("{r:?}") };
-    assert_eq!(info.kind, Kind::Aiff);
+    assert_eq!(info.label, "AIFF");
     assert_eq!(info.frames.map(|f| f * 2), Some(samples));
 
     // WAV：测试自己写入的文件。
@@ -109,7 +110,7 @@ fn probe_reads_format_and_declared_frames() {
     let w = tracks(&dir, 1, 88_200);
     let r = p.probe(&w[0]);
     let Ok(info) = r else { panic!("{r:?}") };
-    assert_eq!((info.kind, info.frames), (Kind::Wav, Some(88_200)));
+    assert_eq!((info.label, info.frames), ("WAV", Some(88_200)));
     assert_eq!(text::columns(&Probe::Ready(info), "00.wav")[1], "0:02");
 
     // 无法识别与不存在的文件。

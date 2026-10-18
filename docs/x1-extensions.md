@@ -67,7 +67,19 @@ let report = qy_player::play_with(&mut backend, &mut res, &mut source, control);
 
 **嵌入式**（见 [`examples/qy-ext-demo/src/embedded.rs`](../examples/qy-ext-demo/src/embedded.rs)）：组合解码器交给 `Core::with_window`，再构造 `Engine` 与 `qy_host_embedded::Player`。`Player::new` 按每种启用格式的 `Load` 核对预填与持续负载，新格式要给出自己的 `Demand`（字段公开：最大字节率、最大输入单元字节数、单元至少包含的帧数）和板级实测的读取 / 解码耗时；时序不足时启动即报错（示例里第一次给的宽松耗时就被正确拒绝了：QYT1 的输入单元只有 512 字节，按 2 ms 计持续负载为 600%）。
 
-### 2.3 用 AI 辅助编写格式扩展
+### 2.3 组装应用（E2）
+
+命令行与图形界面的主体是库，对一套格式 `qy_player::Formats` 泛型（[docs/e2-assembly.md](e2-assembly.md)）。插件仓库实现 `Formats`——关联类型 `Decoder` 是上面的组合解码器，再给出播放资源、单独解码用的解码器、文件信息读取（`qy_player::assembly::read_header` 读文件头，按选中的解码器给出格式名与声明帧数）、扩展名与格式名称——然后调用同一个入口：
+
+```rust
+fn main() -> std::process::ExitCode {
+    qybit::run(my_plugin::LiteFormats)      // 命令行；图形界面为 qybit_gui::run(...)
+}
+```
+
+示例：[`examples/qy-ext-demo/src/formats.rs`](../examples/qy-ext-demo/src/formats.rs) 的 `ExtFormats` 与 `src/bin/` 下的 `qybit-ext`、`qybit-ext-gui`（`gui` 特性）。官方发行版是同一个入口传入 `qy_player::Builtin`。
+
+### 2.4 用 AI 辅助编写格式扩展
 
 把下面这些交给助手，比只说“写一个 XX 解码器”可靠得多：
 

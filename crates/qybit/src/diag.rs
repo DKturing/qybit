@@ -13,16 +13,11 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use qy_codec_auto::AutoDecoder;
-use qy_codec_auto::profile::DESKTOP;
 use qy_core::engine::Resources;
-use qy_core::{ChannelLayout, Decoder, DeviceFormat, PCM_WORK_SAMPLES, SampleEncoding, Status};
+use qy_core::{ChannelLayout, Decoder, DeviceFormat, SampleEncoding, Status};
 use qy_pcm_format::pack::{Pcm, pack};
 use qy_pcm_format::wave::WaveFormatExtensible;
-
-fn leak<T: Copy + Default>(len: usize) -> &'static mut [T] {
-    Box::leak(vec![T::default(); len].into_boxed_slice())
-}
+use qy_player::{Diagnostics, Formats};
 
 /// WAV 文件头（fmt 为 40 字节的 EXTENSIBLE）。浮点格式另写 fact 块（内容为样本帧数）：RIFF 1991
 /// 原文只要求压缩格式有 fact；浮点 WAV 的通行做法是写上，便于其他程序读取（本程序的解码器不要求）。
@@ -61,22 +56,14 @@ fn write_wav(out: &Path, format: &DeviceFormat, data: &[u8]) -> Result<(), Strin
         .map_err(|e| format!("写入 {}：{e}", out.display()))
 }
 
-/// 解码 `input`，经 pack 写成标准 WAV；返回给用户看的说明。
-pub fn decode(input: &Path, out: &Path) -> Result<String, String> {
+/// 用格式集合 `formats` 的解码器解码 `input`，经 pack 写成标准 WAV；返回给用户看的说明。
+pub fn decode<F: Formats>(formats: &F, input: &Path, out: &Path) -> Result<String, String> {
     let mut data = Vec::new();
     File::open(input)
         .and_then(|mut f| f.read_to_end(&mut data))
         .map_err(|e| format!("读取 {}：{e}", input.display()))?;
-    let cap = DESKTOP.flac_capacity().ok_or("配置档未启用 FLAC")?;
-    let mut d = AutoDecoder::new(
-        leak(PCM_WORK_SAMPLES),
-        cap,
-        leak(cap.workspace_len()),
-        leak(cap.pcm_len()),
-    )
-    .map_err(|e| format!("解码器：{e:?}"))?;
-    let window = d.required_window();
-    let mut scratch = vec![0u8; cap.pcm_len().max(PCM_WORK_SAMPLES) * 4];
+    let (mut d, window) = formats.decoder()?;
+    let mut scratch = Vec::new();
     let mut pcm_bytes = Vec::new();
     let mut device = None;
     let mut frames = 0u64;
@@ -116,6 +103,7 @@ pub fn decode(input: &Path, out: &Path) -> Result<String, String> {
                 };
                 let words = src.words_per_frame();
                 let pcm = Pcm::exact(&d.pcm()[..n * words], src).map_err(|e| format!("{e:?}"))?;
+                scratch.resize(n * usize::from(dev.block_align()), 0);
                 let k = pack(&pcm, &dev, &mut scratch).map_err(|e| format!("pack：{e:?}"))?;
                 pcm_bytes.extend_from_slice(&scratch[..k * usize::from(dev.block_align())]);
                 frames += k as u64;
@@ -151,11 +139,12 @@ pub fn decode(input: &Path, out: &Path) -> Result<String, String> {
         dev.container_bits(),
         out.display()
     ));
-    // F5：AIFF-C 的非 NONE 未压缩类型写明类型码（twos、sowt、fl32、fl64）。
-    if let Some(t) = d.aiff().and_then(|a| a.sample_type())
-        && !t.is_plain()
-    {
-        msg.push_str(&format!("\n样本类型：{}", t.describe()));
+    // 格式的补充说明（如 F5 的 AIFF-C 类型码）。
+    let mut notes = Vec::new();
+    d.source_notes(&mut notes);
+    for n in notes {
+        msg.push('\n');
+        msg.push_str(&n);
     }
     if d.skipped_tag_bytes() > 0 {
         msg.push_str(&format!(
@@ -177,20 +166,14 @@ pub fn decode(input: &Path, out: &Path) -> Result<String, String> {
     Ok(msg)
 }
 
-fn detail(d: &AutoDecoder) -> String {
-    if let Some(w) = d.wav_detail() {
-        return w.to_string();
+fn detail<D: Diagnostics>(d: &D) -> String {
+    let mut out = Vec::new();
+    d.failure_details(&mut out);
+    if out.is_empty() {
+        "无明细".into()
+    } else {
+        out.join("；")
     }
-    if let Some(a) = d.aiff_detail() {
-        return a.to_string();
-    }
-    if let Some(u) = d.unrecognized() {
-        return u.to_string();
-    }
-    if let Some(f) = d.flac_error() {
-        return format!("{f:?}");
-    }
-    "无明细".into()
 }
 
 /// 写一个双声道正弦测试音：约 −12 dBFS，`freq` Hz，`seconds` 秒，左右声道相同。
@@ -323,7 +306,7 @@ mod tests {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../qy-codec-wav/tests/fixtures");
         for (name, bits) in [("pcm16_stereo_44k", 16u32), ("pcm24_mono_48k_odd_list", 24)] {
             let out = tmp(&format!("{name}.wav"));
-            if let Err(e) = decode(&dir.join(format!("{name}.wav")), &out) {
+            if let Err(e) = decode(&qy_player::Builtin, &dir.join(format!("{name}.wav")), &out) {
                 panic!("{name}: {e}");
             }
             let reference: Vec<i32> = std::fs::read(dir.join(format!("{name}.ffmpeg.s32le")))
@@ -398,7 +381,7 @@ mod tests {
                 assert_eq!(&frame[..width], &want[..], "f{bits} 帧 {i}");
                 assert_eq!(&frame[width..], &want[..], "f{bits} 帧 {i}");
             }
-            let r = decode(&out, &back);
+            let r = decode(&qy_player::Builtin, &out, &back);
             let b = std::fs::read(&back).unwrap_or_default();
             let _ = (std::fs::remove_file(&out), std::fs::remove_file(&back));
             assert!(r.is_ok(), "{r:?}");
@@ -419,7 +402,7 @@ mod tests {
             let back = tmp(&format!("tone{bits}-back.wav"));
             assert!(tone(&a, 44_100, bits, false, 0.1, 1000.0).is_ok());
             assert!(tone(&wv, 44_100, bits, false, 0.1, 1000.0).is_ok());
-            let r = decode(&a, &back);
+            let r = decode(&qy_player::Builtin, &a, &back);
             let (b, w) = (
                 std::fs::read(&back).unwrap_or_default(),
                 std::fs::read(&wv).unwrap_or_default(),

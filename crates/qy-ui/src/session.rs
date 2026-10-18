@@ -13,8 +13,7 @@ use std::time::{Duration, Instant};
 
 use qy_core::engine::{ChannelPolicy, FloatPolicy};
 use qy_player::{
-    Backend, CommandSender, HostResources, PlayControl, Status, TrackSource, command_channel,
-    play_with,
+    Backend, CommandSender, Formats, PlayControl, Status, TrackSource, command_channel, play_with,
 };
 
 use crate::model::Outcome;
@@ -142,7 +141,8 @@ impl TrackSource for Paths<'_> {
 
 /// 播放线程主循环。`make_backend` 按设备标识创建输出后端（在本线程调用，如 WASAPI 需要的 COM
 /// 初始化与之同线程）。
-pub(crate) fn run<B, F>(
+pub(crate) fn run<B, F, S>(
+    formats: Arc<S>,
     requests: Receiver<PlayRequest>,
     events: Sender<UiEvent>,
     notify: Notify,
@@ -150,16 +150,17 @@ pub(crate) fn run<B, F>(
 ) where
     B: Backend,
     F: FnMut(Option<&str>) -> Result<B, String>,
+    S: Formats,
 {
     let send = |e: UiEvent| {
         let ok = events.send(e).is_ok();
         notify();
         ok
     };
-    let mut res = match HostResources::new() {
+    let mut res = match formats.resources() {
         Ok(r) => r,
         Err(e) => {
-            send(UiEvent::Fatal(format!("播放资源分配失败：{e:?}")));
+            send(UiEvent::Fatal(e));
             return;
         }
     };

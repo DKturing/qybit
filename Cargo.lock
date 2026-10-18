@@ -510,6 +510,9 @@ dependencies = [
  "qy-pcm-format",
  "qy-player",
  "qy-testkit",
+ "qy-ui",
+ "qybit",
+ "qybit-gui",
 ]
 
 [[package]]
@@ -614,7 +617,6 @@ dependencies = [
 name = "qybit"
 version = "0.0.0"
 dependencies = [
- "qy-codec-auto",
  "qy-core",
  "qy-host-alsa",
  "qy-host-wasapi",

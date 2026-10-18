@@ -168,9 +168,11 @@ pub enum Op {
     PlayLabel(&'static str),
     /// 进度条位置（千分比）；`None` 时不可用（未播放或总长度未知）。
     Seekbar(Option<u32>),
-    OpenFiles,
+    /// 打开文件对话框（E2：可加入的扩展名与格式名称来自格式集合）。
+    OpenFiles(FileFilter),
     OpenFolder,
-    About,
+    /// “关于”对话框，带全文。
+    About(String),
     Close,
     /// 采样率指示灯（GUI T6）。
     Rate {
@@ -216,6 +218,23 @@ pub struct App {
     media_keys: bool,
 }
 
+/// 文件对话框的筛选：可加入播放列表的扩展名（小写，不含点）与格式名称。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileFilter {
+    pub extensions: Vec<&'static str>,
+    pub names: String,
+}
+
+impl FileFilter {
+    /// 扩展名是否可以加入（不区分大小写；Linux 自绘文件面板用，Windows 由系统对话框筛选）。
+    #[cfg(target_os = "linux")]
+    pub fn accepts(&self, path: &std::path::Path) -> bool {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| self.extensions.iter().any(|x| e.eq_ignore_ascii_case(x)))
+    }
+}
+
 /// 一个输出设备：平台的设备标识（Windows 为端点 ID，Linux 为 `hw:CARD=…,DEV=…`）与显示名。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Device {
@@ -240,6 +259,14 @@ fn device_name(e: &Device) -> String {
 }
 
 impl App {
+    /// 文件对话框的筛选（格式集合的扩展名与名称）。
+    pub fn file_filter(&self) -> FileFilter {
+        FileFilter {
+            extensions: self.ui.extensions().to_vec(),
+            names: self.ui.format_names().to_string(),
+        }
+    }
+
     pub fn new(
         ui: Ui,
         default_kind: DefaultDevice,
@@ -373,7 +400,7 @@ impl App {
                 Changes::default()
             }
             Input::Command(ID_ADD_FILES) => {
-                ops.push(Op::OpenFiles);
+                ops.push(Op::OpenFiles(self.file_filter()));
                 return ops;
             }
             Input::Command(ID_ADD_FOLDER) => {
@@ -393,7 +420,7 @@ impl App {
                 return ops;
             }
             Input::Command(ID_ABOUT) => {
-                ops.push(Op::About);
+                ops.push(Op::About(about_text(self.ui.format_names())));
                 return ops;
             }
             Input::Command(ID_SORT_ADDED) => self.sort_by(SortKey::Added, selected, &mut ops),
@@ -655,10 +682,10 @@ impl App {
     }
 }
 
-/// “关于”对话框的文字（含许可）。
-pub fn about_text() -> String {
+/// “关于”对话框的文字（含许可）；`names` 为格式名称（E2，如 `"WAV / FLAC / AIFF"`）。
+pub fn about_text(names: &str) -> String {
     format!(
-        "QyBit {}\n\n本地无损播放器：WAV / FLAC / AIFF，自有解码；{}。\n严格路径不重采样、不改动样本、不混音；\
+        "QyBit {}\n\n本地播放器：{names}；{}。\n严格路径不重采样、不改动样本、不混音；\
          欠载与错误如实报告。播放成功只说明软件路径与协商正常，不证明设备端 bit-perfect。\n\n\
          许可：MIT 或 Apache-2.0\n界面：{}",
         env!("CARGO_PKG_VERSION"),

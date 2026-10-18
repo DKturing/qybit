@@ -558,13 +558,13 @@ impl View {
         self.overlay_dirty = true;
     }
 
-    pub fn open_files(&mut self, folder: bool) {
+    pub fn open_files(&mut self, folder: bool, filter: crate::app::FileFilter) {
         let dir = self
             .last_dir
             .clone()
             .or_else(|| std::env::var_os("HOME").map(Into::into))
             .unwrap_or_else(|| "/".into());
-        self.modal = Modal::Files(Box::new(FileDialog::new(dir, folder)));
+        self.modal = Modal::Files(Box::new(FileDialog::new(dir, folder, filter)));
         self.popup = Popup::None;
         self.overlay_dirty = true;
     }

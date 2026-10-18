@@ -39,7 +39,7 @@ mod disabled {
         pub fn files(&self) -> Vec<PathBuf> {
             match *self {}
         }
-        pub fn ui(&self, _notify: Notify) -> Ui {
+        pub fn ui<F: qy_player::Formats>(&self, _formats: F, _notify: Notify) -> Ui {
             match *self {}
         }
     }
@@ -111,7 +111,7 @@ mod enabled {
             }
         }
 
-        pub fn ui(&self, notify: Notify) -> Ui {
+        pub fn ui<F: qy_player::Formats>(&self, formats: F, notify: Notify) -> Ui {
             let mut backend = FakeBackend::with_negotiator(
                 &[(16, 16), (24, 24), (32, 24), (32, 32)],
                 NoMonoNegotiator,
@@ -121,7 +121,8 @@ mod enabled {
                 // 每包 10 ms：第 200 次取缓冲时报告设备失效。
                 backend.invalidate = Some((0, 200));
             }
-            let mut ui = Ui::new(
+            let mut ui = Ui::with_formats(
+                formats,
                 move |_device: Option<&str>| -> Result<_, String> { Ok(backend.clone()) },
                 notify,
             );

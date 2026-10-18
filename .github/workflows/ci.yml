@@ -144,6 +144,9 @@ jobs:
       - run: rustup show
       - run: cargo clippy --locked -p qy-host-wasapi -p qybit -p qybit-gui --all-targets -- -D warnings
       - run: cargo build --locked -p qy-host-wasapi -p qybit
+      # E2：示例组装（带 QYT1 的命令行与图形界面）在 Windows 上同样编译。
+      - run: cargo clippy --locked -p qy-ext-demo --features gui --all-targets -- -D warnings
+      - run: cargo build --locked -p qy-ext-demo --features gui --bins
       - run: cargo test --locked -p qy-host-wasapi -p qybit -p qybit-gui
 
   # GUI（tasks/GUI.md）：release 构建 Windows 原生控件前端，带夹具启动、截图核对显示，测空闲 CPU，
@@ -572,6 +575,8 @@ jobs:
       - run: cargo clippy --locked -p qybit-gui --all-targets -- -D warnings
       - run: cargo clippy --locked -p qybit-gui --features sim --all-targets -- -D warnings
       - run: cargo test --locked -p qybit-gui --features sim
+      # E2：示例组装的图形界面（`gui` 特性）。
+      - run: cargo clippy --locked -p qy-ext-demo --features gui --all-targets -- -D warnings
       - name: 构建（模拟设备）与测试拖放源
         run: |
           cargo build --locked --release -p qybit-gui --features sim

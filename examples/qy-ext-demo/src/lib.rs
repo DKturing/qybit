@@ -7,11 +7,14 @@
 //!   `qy_host_embedded::Player::new` 接入；
 //! - [`MemorySource`]：内存中的曲目（`TrackSource`），可选不可定位（像管道）；
 //! - [`Recorder`]：按真实时间消费、不访问硬件的输出后端（`Backend`），记录送到“设备”的有效字节；
+//! - [`ExtFormats`]：应用组装（E2）——同一套格式交给 `qybit::run` / `qybit_gui::run`，得到带
+//!   QYT1 的命令行（`qybit-ext`）与图形界面（`qybit-ext-gui`，`gui` 特性）；
 //! - [`embedded`]：嵌入式组装——内存曲目（`Storage`）、虚拟时间 I²S（`AudioOutput`）与共享喂数器。
 //!
 //! 扩展契约与接入方法见 `docs/x1-extensions.md`。
 
 pub mod embedded;
+mod formats;
 pub mod qyt1;
 
 use std::io::{self, Cursor, ErrorKind, Read, Seek, SeekFrom};
@@ -32,6 +35,7 @@ use qy_player::render::{
 use qy_player::report::{AttemptRecord, Negotiation, OpenFailure, Submission};
 use qy_player::{Backend, Diagnostics, PendingStream, RunningStream, TrackSource};
 
+pub use formats::{EXT_EXTENSIONS, ExtFormats};
 pub use qyt1::{Qyt1Decoder, Qyt1Detail};
 
 // ---- 组装：组合解码器 ----
@@ -95,6 +99,10 @@ impl ExtDecoder {
 
     pub fn qyt1(&self) -> &Qyt1Decoder {
         &self.qyt1
+    }
+
+    pub fn auto(&self) -> &AutoDecoder {
+        &self.auto
     }
 }
 
@@ -223,6 +231,12 @@ impl Diagnostics for ExtDecoder {
         match self.active {
             Some(Active::Auto) => Diagnostics::skipped_tag_bytes(&self.auto),
             _ => 0,
+        }
+    }
+
+    fn source_notes(&self, out: &mut Vec<String>) {
+        if self.active == Some(Active::Auto) {
+            self.auto.source_notes(out);
         }
     }
 }

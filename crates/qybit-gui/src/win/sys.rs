@@ -79,7 +79,7 @@ use crate::app::{
     ID_MEDIA_KEYS, ID_MOVE_DOWN, ID_MOVE_UP, ID_NEXT, ID_PLAY, ID_PREV, ID_REMEMBER, ID_REMOVE,
     ID_SORT_ADDED, ID_SORT_FORMAT, ID_SORT_LENGTH, ID_SORT_NAME, ID_STOP, ID_TOGGLE_LOG,
     IDC_DEVICE, IDC_FLOAT, IDC_FORMAT, IDC_LIST, IDC_LOG, IDC_MONO, IDC_SEEK, IDC_STATUS,
-    IDC_VOLUME, IDC_VOLUME_LABEL, Input, Media, Op, about_text, column_key,
+    IDC_VOLUME, IDC_VOLUME_LABEL, Input, Media, Op, column_key,
 };
 use crate::app::{DefaultDevice, Device};
 use crate::sim::Sim;
@@ -453,7 +453,7 @@ fn save_settings(h: &Handles) -> Option<Result<(PathBuf, usize), String>> {
     )
 }
 
-pub fn run() -> ExitCode {
+pub fn run<F: qy_player::Formats>(formats: F) -> ExitCode {
     // SAFETY: 进程启动时设置 DPI 感知与 COM（单线程套间，文件对话框要求）；与本线程退出前的
     // CoUninitialize 配对。
     let com = unsafe {
@@ -485,8 +485,8 @@ pub fn run() -> ExitCode {
     let code = match create(&title, saved.as_ref().and_then(|p| p.settings.window)) {
         Some(_) => {
             let (ui, sim_files) = match &sim {
-                Some(s) => (s.ui(Arc::new(notify)), s.files()),
-                None => (wasapi_ui(), Vec::new()),
+                Some(s) => (s.ui(formats, Arc::new(notify)), s.files()),
+                None => (wasapi_ui(formats), Vec::new()),
             };
             let mut app = App::new(ui, DefaultDevice::System, default, endpoints);
             if let Some(p) = &saved {
@@ -541,8 +541,9 @@ pub fn run() -> ExitCode {
 }
 
 /// WASAPI 独占输出的界面模型（播放线程中按设备标识创建后端）。
-fn wasapi_ui() -> qy_ui::Ui {
-    qy_ui::Ui::new(
+fn wasapi_ui<F: qy_player::Formats>(formats: F) -> qy_ui::Ui {
+    qy_ui::Ui::with_formats(
+        formats,
         |device: Option<&str>| -> Result<qy_host_wasapi::wasapi::WasapiBackend, String> {
             let id = match device {
                 Some(d) => d.to_string(),
@@ -1486,20 +1487,20 @@ fn exec(op: Op) {
                 let _ = SetWindowTextW(h.play, PCWSTR(t.as_ptr()));
             }
         }
-        Op::OpenFiles => {
-            let paths = pick(h.main, false);
+        Op::OpenFiles(filter) => {
+            let paths = pick(h.main, Some(&filter));
             if !paths.is_empty() {
                 dispatch(Input::Paths(paths));
             }
         }
         Op::OpenFolder => {
-            let paths = pick(h.main, true);
+            let paths = pick(h.main, None);
             if !paths.is_empty() {
                 dispatch(Input::Paths(paths));
             }
         }
-        Op::About => {
-            let t = wide(&about_text());
+        Op::About(text) => {
+            let t = wide(&text);
             unsafe {
                 MessageBoxW(
                     Some(h.main),
@@ -1610,8 +1611,24 @@ fn exec(op: Op) {
     }
 }
 
-/// 系统文件对话框（多选）；取消或出错时为空。
-fn pick(owner: HWND, folders: bool) -> Vec<PathBuf> {
+/// 系统文件对话框（多选）；`filter` 为 `None` 时选择文件夹。取消或出错时为空。
+fn pick(owner: HWND, filter: Option<&crate::app::FileFilter>) -> Vec<PathBuf> {
+    let folders = filter.is_none();
+    // E2：筛选来自格式集合（如“音频文件（WAV / FLAC / AIFF）”与 `*.wav;*.flac;…`）；宽字符串在
+    // 对话框关闭前一直有效。
+    let (name, spec) = match filter {
+        Some(f) => (
+            wide(&format!("音频文件（{}）", f.names)),
+            wide(
+                &f.extensions
+                    .iter()
+                    .map(|e| format!("*.{e}"))
+                    .collect::<Vec<_>>()
+                    .join(";"),
+            ),
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
     // SAFETY: 本线程已初始化 COM（单线程套间）；接口由 windows crate 管理引用计数；
     // GetDisplayName 返回的字符串用 CoTaskMemFree 释放。
     unsafe {
@@ -1631,8 +1648,8 @@ fn pick(owner: HWND, folders: bool) -> Vec<PathBuf> {
         if !folders {
             let specs = [
                 COMDLG_FILTERSPEC {
-                    pszName: w!("音频文件（WAV、FLAC、AIFF）"),
-                    pszSpec: w!("*.wav;*.wave;*.rf64;*.bw64;*.flac;*.aif;*.aiff;*.aifc"),
+                    pszName: PCWSTR(name.as_ptr()),
+                    pszSpec: PCWSTR(spec.as_ptr()),
                 },
                 COMDLG_FILTERSPEC {
                     pszName: w!("所有文件"),

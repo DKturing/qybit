@@ -73,7 +73,7 @@ pub fn device_text(f: &DeviceFormat) -> String {
 
 /// 播放列表“格式”列：`FLAC 44.1 kHz 16 位 2 声道`。
 pub fn format_column(info: &TrackInfo) -> String {
-    format!("{} {}", info.kind.label(), source_text(&info.format))
+    format!("{} {}", info.label, source_text(&info.format))
 }
 
 /// 播放列表的三列：文件名、时长、格式（读取中、无法播放时给出说明）。

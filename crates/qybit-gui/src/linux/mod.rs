@@ -26,7 +26,7 @@ use qy_ui::settings::{self, Settings};
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::ConnectionExt as _;
 
-use crate::app::{App, DefaultDevice, Device, ID_MEDIA_KEYS, Input, Media, Op, about_text};
+use crate::app::{App, DefaultDevice, Device, ID_MEDIA_KEYS, Input, Media, Op};
 use crate::sim::Sim;
 use audio::Volume;
 use paint::Canvas;
@@ -68,7 +68,7 @@ struct Front {
     exposed: Vec<paint::Rect>,
 }
 
-pub fn run() -> ExitCode {
+pub fn run<F: qy_player::Formats>(formats: F) -> ExitCode {
     let sim = Sim::from_env();
     let mut notes = Vec::new();
     let saved = match settings::default_path().map(|p| (settings::load(&p), p)) {
@@ -123,7 +123,7 @@ pub fn run() -> ExitCode {
     };
     let (ui, sim_files, volume, default_kind, default, devices) = match &sim {
         Some(s) => (
-            s.ui(notify.clone()),
+            s.ui(formats, notify.clone()),
             s.files(),
             None,
             DefaultDevice::System,
@@ -135,7 +135,11 @@ pub fn run() -> ExitCode {
             let (devices, err) = audio::devices();
             notes.extend(err);
             (
-                qy_ui::Ui::new(audio::make_backend(volume.clone()), notify.clone()),
+                qy_ui::Ui::with_formats(
+                    formats,
+                    audio::make_backend(volume.clone()),
+                    notify.clone(),
+                ),
                 Vec::new(),
                 Some(volume),
                 DefaultDevice::None,
@@ -467,9 +471,12 @@ impl Front {
             Op::LogVisible(on) => self.view.set_log_visible(on),
             Op::PlayLabel(l) => self.view.set_play_label(l),
             Op::Seekbar(p) => self.view.set_seek(p),
-            Op::OpenFiles => self.view.open_files(false),
-            Op::OpenFolder => self.view.open_files(true),
-            Op::About => self.view.about(about_text()),
+            Op::OpenFiles(filter) => self.view.open_files(false, filter),
+            Op::OpenFolder => {
+                let filter = self.app.file_filter();
+                self.view.open_files(true, filter);
+            }
+            Op::About(text) => self.view.about(text),
             Op::Close => self.quit = true,
             Op::Rate { lamp, text } => {
                 if self.trace {
