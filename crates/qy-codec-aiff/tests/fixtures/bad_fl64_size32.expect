@@ -1,0 +1,4 @@
+result malformed
+format none
+detail violation:float-sample-size:fl64:32:64
+samples 0

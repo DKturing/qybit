@@ -16,14 +16,23 @@
 //! - **合规但尚不支持**（[`DecodeError::Unsupported`]）：例如 SSND 在 COMM 之前、非整数采样率、
 //!   规范定义的压缩类型、规范中有歧义的多声道约定；
 //! - **规范之外的扩展**（[`DecodeError::Unsupported`]）：AIFF-C 原文未定义的 `compressionType`，
-//!   如 `sowt`、`twos`、`raw `、`fl32`。
+//!   如 `raw `、`in24`、`ulaw`。
 //!
-//! 输出：交错右对齐 `i32`，N = `sampleSize`；不经浮点，不改变样本。
+//! F5（tasks/F5.md，2026-10-18 纳入基础格式）：QuickTime File Format 2001-03-01 表 3-3 定义的四种
+//! 未压缩类型可以播放（[`SampleType`]）：
+//! - `twos`：大端补码，与 `NONE` 相同；
+//! - `sowt`：小端补码，其余与 `NONE` 相同（容器字节数与有效位左对齐的规则不变，只是容器内的字节
+//!   顺序相反）；QTFF 只写 16 位，8/24/32 位是写入程序（libsndfile）的实际用法，含义没有歧义；
+//! - `fl32` / `FL32`、`fl64` / `FL64`：IEEE 754 binary32 / binary64，大端，`sampleSize` 必须为
+//!   32 / 64；样本按位输出（binary32 每样本 1 个 `i32`，binary64 每样本 2 个 `i32`，先低后高，
+//!   与 F3 的 WAV 浮点相同），不做数值运算。
+//!
+//! 输出：交错右对齐 `i32`，N = `sampleSize`（整数）；浮点按位存放；不经浮点运算，不改变样本。
 #![no_std]
 
 use qy_core::{
-    ChannelLayout, DecodeError, Decoder, PCM_WORK_SAMPLES, Progress, SeekError, SourceFormat,
-    Status,
+    ChannelLayout, DecodeError, Decoder, PCM_WORK_SAMPLES, Progress, SampleEncoding, SeekError,
+    SourceFormat, Status,
 };
 
 /// AIFF-C FVER 的 `timestamp`：AIFCVersion1（AIFF-C §Format Version Chunk）。
@@ -78,6 +87,12 @@ pub enum Violation {
     Channels { value: i16 },
     /// `sampleSize` 不在 1–32 之内。
     SampleSize { value: i16 },
+    /// 浮点类型（`fl32` / `fl64`）的 `sampleSize` 不是 32 / 64（F5）。
+    FloatSampleSize {
+        tag: [u8; 4],
+        value: i16,
+        expected: i16,
+    },
     /// SSND 的长度装不下 offset、blockSize 与 COMM 声明的全部样本帧。
     SsndTooShort { size: u32, needed: u64 },
 }
@@ -156,6 +171,15 @@ impl core::fmt::Display for Violation {
             Self::MissingChunk { id } => write!(f, "缺少必需的 chunk {}", Id(id)),
             Self::Channels { value } => write!(f, "numChannels 为 {value}，至少为 1"),
             Self::SampleSize { value } => write!(f, "sampleSize 为 {value}，应在 1–32 之内"),
+            Self::FloatSampleSize {
+                tag,
+                value,
+                expected,
+            } => write!(
+                f,
+                "compressionType {} 是 {expected} 位浮点，sampleSize 却为 {value}",
+                Id(tag)
+            ),
             Self::SsndTooShort { size, needed } => write!(
                 f,
                 "SSND 长度 {size} 装不下 COMM 声明的全部样本帧（需要 {needed} 字节）"
@@ -267,12 +291,53 @@ enum State {
     Failed(DecodeError),
 }
 
+/// 样本的存放方式（AIFF 与 AIFF-C `NONE`、`twos` 为大端整数；F5 另有 `sowt` 与浮点）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SampleType {
+    /// 大端补码（AIFF、AIFF-C `NONE`）。
+    BigEndian,
+    /// AIFF-C `twos`：大端补码，与 `NONE` 相同。
+    Twos,
+    /// AIFF-C `sowt`：小端补码。
+    Sowt,
+    /// AIFF-C `fl32` / `FL32`：binary32，大端。
+    Float32,
+    /// AIFF-C `fl64` / `FL64`：binary64，大端。
+    Float64,
+}
+
+impl SampleType {
+    /// AIFF 或 AIFF-C `NONE`（规范原文定义的大端整数）。
+    pub const fn is_plain(self) -> bool {
+        matches!(self, Self::BigEndian)
+    }
+
+    /// 报告用的说明。
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::BigEndian => "大端整数",
+            Self::Twos => "AIFF-C twos（大端整数）",
+            Self::Sowt => "AIFF-C sowt（小端整数）",
+            Self::Float32 => "AIFF-C fl32（32 位浮点，大端）",
+            Self::Float64 => "AIFF-C fl64（64 位浮点，大端）",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Layout {
     format: SourceFormat,
-    /// 每个样本点的字节数（1–4）。
+    /// 每个样本点的字节数（整数 1–4，浮点 4 / 8）。
     bytes: usize,
     channels: usize,
+    kind: SampleType,
+}
+
+impl Layout {
+    /// 一帧在 PCM 工作区中占的 `i32` 个数（binary64 每样本 2 个）。
+    fn words_per_frame(&self) -> usize {
+        self.channels * self.format.encoding().words()
+    }
 }
 
 /// AIFF / AIFF-C 解码器。
@@ -342,6 +407,11 @@ impl AiffDecoder {
     /// 同一块工作区。
     pub fn into_pcm(self) -> &'static mut [i32] {
         self.pcm
+    }
+
+    /// 当前曲目的样本存放方式（COMM 解析之后；报告用，F5）。
+    pub fn sample_type(&self) -> Option<SampleType> {
+        self.layout.map(|l| l.kind)
     }
 
     /// 最近一次拒绝的明细（新曲目 `reset` 后清除）。
@@ -516,14 +586,16 @@ impl AiffDecoder {
         if channels < 1 {
             return Err(self.violation(Violation::Channels { value: channels }));
         }
-        if !(1..=32).contains(&sample_size) {
-            return Err(self.violation(Violation::SampleSize { value: sample_size }));
-        }
-        if self.form == Form::Aifc {
-            // AIFF-C 原文只定义以下五种 compressionType（AIFF-C §Common Chunk）。
+        let kind = if self.form == Form::Aifc {
+            // AIFF-C 原文只定义以下五种 compressionType（AIFF-C §Common Chunk）；`twos`、`sowt`、
+            // `fl32`、`fl64` 由 QuickTime File Format 表 3-3 定义（F5）。
             let tag = id_at(b, 18);
             match &tag {
-                b"NONE" => {}
+                b"NONE" => SampleType::BigEndian,
+                b"twos" => SampleType::Twos,
+                b"sowt" => SampleType::Sowt,
+                b"fl32" | b"FL32" => SampleType::Float32,
+                b"fl64" | b"FL64" => SampleType::Float64,
                 b"ACE2" | b"ACE8" | b"MAC3" | b"MAC6" => {
                     return Err(
                         self.reject(DecodeError::Unsupported, AiffDetail::Compressed { tag })
@@ -536,6 +608,26 @@ impl AiffDecoder {
                     ));
                 }
             }
+        } else {
+            SampleType::BigEndian
+        };
+        let float_bits = match kind {
+            SampleType::Float32 => Some(32),
+            SampleType::Float64 => Some(64),
+            _ => None,
+        };
+        match float_bits {
+            Some(want) if sample_size != want => {
+                return Err(self.violation(Violation::FloatSampleSize {
+                    tag: id_at(b, 18),
+                    value: sample_size,
+                    expected: want,
+                }));
+            }
+            None if !(1..=32).contains(&sample_size) => {
+                return Err(self.violation(Violation::SampleSize { value: sample_size }));
+            }
+            _ => {}
         }
         let Some(rate) = extended_to_u32(raw) else {
             return Err(self.reject(DecodeError::Unsupported, AiffDetail::SampleRate { raw }));
@@ -563,30 +655,61 @@ impl AiffDecoder {
             ));
         };
         let bits = sample_size as u8;
-        let format =
-            SourceFormat::with_layout(rate, layout, bits).map_err(|_| DecodeError::Unsupported)?;
+        let format = match kind {
+            SampleType::Float32 => SourceFormat::float(rate, layout, SampleEncoding::Float32),
+            SampleType::Float64 => SourceFormat::float(rate, layout, SampleEncoding::Float64),
+            _ => SourceFormat::with_layout(rate, layout, bits),
+        }
+        .map_err(|_| DecodeError::Unsupported)?;
         self.frames = frames;
         Ok(Layout {
             format,
             bytes: usize::from(bits.div_ceil(8)),
             channels: usize::from(channels),
+            kind,
         })
     }
 
-    /// 完整帧转换为右对齐 `i32`：大端、左对齐、补码（AIFF §Sample Points）。低位填充不属于样本值，
-    /// 算术右移时丢弃。
+    /// 完整帧转换为右对齐 `i32`：左对齐、补码（AIFF §Sample Points），大端或 `sowt` 小端。低位填充
+    /// 不属于样本值，算术右移时丢弃。浮点按位存放（F3 约定），不做数值运算。返回写入的 `i32` 个数。
     fn convert(&mut self, layout: &Layout, src: &[u8]) -> usize {
         let bytes = layout.bytes;
-        let shift = 32 - u32::from(layout.format.bits());
-        let samples = src.len() / bytes;
-        for (o, c) in self.pcm[..samples].iter_mut().zip(src.chunks_exact(bytes)) {
-            let mut w = 0u32;
-            for (k, &x) in c.iter().enumerate() {
-                w |= u32::from(x) << (24 - 8 * k);
+        match layout.kind {
+            SampleType::Float32 => {
+                let n = src.len() / 4;
+                for (o, c) in self.pcm[..n].iter_mut().zip(src.chunks_exact(4)) {
+                    *o = i32::from_be_bytes([c[0], c[1], c[2], c[3]]);
+                }
+                n
             }
-            *o = (w as i32) >> shift;
+            SampleType::Float64 => {
+                // binary64：先低 32 位、后高 32 位。
+                let n = src.len() / 8;
+                for (o, c) in self.pcm[..2 * n]
+                    .chunks_exact_mut(2)
+                    .zip(src.chunks_exact(8))
+                {
+                    o[0] = i32::from_be_bytes([c[4], c[5], c[6], c[7]]);
+                    o[1] = i32::from_be_bytes([c[0], c[1], c[2], c[3]]);
+                }
+                2 * n
+            }
+            kind => {
+                let shift = 32 - u32::from(layout.format.bits());
+                let little = kind == SampleType::Sowt;
+                let samples = src.len() / bytes;
+                for (o, c) in self.pcm[..samples].iter_mut().zip(src.chunks_exact(bytes)) {
+                    let mut w = 0u32;
+                    for (k, &x) in c.iter().enumerate() {
+                        // 第 k 个字节在容器中的位置：大端从最高字节起，小端从最低字节起。
+                        let at = if little { bytes - 1 - k } else { k };
+                        w |= u32::from(x) << (24 - 8 * at);
+                    }
+                    *o = (w as i32) >> shift;
+                }
+                samples
+            }
         }
-        samples
     }
 
     fn step(&mut self, input: &[u8], eof: bool) -> Result<Progress, DecodeError> {
@@ -727,7 +850,7 @@ impl AiffDecoder {
                     let fb = layout.bytes * layout.channels;
                     let n = (avail.len() / fb)
                         .min(frames as usize)
-                        .min(self.pcm.len() / layout.channels);
+                        .min(self.pcm.len() / layout.words_per_frame());
                     if n == 0 {
                         if !eof {
                             return self.need_input(pos, avail.len(), false);
@@ -847,8 +970,8 @@ impl Decoder for AiffDecoder {
     }
 
     fn release(&mut self, frames: usize) {
-        let channels = self.layout.map_or(1, |l| l.channels);
-        let samples = frames.saturating_mul(channels);
+        let words = self.layout.map_or(1, |l| l.words_per_frame());
+        let samples = frames.saturating_mul(words);
         self.start = self.start.saturating_add(samples).min(self.end);
         if self.start == self.end {
             self.start = 0;

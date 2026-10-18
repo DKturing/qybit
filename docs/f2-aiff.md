@@ -10,7 +10,7 @@ Core 最严格，只接受规范定义的内容（用户决定）。拒绝分三
 | --- | --- | --- |
 | 不符合规范 | `Malformed` / `Truncated` | 缺少或重复必需的 chunk、COMM/FVER 长度不符、chunk 越出 FORM、长度为负、FORM 末尾残余字节、`numChannels` < 1、`sampleSize` 不在 1–32、SSND 装不下 COMM 声明的帧、文件比声明的短 |
 | 符合规范但尚不支持 | `Unsupported` | SSND 在 COMM 之前；采样率不是正整数或超出 32 位；FVER 版本不是 AIFCVersion1；`ACE2`/`ACE8`/`MAC3`/`MAC6` 压缩；4、6 声道（规范约定有歧义）；5 声道及以上（规范无约定） |
-| 规范之外的扩展 | `Unsupported` | AIFF-C 原文未定义的 `compressionType`：`sowt`、`twos`、`raw `、`fl32`、`ulaw` 等 |
+| 规范之外的扩展 | `Unsupported` | AIFF-C 原文未定义的 `compressionType`：`raw `、`in24`、`ulaw` 等（`sowt`、`twos`、`fl32`、`fl64` 自 2026-10-18 起由 [F5](f5-aifc-variants.md) 支持） |
 
 ## 2. 实现（`crates/qy-codec-aiff`）
 

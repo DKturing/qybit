@@ -95,11 +95,11 @@ fn wav_and_aiff_share_one_stream_buffer() {
         assert_eq!(d.aiff().is_some(), codec == Codec::Aiff);
     }
     // AIFF 拒绝明细经自动识别给出。
-    let ext = read("../qy-codec-aiff/tests/fixtures/ext_sowt.aiff");
+    let ext = read("../qy-codec-aiff/tests/fixtures/ext_ulaw.aiff");
     assert_eq!(decode_all(&mut d, &ext), Err(DecodeError::Unsupported));
     let detail = d.aiff_detail().map(|x| x.to_string()).unwrap_or_default();
     assert!(
-        detail.contains("规范之外的扩展") && detail.contains("sowt"),
+        detail.contains("规范之外的扩展") && detail.contains("ulaw"),
         "{detail}"
     );
     // 其他 IFF 形式类型：无法识别，写明形式类型。

@@ -164,7 +164,7 @@ fn mixed_playlist_with_wav_and_flac() {
             .chunks_exact(4)
             .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
-    let bad = read(root.join("../qy-codec-aiff/tests/fixtures/ext_sowt.aiff"));
+    let bad = read(root.join("../qy-codec-aiff/tests/fixtures/ext_ulaw.aiff"));
     let tracks = [a.data.clone(), w.data.clone(), bad, flac, a.data.clone()];
     let want: Vec<i32> = [&a.samples, &w.samples, &flac_ref, &a.samples]
         .into_iter()

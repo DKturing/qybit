@@ -1235,7 +1235,7 @@ mod tests {
         use crate::testing::aiff_fixture_path;
         let files = [
             aiff_fixture_path("aiff_16_stereo_44k.aiff"),
-            aiff_fixture_path("ext_sowt.aiff"),
+            aiff_fixture_path("ext_ulaw.aiff"),
         ];
         let mut b = backend(&ALL, FakeDevice::Packet);
         let Ok(mut res) = HostResources::new() else {
@@ -1257,7 +1257,7 @@ mod tests {
         let all = lines.join("\n");
         assert!(!r.finished, "{all}");
         assert!(
-            all.contains("AIFF 错误明细：AIFF-C 规范之外的扩展") && all.contains("'sowt'"),
+            all.contains("AIFF 错误明细：AIFF-C 规范之外的扩展") && all.contains("'ulaw'"),
             "{all}"
         );
         // 独立参考：.expect 中的样本按 16 位小端写出。

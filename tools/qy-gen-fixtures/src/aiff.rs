@@ -130,6 +130,11 @@ struct Case {
     detail: Option<String>,
     vals: Vec<i64>,
     ffmpeg: bool,
+    /// 浮点（F5）的格式后缀（` f32` / ` f64`）；整数为空。浮点的 `vals` 是解码器输出的 `i32` 字
+    /// （binary64 每样本两个字，先低后高）。
+    enc: &'static str,
+    /// 浮点：与 ffmpeg 按 f32le / f64le 原样输出的字节逐位比较。
+    raw: bool,
 }
 
 /// 有效的 AIFF：`ch` 声道、`n` 位、`frames` 帧。
@@ -159,6 +164,8 @@ fn ok(name: &'static str, rate: u32, ch: u16, n: u32, frames: usize, seed: u64) 
         detail: None,
         vals,
         ffmpeg: true,
+        enc: "",
+        raw: false,
     }
 }
 
@@ -171,6 +178,8 @@ fn err(name: &'static str, data: Vec<u8>, result: &'static str, detail: &str) ->
         detail: Some(detail.to_string()),
         vals: Vec::new(),
         ffmpeg: false,
+        enc: "",
+        raw: false,
     }
 }
 
@@ -242,6 +251,8 @@ fn cases() -> Vec<Case> {
             detail: None,
             vals,
             ffmpeg: true,
+            enc: "",
+            raw: false,
         });
     }
 
@@ -270,6 +281,8 @@ fn cases() -> Vec<Case> {
             detail: None,
             vals,
             ffmpeg: true,
+            enc: "",
+            raw: false,
         });
     }
 
@@ -292,6 +305,8 @@ fn cases() -> Vec<Case> {
             detail: None,
             vals,
             ffmpeg: false,
+            enc: "",
+            raw: false,
         });
     }
 
@@ -319,6 +334,8 @@ fn cases() -> Vec<Case> {
             detail: None,
             vals,
             ffmpeg: false,
+            enc: "",
+            raw: false,
         });
     }
 
@@ -336,6 +353,8 @@ fn cases() -> Vec<Case> {
             detail: None,
             vals: Vec::new(),
             ffmpeg: false,
+            enc: "",
+            raw: false,
         });
     }
 
@@ -532,6 +551,8 @@ fn cases() -> Vec<Case> {
             detail: Some(format!("data-short:30:{}", 18 * 4 - 3)),
             vals: vals[..24].to_vec(),
             ffmpeg: false,
+            enc: "",
+            raw: false,
         });
     }
     {
@@ -550,6 +571,8 @@ fn cases() -> Vec<Case> {
             detail: Some("form-short:100".to_string()),
             vals,
             ffmpeg: false,
+            enc: "",
+            raw: false,
         });
     }
     cs.push(Case {
@@ -560,6 +583,8 @@ fn cases() -> Vec<Case> {
         detail: None,
         vals: Vec::new(),
         ffmpeg: false,
+        enc: "",
+        raw: false,
     });
 
     // ---- 合规但尚不支持 ----
@@ -649,12 +674,12 @@ fn cases() -> Vec<Case> {
     }
 
     // ---- 规范之外的扩展 ----
+    // F5 起 `twos`、`sowt`、`fl32`、`fl64` 可以播放（见 `f5_cases`）；其余仍为扩展。
     for (name, tag) in [
-        ("ext_sowt", b"sowt"),
-        ("ext_twos", b"twos"),
         ("ext_raw", b"raw "),
-        ("ext_fl32", b"fl32"),
         ("ext_ulaw", b"ulaw"),
+        ("ext_in24", b"in24"),
+        ("ext_23ni", b"23ni"),
     ] {
         cs.push(err(
             name,
@@ -671,14 +696,208 @@ fn cases() -> Vec<Case> {
             &format!("non-standard:{}", String::from_utf8_lossy(tag)),
         ));
     }
+    f5_cases(&mut cs);
     cs
+}
+
+/// 样本按 N 位左对齐写入 ceil(N/8) 字节，小端（`sowt`）：与 [`encode`] 相同，只是每个样本的字节
+/// 顺序相反。
+fn encode_le(vals: &[i64], n: u32, dirty: Option<u64>) -> Vec<u8> {
+    let bytes = n.div_ceil(8) as usize;
+    let be = encode(vals, n, dirty);
+    be.chunks_exact(bytes)
+        .flat_map(|c| c.iter().rev().copied().collect::<Vec<_>>())
+        .collect()
+}
+
+/// binary32 的特殊值：±0、最小与最大次正规数、最小正规数、1、−1、最大有限值、±∞、静默 NaN、
+/// 带载荷的信号 NaN。
+const F32_SPECIAL: [u32; 12] = [
+    0x0000_0000,
+    0x8000_0000,
+    0x0000_0001,
+    0x007F_FFFF,
+    0x0080_0000,
+    0x3F80_0000,
+    0xBF80_0000,
+    0x7F7F_FFFF,
+    0x7F80_0000,
+    0xFF80_0000,
+    0x7FC0_0000,
+    0x7F80_1234,
+];
+
+const F64_SPECIAL: [u64; 10] = [
+    0x0000_0000_0000_0000,
+    0x8000_0000_0000_0000,
+    0x0000_0000_0000_0001,
+    0x0010_0000_0000_0000,
+    0x3FF0_0000_0000_0000,
+    0xBFE0_0000_0000_0000,
+    0x7FEF_FFFF_FFFF_FFFF,
+    0x7FF0_0000_0000_0000,
+    0xFFF0_0000_0000_0000,
+    0x7FF8_0000_0000_0001,
+];
+
+/// F5：`twos`、`sowt`、`fl32` / `FL32`、`fl64` / `FL64`（tasks/F5.md §2）。
+fn f5_cases(cs: &mut Vec<Case>) {
+    let aifc =
+        |tag: &[u8; 4], ch: u16, frames: usize, bits: i16, rate: u32, data: &[u8], off: u32| {
+            form(
+                b"AIFC",
+                &[
+                    fver(AIFC_V1),
+                    comm_c(
+                        ch as i16,
+                        frames as u32,
+                        bits,
+                        extended(rate.into()),
+                        tag,
+                        "f5",
+                    ),
+                    ssnd(off, data, 0),
+                ],
+                0,
+            )
+        };
+    // ---- 整数：twos 与 sowt，1–32 位 ----
+    // (名称, 类型码, 位数, 声道, 采样率, 种子, ffmpeg 能读)
+    type IntCase = (&'static str, &'static [u8; 4], u32, u16, u32, u64, bool);
+    let ints: [IntCase; 13] = [
+        ("aifc_twos_8_stereo", b"twos", 8, 2, 44_100, 501, true),
+        ("aifc_twos_12_stereo", b"twos", 12, 2, 48_000, 502, true),
+        ("aifc_twos_16_stereo", b"twos", 16, 2, 44_100, 503, true),
+        ("aifc_twos_24_mono", b"twos", 24, 1, 96_000, 504, true),
+        ("aifc_twos_32_stereo", b"twos", 32, 2, 192_000, 505, true),
+        ("aifc_twos_1_mono", b"twos", 1, 1, 44_100, 506, true),
+        ("aifc_sowt_16_stereo", b"sowt", 16, 2, 44_100, 511, true),
+        ("aifc_sowt_12_stereo", b"sowt", 12, 2, 48_000, 512, true),
+        ("aifc_sowt_8_mono", b"sowt", 8, 1, 22_050, 513, false),
+        ("aifc_sowt_20_3ch", b"sowt", 20, 3, 48_000, 514, false),
+        ("aifc_sowt_24_stereo", b"sowt", 24, 2, 96_000, 515, false),
+        ("aifc_sowt_32_mono", b"sowt", 32, 1, 192_000, 516, false),
+        ("aifc_sowt_16_3ch", b"sowt", 16, 3, 48_000, 517, true),
+    ];
+    for (name, tag, n, ch, rate, seed, ffmpeg) in ints {
+        let frames = 200;
+        let vals = if n == 1 {
+            let mut r = Lcg(seed);
+            (0..frames * ch as usize)
+                .map(|_| -((r.next() & 1) as i64))
+                .collect()
+        } else {
+            samples(seed, frames, ch as usize, n)
+        };
+        let bytes = if tag == b"sowt" {
+            encode_le(&vals, n, None)
+        } else {
+            encode(&vals, n, None)
+        };
+        cs.push(Case {
+            name,
+            data: aifc(tag, ch, frames, n as i16, rate, &bytes, 0),
+            result: "ok",
+            fmt: Some((rate, ch, n)),
+            detail: None,
+            vals,
+            // ffmpeg 只把 sowt 当作 16 位小端；16 位以外的 sowt 只用本生成器的独立参考。
+            ffmpeg,
+            enc: "",
+            raw: false,
+        });
+    }
+    // 低位填充非零（不属于样本值，丢弃）；SSND offset ≠ 0。
+    for (name, tag, n, seed) in [
+        ("aifc_sowt_20_dirty_pad_offset", b"sowt", 20u32, 521u64),
+        ("aifc_twos_12_dirty_pad_offset", b"twos", 12, 522),
+    ] {
+        let vals = samples(seed, 150, 2, n);
+        let bytes = if tag == b"sowt" {
+            encode_le(&vals, n, Some(seed))
+        } else {
+            encode(&vals, n, Some(seed))
+        };
+        cs.push(Case {
+            name,
+            data: aifc(tag, 2, 150, n as i16, 44_100, &bytes, 6),
+            result: "ok",
+            fmt: Some((44_100, 2, n)),
+            detail: None,
+            vals,
+            ffmpeg: false,
+            enc: "",
+            raw: false,
+        });
+    }
+    // ---- 浮点：特殊值 + 随机位模式（含 NaN 与 ∞，按位原样） ----
+    let mut r = Lcg(531);
+    let mut f32s: Vec<u32> = F32_SPECIAL.to_vec();
+    f32s.extend((0..2 * 120 - F32_SPECIAL.len()).map(|_| r.next() as u32));
+    let be32: Vec<u8> = f32s.iter().flat_map(|b| b.to_be_bytes()).collect();
+    let words32: Vec<i64> = f32s.iter().map(|&b| i64::from(b as i32)).collect();
+    for (name, tag) in [("aifc_fl32_stereo", b"fl32"), ("aifc_FL32_stereo", b"FL32")] {
+        cs.push(Case {
+            name,
+            data: aifc(tag, 2, 120, 32, 44_100, &be32, 0),
+            result: "ok",
+            fmt: Some((44_100, 2, 32)),
+            detail: None,
+            vals: words32.clone(),
+            ffmpeg: false,
+            enc: " f32",
+            // ffmpeg 只认小写 fl32；FL32 与它字节相同，只用独立参考。
+            raw: tag == b"fl32",
+        });
+    }
+    let mut f64s: Vec<u64> = F64_SPECIAL.to_vec();
+    f64s.extend((0..77 - F64_SPECIAL.len()).map(|_| (r.next() << 11) ^ r.next()));
+    let be64: Vec<u8> = f64s.iter().flat_map(|b| b.to_be_bytes()).collect();
+    let words64: Vec<i64> = f64s
+        .iter()
+        .flat_map(|&b| {
+            [
+                i64::from(b as u32 as i32),
+                i64::from((b >> 32) as u32 as i32),
+            ]
+        })
+        .collect();
+    for (name, tag) in [("aifc_fl64_mono", b"fl64"), ("aifc_FL64_mono", b"FL64")] {
+        cs.push(Case {
+            name,
+            data: aifc(tag, 1, 77, 64, 96_000, &be64, 4),
+            result: "ok",
+            fmt: Some((96_000, 1, 64)),
+            detail: None,
+            vals: words64.clone(),
+            ffmpeg: false,
+            enc: " f64",
+            raw: tag == b"fl64",
+        });
+    }
+    // ---- 拒绝：浮点的 sampleSize 与类型不符 ----
+    for (name, tag, bits, expected) in [
+        ("bad_fl32_size16", b"fl32", 16i16, 32i16),
+        ("bad_fl64_size32", b"fl64", 32, 64),
+        ("bad_FL32_size64", b"FL32", 64, 32),
+    ] {
+        cs.push(err(
+            name,
+            aifc(tag, 2, 1, bits, 44_100, &[0u8; 16], 0),
+            "malformed",
+            &format!(
+                "violation:float-sample-size:{}:{bits}:{expected}",
+                String::from_utf8_lossy(tag)
+            ),
+        ));
+    }
 }
 
 fn expect_text(c: &Case) -> String {
     let mut s = format!("result {}\n", c.result);
     match c.fmt {
         Some((rate, ch, bits)) => {
-            let _ = writeln!(s, "format {rate} {ch} {bits}");
+            let _ = writeln!(s, "format {rate} {ch} {bits}{}", c.enc);
         }
         None => s.push_str("format none\n"),
     }
@@ -731,6 +950,28 @@ pub fn generate(out: &PathBuf) -> Result<()> {
             }
             let bytes: Vec<u8> = reference.iter().flat_map(|x| x.to_le_bytes()).collect();
             std::fs::write(out.join(format!("{}.ffmpeg.s32le", c.name)), bytes)?;
+        }
+        if c.raw {
+            // F5 浮点：ffmpeg 把 fl32 / fl64 原样转为小端浮点，必须与写入的位模式逐位一致（binary64
+            // 的两个字先低后高，即小端字节序）。
+            let f = if c.enc == " f64" { "f64le" } else { "f32le" };
+            let o = Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&path)
+                .args(["-f", f, "-c:a", &format!("pcm_{f}"), "-"])
+                .output()?;
+            if !o.status.success() {
+                return Err(format!("ffmpeg 失败: {}", String::from_utf8_lossy(&o.stderr)).into());
+            }
+            let want: Vec<u8> = c
+                .vals
+                .iter()
+                .flat_map(|&w| (w as i32).to_le_bytes())
+                .collect();
+            if o.stdout != want {
+                return Err(format!("ffmpeg 原样输出与写入的位模式不一致: {}", c.name).into());
+            }
+            std::fs::write(out.join(format!("{}.ffmpeg.raw", c.name)), o.stdout)?;
         }
     }
     println!("{} AIFF cases -> {}", cases.len(), out.display());

@@ -151,6 +151,12 @@ pub fn decode(input: &Path, out: &Path) -> Result<String, String> {
         dev.container_bits(),
         out.display()
     ));
+    // F5：AIFF-C 的非 NONE 未压缩类型写明类型码（twos、sowt、fl32、fl64）。
+    if let Some(t) = d.aiff().and_then(|a| a.sample_type())
+        && !t.is_plain()
+    {
+        msg.push_str(&format!("\n样本类型：{}", t.describe()));
+    }
     if d.skipped_tag_bytes() > 0 {
         msg.push_str(&format!(
             "\n跳过文件开头的 ID3v2 标签 {} 字节（元数据，不含音频）",

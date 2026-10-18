@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use qy_codec_aiff::{AiffDecoder, AiffDetail, Violation};
-use qy_core::{DecodeError, Decoder, PCM_WORK_SAMPLES, Status};
+use qy_core::{DecodeError, Decoder, PCM_WORK_SAMPLES, SampleEncoding, Status};
 
 fn dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -32,6 +32,11 @@ fn detail_text(d: &AiffDetail) -> String {
                 Violation::MissingChunk { id: i } => format!("missing:{}", id(i)),
                 Violation::Channels { value } => format!("channels:{value}"),
                 Violation::SampleSize { value } => format!("sample-size:{value}"),
+                Violation::FloatSampleSize {
+                    tag,
+                    value,
+                    expected,
+                } => format!("float-sample-size:{}:{value}:{expected}", id(tag)),
                 Violation::SsndTooShort { size, needed } => {
                     format!("ssnd-too-short:{size}:{needed}")
                 }
@@ -85,8 +90,8 @@ fn run(d: &mut AiffDecoder, data: &[u8], mut chunk: impl FnMut() -> usize) -> Ou
                 window.drain(..p.consumed);
                 match p.status {
                     Status::Frames(n) => {
-                        let ch = d.format().map_or(1, |f| usize::from(f.channels()));
-                        assert_eq!(d.pcm().len(), n * ch);
+                        let words = d.format().map_or(1, |f| f.words_per_frame());
+                        assert_eq!(d.pcm().len(), n * words);
                         samples.extend_from_slice(d.pcm());
                         d.release(n);
                     }
@@ -123,9 +128,15 @@ fn run(d: &mut AiffDecoder, data: &[u8], mut chunk: impl FnMut() -> usize) -> Ou
     }
 }
 
+/// 格式文本：整数为“采样率 声道 位数”，浮点（F5）另加 ` f32` / ` f64`。
 fn fmt(d: &AiffDecoder) -> String {
     d.format().map_or("none".into(), |f| {
-        format!("{} {} {}", f.sample_rate(), f.channels(), f.bits())
+        let enc = match f.encoding() {
+            SampleEncoding::Int => "",
+            SampleEncoding::Float32 => " f32",
+            SampleEncoding::Float64 => " f64",
+        };
+        format!("{} {} {}{enc}", f.sample_rate(), f.channels(), f.bits())
     })
 }
 
@@ -207,6 +218,12 @@ fn fixtures_match_independent_reference_under_any_chunking() {
             assert_eq!(whole.samples, reference, "{name} ffmpeg");
             ffmpeg += 1;
         }
+        // F5 浮点：ffmpeg 按 f32le / f64le 原样输出的字节与解码出的位模式（binary64 先低后高）逐位一致。
+        if let Ok(bytes) = std::fs::read(dir().join(format!("{name}.ffmpeg.raw"))) {
+            let ours: Vec<u8> = whole.samples.iter().flat_map(|w| w.to_le_bytes()).collect();
+            assert!(ours == bytes, "{name} ffmpeg 原样输出");
+            ffmpeg += 1;
+        }
     }
     assert!(ffmpeg >= 14, "ffmpeg 参考数 {ffmpeg}");
 }
@@ -227,9 +244,9 @@ fn detail_categories_and_text() {
             "符合规范但本程序尚不支持：SSND",
         ),
         (
-            AiffDetail::NonStandardType { tag: *b"sowt" },
+            AiffDetail::NonStandardType { tag: *b"ulaw" },
             Category::Extension,
-            "AIFF-C 规范之外的扩展，本程序不支持：compressionType 'sowt'",
+            "AIFF-C 规范之外的扩展，本程序不支持：compressionType 'ulaw'",
         ),
         (
             AiffDetail::AmbiguousLayout { channels: 4 },

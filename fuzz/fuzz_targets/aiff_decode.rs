@@ -1,7 +1,7 @@
 //! AIFF / AIFF-C 解码 fuzz 目标（F2）。
 //!
 //! 输入首字节作为分块与取出种子，其余为文件内容。检查：不 panic；消耗量不越界；EOF 后不返回
-//! NeedInput；输出样本都在 N 位有符号范围内；分块输入与一次性输入的结果、拒绝明细（含类别）、
+//! NeedInput；整数输出样本都在 N 位有符号范围内（F5 的浮点为位模式，不检查范围）；分块输入与一次性输入的结果、拒绝明细（含类别）、
 //! 格式与样本完全一致；明细中的长度数值不超出输入长度能解释的范围。
 #![no_main]
 
@@ -39,13 +39,17 @@ fn run(
                         let Some(f) = dec.format() else {
                             panic!("有 PCM 却无格式");
                         };
-                        let ch = usize::from(f.channels());
+                        // 每帧的字数（F5：binary64 浮点每样本两个字）。
+                        let ch = f.words_per_frame();
                         let avail = dec.pcm().len() / ch;
                         assert!(avail > 0 && dec.pcm().len() % ch == 0);
-                        let lim = 1i64 << (f.bits() - 1);
                         let k = take(avail).clamp(1, avail);
-                        for &s in &dec.pcm()[..k * ch] {
-                            assert!((-lim..lim).contains(&i64::from(s)));
+                        // 整数样本在 N 位有符号范围内；浮点是位模式，任何值都合法。
+                        if !f.encoding().is_float() {
+                            let lim = 1i64 << (f.bits() - 1);
+                            for &s in &dec.pcm()[..k * ch] {
+                                assert!((-lim..lim).contains(&i64::from(s)));
+                            }
                         }
                         out.extend_from_slice(&dec.pcm()[..k * ch]);
                         dec.release(k);

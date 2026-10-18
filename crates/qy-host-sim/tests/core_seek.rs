@@ -94,7 +94,8 @@ fn play<D: Decoder>(
                 let Some(pcm) = core.pcm() else {
                     panic!("Output 时应有 PCM");
                 };
-                let ch = usize::from(pcm.format().channels());
+                // 每帧的字数（binary64 浮点每样本两个字，F5 的 AIFF-C fl64）。
+                let ch = pcm.format().words_per_frame();
                 run.out.extend_from_slice(&pcm.samples()[..k * ch]);
                 assert_eq!(
                     core.handle(Event::Output {
@@ -179,6 +180,7 @@ fn play<D: Decoder>(
 struct Fx {
     name: String,
     data: Vec<u8>,
+    /// 每帧的字数：声道数，binary64 浮点时为声道数 × 2。
     channels: usize,
     samples: Vec<i32>,
     /// 解码器能定位（否则核心就地顺序解码，不发 `Seek`）：FLAC 总样本数未知且没有定位表时不能。
@@ -192,11 +194,18 @@ fn load(path: &Path) -> Option<Fx> {
     if lines.next()? != "result ok" {
         return None;
     }
-    let channels = text
+    let format: Vec<&str> = text
         .lines()
-        .find_map(|l| l.strip_prefix("format "))
-        .and_then(|l| l.split(' ').nth(1))
-        .and_then(|c| c.parse().ok())?;
+        .find_map(|l| l.strip_prefix("format "))?
+        .split(' ')
+        .collect();
+    let channels: usize = format.get(1).and_then(|c| c.parse().ok())?;
+    // F5：AIFF-C fl64 的 `.expect` 以 ` f64` 结尾，每样本两个字。
+    let channels = if format.get(3) == Some(&"f64") {
+        channels * 2
+    } else {
+        channels
+    };
     let samples = text
         .lines()
         .skip_while(|l| !l.starts_with("samples "))
