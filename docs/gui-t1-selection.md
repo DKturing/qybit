@@ -108,5 +108,5 @@
 
 - **界面模型层**（与平台无关，纯安全 Rust）：播放列表、播放状态快照、控制命令、各状态的显示文字、后台读取文件头取得时长与格式。可在任何平台上做自动测试。
 - **Windows 前端**：只把模型映射到系统控件（工具栏按钮、设备下拉框、虚拟 ListView、状态栏、菜单、文件对话框、拖放）。调用 Win32 的 `unsafe` 集中在一个模块，按 AGENTS §2 单独审计。
-- **Linux 前端**（Linux 阶段）：同一模型映射到 GTK4 控件（`gtk4` crate，MIT）。
+- **Linux 前端**（Linux 阶段）：原定同一模型映射到 GTK4 控件（`gtk4` crate，MIT）。2026-10-18 改为自绘界面：A1 之后 Linux 版是与发行版无关的静态程序，GTK4 无法静态打包；原型与测量见 [gui-linux-prototype.md](gui-linux-prototype.md)。
 - Slint 不使用；第一轮记录保留作为比较依据。

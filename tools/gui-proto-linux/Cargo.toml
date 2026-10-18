@@ -1,0 +1,44 @@
+# Linux 自绘界面原型（LG0）：独立 Cargo 项目，不在工作区内，依赖版本锁定在本目录的 Cargo.lock。
+# 两种窗口后端共用同一绘制层（src/ui.rs）：
+# - proto-winit：winit + softbuffer（X11 与 Wayland，系统库运行时加载，需要动态链接的 libc）；
+# - proto-x11：x11rb 的纯 Rust X11 协议实现，可用 musl 完全静态链接。
+[package]
+name = "gui-proto-linux"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[workspace]
+
+[features]
+default = ["winit-backend", "x11-backend"]
+winit-backend = ["dep:winit", "dep:softbuffer"]
+x11-backend = ["dep:x11rb"]
+
+[dependencies]
+# 绘制：矩形、圆角（纯 Rust 软件光栅化）
+tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "simd"] }
+# 文字：排版、字体回退（fontdb 直接读系统字体目录与 fontconfig 配置文件，不链接 libfontconfig）、swash 光栅化
+cosmic-text = "=0.15.0"
+winit = { version = "=0.30.13", optional = true }
+softbuffer = { version = "=0.4.8", optional = true }
+x11rb = { version = "=0.13.2", optional = true, default-features = false }
+
+[[bin]]
+name = "proto-winit"
+required-features = ["winit-backend"]
+
+[[bin]]
+name = "proto-x11"
+required-features = ["x11-backend"]
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 4
+
+# 测试用 XDND 拖放源（核对 proto-x11 的文件拖放接收）
+[[bin]]
+name = "xdnd-send"
+required-features = ["x11-backend"]

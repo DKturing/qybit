@@ -1,0 +1,93 @@
+# LG0：Linux 自绘界面原型（tools/gui-proto-linux，记录见 docs/gui-linux-prototype.md）。
+# - 五个架构的 musl 静态 proto-x11 作为构件，供用户在自己的机器上试运行；
+# - 在 Xvfb 中复测两种后端（空闲 CPU、内存、绘制/提交耗时、加载的共享库），核对拖放并截图。
+name: Linux 界面原型
+
+on:
+  push:
+    paths:
+      - "tools/gui-proto-linux/**"
+      - ".github/workflows/gui-proto-linux.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: 静态原型 (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, arch: x86_64 }
+          - { target: aarch64-unknown-linux-musl, arch: aarch64 }
+          - { target: armv7-unknown-linux-musleabihf, arch: armv7 }
+          - { target: loongarch64-unknown-linux-musl, arch: loongarch64 }
+          - { target: riscv64gc-unknown-linux-musl, arch: riscv64 }
+    defaults:
+      run:
+        working-directory: tools/gui-proto-linux
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show && rustup target add ${{ matrix.target }}
+      - name: 构建
+        run: cargo build --locked --release --no-default-features --features x11-backend --bin proto-x11 --target ${{ matrix.target }}
+      - name: 核对为静态程序
+        run: |
+          f=target/${{ matrix.target }}/release/proto-x11
+          file "$f"
+          if readelf -lW "$f" | grep -q INTERP; then echo "::error::有程序解释器（动态链接）"; exit 1; fi
+          if readelf -dW "$f" | grep -q NEEDED; then echo "::error::依赖动态库"; exit 1; fi
+          echo "${{ matrix.target }}：$(stat -c %s "$f") 字节，静态" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qybit-gui-proto-${{ matrix.arch }}
+          path: tools/gui-proto-linux/target/${{ matrix.target }}/release/proto-x11
+          if-no-files-found: error
+
+  measure:
+    name: Xvfb 测量与截图
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/gui-proto-linux
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show && rustup target add x86_64-unknown-linux-musl
+      - name: 安装 Xvfb、中文字体与工具
+        run: sudo apt-get update && sudo apt-get install -y xvfb imagemagick xdotool fonts-wqy-zenhei libxkbcommon-x11-0
+      - name: 构建
+        run: |
+          cargo build --locked --release
+          cargo build --locked --release --no-default-features --features x11-backend --bin proto-x11 --target x86_64-unknown-linux-musl
+      - name: 测量
+        run: |
+          Xvfb :91 -screen 0 1280x800x24 &
+          sleep 2
+          export DISPLAY=:91
+          out=$RUNNER_TEMP/proto
+          ./measure.sh target/x86_64-unknown-linux-musl/release/proto-x11 "$out" | tee -a "$GITHUB_STEP_SUMMARY"
+          ./measure.sh target/release/proto-winit "$out" | grep -v '^  ' | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: 拖放与截图
+        run: |
+          export DISPLAY=:91
+          out=$RUNNER_TEMP/proto
+          QY_PROTO_STATIC=1 target/x86_64-unknown-linux-musl/release/proto-x11 &
+          pid=$!
+          sleep 2
+          w=$(xdotool search --name "QyBit prototype" | head -1)
+          target/release/xdnd-send "$w" "/音乐/测试 专辑/01 曲目.flac" "/tmp/a b%c.wav" | tee -a "$GITHUB_STEP_SUMMARY"
+          sleep 0.5
+          import -window root "$out/proto-x11-drop.png"
+          kill $pid
+          QY_PROTO_STATIC=1 target/release/proto-winit &
+          pid=$!
+          sleep 2
+          import -window root "$out/proto-winit.png"
+          kill $pid
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-proto-measure
+          path: ${{ runner.temp }}/proto

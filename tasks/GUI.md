@@ -21,7 +21,7 @@ AGENTS 中 M0 不做的交互设备选择与拖放，在本卡只对 GUI 放开�
 
 **定位（seek）**：属于核心能力，另立任务卡 [tasks/S1.md](S1.md)，已完成软件部分（[docs/s1-seek.md](../docs/s1-seek.md)）：工具栏下方的进度条（拖动预览、松开定位，总时长未知时不可用），列表中 ←/→ 定位 ±5 秒。状态栏的“只显示，不可拖动定位”由此改为可定位。
 
-## T1：技术选型（已完成：Windows 原生控件，Linux 用 GTK4，共用界面模型层；见 docs/gui-t1-selection.md）
+## T1：技术选型（已完成：Windows 原生控件，共用界面模型层；见 docs/gui-t1-selection.md。Linux 原定 GTK4，2026-10-18 用户改为自绘界面，原型与测量见 docs/gui-linux-prototype.md，Linux 前端另立任务卡）
 
 - 纯 Rust，不嵌入 WebView、不依赖 Node/Python；候选 egui/eframe、iced、slint，按以下标准比较后选定一个并记录理由：Windows 支持（首要）、Linux 支持、表格/列表控件、文件拖放、系统文件对话框（可用 rfd 等成熟 crate）、二进制大小、依赖数量与许可证、是否需要系统运行库、空闲 CPU 占用。
 - 依赖锁定版本，新增依赖说明用途。
