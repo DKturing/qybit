@@ -28,6 +28,12 @@ pub enum Role {
 
 /// 拆分元素名：（基名, 方向, 作用）。
 pub fn split_name(name: &str) -> (&str, Dir, Role) {
+    // alsa-lib `base_len` 的特例：这两个名称本身就是录音方向的总控制。
+    match name {
+        "Capture Volume" => return ("Capture", Dir::Capture, Role::Volume),
+        "Capture Switch" => return ("Capture", Dir::Capture, Role::Switch),
+        _ => {}
+    }
     const SUFFIXES: [(&str, Dir, Role); 6] = [
         (" Playback Volume", Dir::Playback, Role::Volume),
         (" Playback Switch", Dir::Playback, Role::Switch),
@@ -37,8 +43,10 @@ pub fn split_name(name: &str) -> (&str, Dir, Role) {
         (" Switch", Dir::Unspecified, Role::Switch),
     ];
     for (suffix, dir, role) in SUFFIXES {
+        // 基名以 “-” 结尾时不拆分（alsa-lib：如 “3D Control - Switch”）。
         if let Some(base) = name.strip_suffix(suffix)
             && !base.is_empty()
+            && !base.ends_with('-')
         {
             return (base, dir, role);
         }
@@ -168,12 +176,12 @@ impl Control {
                 Some("关".into())
             }
             Kind::Integer { min, max, .. } if self.role() == Role::Volume => {
-                let mute = |v: i64| {
-                    v <= *min
-                        || self
-                            .db
-                            .as_ref()
-                            .is_some_and(|d| d.to_db(v, *min, *max) == Some(Db::Mute))
+                // 有 dB 信息时：静音，或最小档且增益低于 0 dB（最小档为 0 dB 的增益控制，如
+                // 话筒增强，不使声音变小）；没有 dB 信息时：最小档。
+                let mute = |v: i64| match self.db.as_ref().map(|d| d.to_db(v, *min, *max)) {
+                    Some(Some(Db::Mute)) => true,
+                    Some(Some(Db::Centi(c))) => v <= *min && c < 0,
+                    _ => v <= *min,
                 };
                 self.values.iter().all(|&v| mute(v)).then(|| {
                     let v = self.values[0];
@@ -374,7 +382,8 @@ pub fn groups(controls: &[Control]) -> Vec<Group<'_>> {
     out
 }
 
-/// 播放方向（含未写明方向）中处于关闭或最小音量的组，如 `Master（关；0%，-65.25 dB）`。
+/// 播放方向（含未写明方向）中处于关闭或最小音量的组，如 `Master（0%，-65.25 dB；关）`。
+/// 最小音量：静音，或最小档且增益低于 0 dB；没有 dB 信息时为最小档。
 pub fn silent_playback(controls: &[Control]) -> Vec<String> {
     groups(controls)
         .iter()
@@ -540,6 +549,19 @@ mod tests {
             split_name("Auto-Mute Mode"),
             ("Auto-Mute Mode", Dir::Unspecified, Role::Other)
         );
+        // alsa-lib 的特例与 “-” 规则。
+        assert_eq!(
+            split_name("Capture Volume"),
+            ("Capture", Dir::Capture, Role::Volume)
+        );
+        assert_eq!(
+            split_name("Capture Switch"),
+            ("Capture", Dir::Capture, Role::Switch)
+        );
+        assert_eq!(
+            split_name("3D Control - Switch"),
+            ("3D Control - Switch", Dir::Unspecified, Role::Other)
+        );
         // 名称就是后缀本身时不拆成空基名。
         assert_eq!(
             split_name(" Volume"),
@@ -556,7 +578,7 @@ mod tests {
             lines[0],
             "Master（播放）：音量 0（范围 0..87），0%，-65.25 dB；开关 关"
         );
-        assert_eq!(lines[2], "Capture：音量 39（范围 0..63），62%");
+        assert_eq!(lines[2], "Capture（录音）：音量 39（范围 0..63），62%");
         assert_eq!(lines[3], "Mic（录音）：开关 开");
         assert_eq!(
             lines[4],
@@ -582,6 +604,18 @@ mod tests {
                 "Mic（0%；关）".to_string()
             ]
         );
+        // 用户机器上的形式（2026-10-18）：最小档为 0 dB 的增益控制（话筒增强）不算最小音量；
+        // 名为 Capture Volume / Capture Switch 的是录音方向，不列出。
+        let mut more = c.clone();
+        let boost_db = Some(DbInfo::Scale {
+            min: 0,
+            step: 1000,
+            mute: false,
+        });
+        more.push(ctl("Mic Boost Volume", vol(0, 3), &[0, 0], boost_db));
+        more.push(ctl("Capture Switch", Kind::Boolean, &[0, 0], None));
+        more[4].values = vec![0, 0];
+        assert_eq!(silent_playback(&more), silent_playback(&c));
         // 打开后不再列出；录音方向从不列出。
         let mut on = c.clone();
         on[0].values = vec![40, 40];

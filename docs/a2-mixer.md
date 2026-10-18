@@ -43,13 +43,16 @@ qybit mixer --device hw:CARD=Generic_1 'Auto-Mute Mode' Disabled
 > 提示：声卡 Generic_1（HD-Audio Generic）的混音器中，以下播放控制处于关闭或最小音量：Master（0%，-65.25 dB；关）、Mic（0%；关）……
 
 - 只作提示，不阻止播放，不自动改动。
+- “最小音量”指静音，或最小档且增益低于 0 dB；没有 dB 信息时为最小档。最小档为 0 dB 的增益控制（如话筒增强 `Mic Boost`）不会让声音变小，所以不列出。
 - 规则对所有声卡相同，不按控制名或设备型号写特例。所以本来就该关闭的控制（如话筒监听 Mic Playback）也会列出，提示中写明了这一点。
+- 按 alsa-lib `base_len` 的规则：`Capture Volume` / `Capture Switch` 是录音方向的总控制，不列出；基名以 `-` 结尾时不拆分。
+  - 2026-10-18 用户真机上第一版提示列出了 `Capture`、`Mic Boost`、`Internal Mic Boost`，按上面两条修正。
 
 ## 3. 保真
 
 - 只调设备自身的硬件控制（编解码器的放大器与静音、USB 设备的功能单元等）。送到设备的数据不变，软件增益仍恒为 1。
 - 只在用户明确运行命令时改动（AGENTS §3）。
-- QyBit 不保存、不恢复混音器状态。内核在重启后恢复驱动默认值，需要时重新运行命令即可。
+- QyBit 不保存、不恢复混音器状态（§7）。
 
 ## 4. 实现
 
@@ -71,7 +74,7 @@ qybit mixer --device hw:CARD=Generic_1 'Auto-Mute Mode' Disabled
 | 纯函数 | 名称分组、显示文字、值解析、百分比 ↔ 原始值（含步长）、dB 目标取档、名称匹配、提示规则；dB TLV 四种类型与容器、损坏与嵌套过深的输入；`snd_ctl_elem_list` 布局（64 位对照头文件编译值，32 位按头文件布局）与常量 | 通过，含 qemu-user 下的 32 位 armv7 |
 | 用户机器的数值 | DB_SCALE −65.25 dB、每档 0.75 dB、0..87：0 档 −65.25 dB、87 档 0 dB，与 amixer 一致 | 通过（单元测试） |
 | QEMU 虚拟机（snd-dummy，`tests/mixer.rs`） | 见下 | x86_64、aarch64、armv7（经 64 位内核的 32 位兼容层）通过 |
-| 用户机器真实声卡 | 打开 Master 后 3.5 mm 耳机出声 | **未运行** |
+| 用户机器真实声卡（2026-10-18） | `Master 40% on` 读回 35/87、−39.00 dB、开；之后 3.5 mm 耳机出声，读回一致、无欠载 | 通过（真机，用户运行） |
 
 虚拟机中的检查。期望值按 `sound/drivers/dummy.c` 与 alsa-lib 换算规则独立算出：`Master Volume` 范围 −50..100，−45 dB 起每档 0.30 dB。
 
@@ -103,3 +106,27 @@ qybit mixer --device hw:CARD=Generic_1 'Auto-Mute Mode' Disabled
 - 播放前先把耳机从耳朵上拿开，或者从较低的音量开始。
 - 如果列表里还有 Headphone、Front、Speaker 等处于关闭或 0% 的控制，同样打开。
 - 如果有 `Auto-Mute Mode`，可试 `Disabled`。
+
+## 7. 设置是否持久
+
+混音器的值保存在内核驱动中，直到重启、驱动重新加载或设备重新插拔（USB 设备）为止。开机时驱动回到默认值，HD-Audio 编解码器的默认值常常是静音。QyBit 不保存状态，要开机后自动生效，有两种做法：
+
+- **装有 alsa-utils 时**：`sudo alsactl store` 把当前状态保存到 `/var/lib/alsa/asound.state`。Debian 的 alsa-utils 软件包带有开机恢复（udev 规则与 `alsa-restore` 服务），通常也会在关机时自动保存。
+- **不装 alsa-utils 时**：开机运行一次 `qybit mixer`，例如一个 systemd 服务：
+
+```
+# /etc/systemd/system/qybit-mixer.service
+[Unit]
+Description=QyBit：打开声卡混音器
+After=sound.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/qybit mixer --device hw:CARD=Generic_1 Master 40% on
+
+[Install]
+WantedBy=multi-user.target
+```
+
+  然后运行 `sudo systemctl enable qybit-mixer.service`。
+
