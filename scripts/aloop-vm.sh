@@ -100,9 +100,14 @@ for t in $TARGETS; do
     done
 done
 
+# 软件仿真（aarch64，或 x86_64 没有 KVM）时 CPU 慢：B 层播放端用 16 个周期（160 ms）的设备缓冲，
+# 留出时序余量；只影响缓冲长度，不影响比对与欠载判定。KVM 下用后端默认值。
+aloop_periods=""
+if [ "$ARCH" != x86_64 ] || [ ! -w /dev/kvm ]; then aloop_periods=16; fi
 cat > "$I/init" <<EOF
 #!/bin/sh
 TARGETS="$TARGETS"
+[ -n "$aloop_periods" ] && export QYBIT_ALOOP_PERIODS=$aloop_periods
 EOF
 cat >> "$I/init" <<'EOF'
 mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev; mount -t tmpfs tmp /tmp

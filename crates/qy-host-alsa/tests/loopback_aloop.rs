@@ -4,6 +4,9 @@
 //! `scripts/aloop-loopback.sh`，或
 //! `cargo test -p qy-host-alsa --test loopback_aloop -- --ignored --nocapture --test-threads=1`。
 //! 可用 `QYBIT_ALOOP_CARD`（默认 `Loopback`）与 `QYBIT_ALOOP_SUBDEV`（默认 0）指定设备。
+//! `QYBIT_ALOOP_PERIODS` 指定播放端设备缓冲的周期数（缺省为后端默认值）：软件仿真的虚拟机中
+//! CPU 慢，`scripts/aloop-vm.sh` 设为 16 以留出时序余量；只影响缓冲长度，不影响比对的字节与
+//! 欠载判定（欠载照样记为失败）。
 //!
 //! 每个用例先以与播放端相同的格式打开 `hw:<卡>,1,<子设备>` 回录，再经真实播放路径
 //! （核心 → 自有解码 → pack → 短写渲染 → 内核 ALSA 接口）向 `hw:<卡>,0,<子设备>` 播放
@@ -29,6 +32,19 @@ use qy_player::{HostResources, play};
 /// 尾部静音垫片的时长：采样率 / 10 帧（100 ms），远大于 snd-aloop 一次复制的量（一个定时器
 /// 间隔，不超过一个周期 = 10 ms）。
 const PAD_DIVISOR: u32 = 10;
+
+/// 播放端后端；周期数可由 `QYBIT_ALOOP_PERIODS` 指定。
+fn backend(dev: &Devices) -> AlsaBackend<KernelOpener, RtPriority> {
+    let mut b = AlsaBackend::new(dev.playback.clone(), KernelOpener, RtPriority::default());
+    if let Some(p) = std::env::var("QYBIT_ALOOP_PERIODS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&p| (2..=64).contains(&p))
+    {
+        b.periods = p;
+    }
+    b
+}
 
 struct Devices {
     playback: String,
@@ -98,7 +114,7 @@ fn loop_once(
     );
     let mut all = files.to_vec();
     all.push(pad);
-    let mut b = AlsaBackend::new(dev.playback.clone(), KernelOpener, RtPriority::default());
+    let mut b = backend(dev);
     b.forced = forced;
     let r = play(&mut b, res, &all);
     // 等回录取走最后的数据。
@@ -155,7 +171,7 @@ fn aloop_loopback_matrix() {
         if case.source_bits > case.format.valid_bits() {
             // N > V：设备选择阶段即须拒绝，不打开回录。
             let tracks = make_tracks(&dir, &format!("c{i}"), &case, 256, 2000 + i as u64);
-            let mut b = AlsaBackend::new(dev.playback.clone(), KernelOpener, RtPriority::default());
+            let mut b = backend(&dev);
             b.forced = Some(case.format);
             let r = play(&mut b, &mut res, &[tracks.test_path]);
             let verdict = if r.streams.is_empty() && !r.open_failures.is_empty() {

@@ -175,6 +175,8 @@ aarch64（同版本 arm64 内核，qemu virt，软件仿真）结果：
 
 CI（run 39058369531，提交 6dc07fc，2026-10-17）：`linux-static` 五个架构全部通过（构建、静态核对、`qybit --version`、单元测试，构件已上传）；`loopback-aloop` 两个虚拟机全部通过：x86_64 用 KVM（`-accel kvm -cpu host`），aarch64 用软件仿真，aarch64 与 armv7 程序的设备列表、内核直连单元测试、设备测试与 B 层回环全部为 0（通过）。报告见构件 `qybit-alsa-vm-x86_64`、`qybit-alsa-vm-aarch64`。
 
+2026-10-18：软件仿真的 aarch64 虚拟机中 B 层又出现 1 项欠载（60 帧，如实报告为失败）。此后 `scripts/aloop-vm.sh` 在软件仿真（aarch64，或 x86_64 没有 KVM）时设 `QYBIT_ALOOP_PERIODS=16`：播放端设备缓冲为 16 个周期（160 ms），默认是 4 个周期（40 ms）。这只增加时序余量，比对的字节、同步规则与欠载判定都不变；KVM 与真机仍用默认值。
+
 虚拟回环经过真实内核 ALSA 路径，但不经过任何真实驱动与 DAC，不证明设备端 bit-perfect。
 
 ## 9. 用户机器上的测试步骤（真实声卡，x86_64）
