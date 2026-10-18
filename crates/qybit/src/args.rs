@@ -5,18 +5,12 @@ use std::path::PathBuf;
 pub const USAGE: &str = "\
 用法:
   qybit list-devices                         列出可用输出设备（Windows：端点 ID 与名称；Linux：hw 设备名）
-  qybit --device <设备> [--container 16|24|32] [--mono-to-stereo] [--float-to-int] <文件>...
+  qybit --device <设备> [--container 16|24|32] [--mono-to-stereo] [--float-to-int]
+        [--volume <N>%|off] [--volume-control <控制>] <文件>...
                                              按顺序播放 WAV/FLAC/AIFF（按文件头识别）；Ctrl+C 停止并输出报告
   qybit matrix --device <设备> [--out <目录>]
                                              运行设备格式矩阵，写出 JSON/CSV 报告
-  qybit mixer --device <设备> [<控制>[,<序号>] <值>...]
-                                             Linux：列出或设置声卡的硬件混音器（静音开关与音量）；值为
-                                             on、off、40%、-20dB、原始值或枚举项名称。只调设备自身的
-                                             硬件控制，送出的数据不变
-  qybit mixer --device <设备> --save|--restore [--file <路径>]
-                                             Linux：保存或恢复该卡的混音器状态（缺省文件
-                                             ~/.config/qybit/mixer-<声卡 id>.txt）；恢复时逐项核对，
-                                             不符的跳过并说明
+  qybit mixer --device <设备>                Linux：列出声卡的硬件混音器（静音开关、音量、dB），只读
   qybit decode <输入> <输出.wav>              诊断：自有解码 + pack 写成标准 WAV，可用任何播放器试听
   qybit tone <输出.wav|.aiff> [--rate 44100] [--bits 16|24|32 | --float 32|64] [--seconds 5] [--freq 1000]
                                              诊断：写一个双声道正弦测试音（约 −12 dBFS）；输出文件扩展名为
@@ -40,14 +34,25 @@ PowerShell 会把未加引号的 {…} 当成脚本块，端点 ID 要加单引�
 超出 ±1.0 的样本限幅）。报告标为“样本已改变”，并给出不精确与限幅的样本数；遇到 NaN 或无穷时该曲目
 在该处停止。
 
+--volume（Linux）：播放期间把设备自身的硬件音量设为 N%（默认 40%，百分比与 alsamixer 相同），并打开
+该组的静音开关，播放结束或 Ctrl+C 后恢复原值；off 为不调整。只调设备的硬件控制，送出的数据不变；
+设备没有可用的硬件音量时照常播放并说明原因，不以软件缩放代替。控制按标准名称 Master、PCM 选择，
+--volume-control 可指定（如 Headphone）。进程被强制结束（如连按两次 Ctrl+C）时来不及恢复。
+
 退出码：0 完整播放；2 播放完成但有欠载；1 失败（含设备不支持、打开失败、设备错误、中断）。";
 
-/// 混音器状态文件操作（A3）。
+/// 播放期间的设备硬件音量（Linux，tasks/A4.md）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MixerState {
-    Save,
-    Restore,
+pub enum Volume {
+    /// 未给出：Linux 用 [`DEFAULT_VOLUME_PERCENT`]。
+    Default,
+    Percent(u32),
+    Off,
 }
+
+/// 未给出 `--volume` 时的音量（2026-10-18 用户决定；只用于 Linux）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub const DEFAULT_VOLUME_PERCENT: u32 = 40;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -60,19 +65,18 @@ pub enum Command {
         mono_to_stereo: bool,
         /// 明确开启的浮点转整数（tasks/F3.md）。
         float_to_int: bool,
+        /// 播放期间的设备硬件音量（tasks/A4.md）。
+        volume: Volume,
+        /// 调整音量所用的控制名（缺省按标准名称选择）。
+        volume_control: Option<String>,
     },
     Matrix {
         device: String,
         out: PathBuf,
     },
-    /// 声卡硬件混音器（Linux，tasks/A2.md）：`control` 为空且 `state` 为空时列出；
-    /// `state` 为保存或恢复状态文件（tasks/A3.md）。
+    /// 列出声卡硬件混音器（Linux，tasks/A2.md，只读）。
     Mixer {
         device: String,
-        control: Option<String>,
-        values: Vec<String>,
-        state: Option<MixerState>,
-        file: Option<PathBuf>,
     },
     Decode {
         input: PathBuf,
@@ -186,52 +190,18 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         }
         Some("mixer") => {
             let mut device = None;
-            let mut rest = Vec::new();
-            let mut state = None;
-            let mut file = None;
             while let Some(a) = it.next() {
-                if a == "--device" {
-                    device = Some(device_value(&mut it)?);
-                } else if a == "--save" || a == "--restore" {
-                    let s = if a == "--save" {
-                        MixerState::Save
-                    } else {
-                        MixerState::Restore
-                    };
-                    if state.is_some_and(|x| x != s) {
-                        return Err("--save 与 --restore 只能选一个".into());
+                match a {
+                    "--device" => device = Some(device_value(&mut it)?),
+                    x => {
+                        return Err(format!(
+                            "mixer 只用于查看，不接受参数 {x}；播放音量用 --volume 指定"
+                        ));
                     }
-                    state = Some(s);
-                } else if a == "--file" {
-                    file = Some(PathBuf::from(value(&mut it, "--file")?));
-                } else if a.starts_with("--") {
-                    return Err(format!("未知参数：{a}"));
-                } else {
-                    rest.push(a.to_string());
                 }
             }
-            let device = device.ok_or("mixer 需要 --device <hw 设备>")?;
-            if state.is_some() && !rest.is_empty() {
-                return Err("--save / --restore 不能与设置控制同时使用".into());
-            }
-            if state.is_none() && file.is_some() {
-                return Err("--file 只用于 --save 或 --restore".into());
-            }
-            let mut rest = rest.into_iter();
-            let control = rest.next();
-            let values: Vec<String> = rest.collect();
-            if control.is_some() && values.is_empty() {
-                return Err(
-                    "设置混音器控制需要值，例如：qybit mixer --device hw:CARD=X Master 40% on"
-                        .into(),
-                );
-            }
             Ok(Command::Mixer {
-                device,
-                control,
-                values,
-                state,
-                file,
+                device: device.ok_or("mixer 需要 --device <hw 设备>")?,
             })
         }
         Some("--device") => {
@@ -240,8 +210,25 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             let mut container = None;
             let mut mono_to_stereo = false;
             let mut float_to_int = false;
+            let mut volume = Volume::Default;
+            let mut volume_control = None;
             while let Some(a) = it.next() {
-                if a == "--mono-to-stereo" {
+                if a == "--volume" {
+                    let v = value(&mut it, "--volume")?;
+                    volume = match v.as_str() {
+                        "off" => Volume::Off,
+                        x => match x.strip_suffix('%').and_then(|n| n.parse::<u32>().ok()) {
+                            Some(n) if n <= 100 => Volume::Percent(n),
+                            _ => {
+                                return Err(format!(
+                                    "--volume 只接受 0%..100% 的整数百分比或 off，收到 {x}"
+                                ));
+                            }
+                        },
+                    };
+                } else if a == "--volume-control" {
+                    volume_control = Some(value(&mut it, "--volume-control")?);
+                } else if a == "--mono-to-stereo" {
                     mono_to_stereo = true;
                 } else if a == "--float-to-int" {
                     float_to_int = true;
@@ -267,6 +254,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 container,
                 mono_to_stereo,
                 float_to_int,
+                volume,
+                volume_control,
             })
         }
         Some(x) if !x.starts_with('-') => Err(format!(
@@ -322,6 +311,8 @@ mod tests {
                 container: None,
                 mono_to_stereo: false,
                 float_to_int: false,
+                volume: Volume::Default,
+                volume_control: None,
             })
         );
         assert_eq!(
@@ -332,6 +323,8 @@ mod tests {
                 container: Some(32),
                 mono_to_stereo: false,
                 float_to_int: false,
+                volume: Volume::Default,
+                volume_control: None,
             })
         );
         assert_eq!(
@@ -342,6 +335,8 @@ mod tests {
                 container: None,
                 mono_to_stereo: true,
                 float_to_int: false,
+                volume: Volume::Default,
+                volume_control: None,
             })
         );
         assert_eq!(
@@ -352,6 +347,8 @@ mod tests {
                 container: None,
                 mono_to_stereo: false,
                 float_to_int: true,
+                volume: Volume::Default,
+                volume_control: None,
             })
         );
         assert!(p(&["--device", "id", "--container", "20", "a.wav"]).is_err());
@@ -372,59 +369,44 @@ mod tests {
     }
 
     #[test]
-    fn parses_mixer() {
+    fn parses_mixer_and_volume() {
         assert_eq!(
             p(&["mixer", "--device", "hw:CARD=X"]),
             Ok(Command::Mixer {
-                device: "hw:CARD=X".into(),
-                control: None,
-                values: vec![],
-                state: None,
-                file: None
+                device: "hw:CARD=X".into()
             })
         );
-        // 负的 dB 值以单个 “-” 开头，不当作参数。
-        assert_eq!(
-            p(&["mixer", "--device", "hw:0", "Master", "-20dB", "on"]),
-            Ok(Command::Mixer {
-                device: "hw:0".into(),
-                control: Some("Master".into()),
-                values: vec!["-20dB".into(), "on".into()],
-                state: None,
-                file: None
-            })
-        );
-        assert!(p(&["mixer", "--device", "hw:0", "Master"]).is_err());
-        assert!(p(&["mixer", "Master", "40%"]).is_err());
-        assert!(p(&["mixer", "--device", "hw:0", "--x"]).is_err());
-        assert_eq!(
-            p(&[
-                "mixer",
-                "--device",
-                "hw:0",
-                "--restore",
-                "--file",
-                "/etc/m.txt"
-            ]),
-            Ok(Command::Mixer {
-                device: "hw:0".into(),
-                control: None,
-                values: vec![],
-                state: Some(MixerState::Restore),
-                file: Some("/etc/m.txt".into())
-            })
-        );
-        assert!(matches!(
-            p(&["mixer", "--save", "--device", "hw:0"]),
-            Ok(Command::Mixer {
-                state: Some(MixerState::Save),
-                file: None,
+        assert!(p(&["mixer", "--device", "hw:0", "Master", "40%"]).is_err());
+        assert!(p(&["mixer", "--device", "hw:0", "--save"]).is_err());
+        assert!(p(&["mixer"]).is_err());
+        let play = |extra: &[&str]| {
+            let mut a = vec!["--device", "hw:0"];
+            a.extend_from_slice(extra);
+            a.push("a.wav");
+            p(&a)
+        };
+        let vol = |r: Result<Command, String>| match r {
+            Ok(Command::Play {
+                volume,
+                volume_control,
                 ..
-            })
-        ));
-        assert!(p(&["mixer", "--device", "hw:0", "--save", "--restore"]).is_err());
-        assert!(p(&["mixer", "--device", "hw:0", "--save", "Master", "40%"]).is_err());
-        assert!(p(&["mixer", "--device", "hw:0", "--file", "x"]).is_err());
+            }) => Ok((volume, volume_control)),
+            Ok(other) => Err(format!("{other:?}")),
+            Err(e) => Err(e),
+        };
+        assert_eq!(vol(play(&[])), Ok((Volume::Default, None)));
+        assert_eq!(
+            vol(play(&["--volume", "60%"])),
+            Ok((Volume::Percent(60), None))
+        );
+        assert_eq!(vol(play(&["--volume", "off"])), Ok((Volume::Off, None)));
+        assert_eq!(
+            vol(play(&["--volume", "0%", "--volume-control", "Headphone"])),
+            Ok((Volume::Percent(0), Some("Headphone".into())))
+        );
+        assert!(play(&["--volume", "101%"]).is_err());
+        assert!(play(&["--volume", "40"]).is_err());
+        assert!(play(&["--volume"]).is_err());
     }
 
     /// PowerShell 吞掉未加引号的 `{…}` 后，文件名落到 `--device` 的位置：给出原因。

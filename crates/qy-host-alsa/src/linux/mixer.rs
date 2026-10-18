@@ -1,10 +1,9 @@
-//! 声卡硬件混音器（A2，`qybit mixer`）：经控制设备列出、读取与设置混音器元素；A3 起可把
-//! 状态保存到文件并恢复（格式见 [`crate::kernel::mixer_state`]）。
+//! 声卡硬件混音器（A2 查看、A4 播放期间的音量）：经控制设备列出与读取混音器元素；播放时按
+//! 用户给出的百分比临时设置设备自身的硬件音量并打开其静音开关，播放结束时恢复原值。
 //!
 //! 只调设备自身的硬件控制（编解码器放大器、静音开关、USB 功能单元等），送到设备的数据不变，
-//! 软件增益仍恒为 1；只在用户明确运行命令时改动。出处：内核 `sound/core/control.c`
-//! （`snd_ctl_elem_list` / `info` / `read` / `write`、`snd_ctl_tlv_ioctl`）。分组、换算与提示规则
-//! 见 [`crate::kernel::mixer`]。
+//! 软件增益仍恒为 1。出处：内核 `sound/core/control.c`（`snd_ctl_elem_list` / `info` / `read` /
+//! `write`、`snd_ctl_tlv_ioctl`）。分组、换算、选择与提示规则见 [`crate::kernel::mixer`]。
 
 use qy_pcm_format::alsa::check_device_name;
 
@@ -13,10 +12,11 @@ use crate::kernel::abi::{
     ELEM_ACCESS_READ, ELEM_ACCESS_TLV_READ, ELEM_IFACE_MIXER, ELEM_TYPE_BOOLEAN,
     ELEM_TYPE_ENUMERATED, ELEM_TYPE_INTEGER, ELEM_TYPE_INTEGER64, ElemValue, Zeroed, c_text,
 };
-use crate::kernel::mixer::{Control, Kind, apply, groups, parse_setting, resolve, silent_playback};
-use crate::kernel::mixer_state::{parse as parse_state, plan_restore, serialize};
+use crate::kernel::mixer::{
+    Control, Kind, Role, groups, playback_volume_group, raw_for_percent, silent_playback,
+    split_name,
+};
 use crate::kernel::tlv::parse_db;
-use std::path::{Path, PathBuf};
 
 /// 值数组的声道上限（`long value[128]`；`long long` 为 64）。
 const MAX_VALUES: usize = 128;
@@ -169,85 +169,6 @@ pub fn show(device: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// `名称` 或 `名称,序号`。
-fn split_index(arg: &str) -> (&str, u32) {
-    match arg.rsplit_once(',') {
-        Some((name, idx)) if !idx.is_empty() && idx.bytes().all(|b| b.is_ascii_digit()) => {
-            (name, idx.parse().unwrap_or(0))
-        }
-        _ => (arg, 0),
-    }
-}
-
-/// `qybit mixer --device <设备> <控制> <值>...`：设置后读回，返回该控制的新状态。
-pub fn set(device: &str, control: &str, values: &[String]) -> Result<Vec<String>, String> {
-    if values.is_empty() {
-        return Err("需要至少一个值：on、off、40%、-20dB、原始值或枚举项名称".into());
-    }
-    let settings = values
-        .iter()
-        .map(|v| parse_setting(v))
-        .collect::<Result<Vec<_>, _>>()?;
-    let m = open(device)?;
-    let controls = m.controls()?;
-    let (name, index) = split_index(control);
-    let Some(targets) = resolve(&controls, name, index) else {
-        let mut names: Vec<String> = Vec::new();
-        for g in groups(&controls) {
-            if !names.iter().any(|n| n == g.base) {
-                names.push(g.base.to_string());
-            }
-        }
-        return Err(format!(
-            "{}没有名为 {control} 的控制；可用：{}",
-            m.header(),
-            if names.is_empty() {
-                "无".into()
-            } else {
-                names.join("、")
-            }
-        ));
-    };
-    // 每个值用到第一个接受它的元素上；后面的值覆盖前面的。
-    let mut plan: Vec<(&Control, Vec<i64>)> = Vec::new();
-    for (s, raw) in settings.iter().zip(values) {
-        let mut used = false;
-        for c in &targets {
-            if let Some(v) = apply(c, s)? {
-                match plan.iter_mut().find(|(p, _)| p.id == c.id) {
-                    Some(p) => p.1 = v,
-                    None => plan.push((c, v)),
-                }
-                used = true;
-                break;
-            }
-        }
-        if !used {
-            let kinds: Vec<&str> = targets.iter().map(|c| c.name.as_str()).collect();
-            return Err(format!(
-                "值 {raw} 不适用于 {control}（该控制包含：{}）",
-                kinds.join("、")
-            ));
-        }
-    }
-    for (c, v) in &plan {
-        m.write(c, v)?;
-    }
-    let after = m.controls()?;
-    let changed: Vec<String> = groups(&after)
-        .iter()
-        .filter(|g| {
-            g.members
-                .iter()
-                .any(|c| plan.iter().any(|(p, _)| p.id == c.id))
-        })
-        .map(|g| format!("  {}", g.line()))
-        .collect();
-    let mut out = vec![format!("{}已设置（读回）：", m.header())];
-    out.extend(changed);
-    Ok(out)
-}
-
 /// 播放前的提示：该卡播放方向中处于关闭或最小音量的控制。没有或无法读取时为 `None`。
 pub fn playback_hint(device: &str) -> Option<String> {
     let m = open(device).ok()?;
@@ -255,144 +176,113 @@ pub fn playback_hint(device: &str) -> Option<String> {
     (!silent.is_empty()).then(|| {
         format!(
             "提示：{}的混音器中，以下播放控制处于关闭或最小音量：{}。设备可能因此不出声\
-             （其中有的本来就该关闭，如话筒监听）。用 qybit mixer --device {device} 查看，\
-             用 qybit mixer --device {device} <控制> 40% on 打开（没有静音开关的控制只给音量）；这只调设备自身的硬件音量，\
-             送出的数据不变。",
+             （其中有的本来就该关闭，如话筒监听）。用 qybit mixer --device {device} 查看；\
+             播放音量用 --volume 与 --volume-control 指定。",
             m.header(),
             silent.join("、")
         )
     })
 }
 
-/// 状态文件大小上限（解析另有行数与行长限制）。
-const MAX_STATE_BYTES: u64 = 1 << 20;
-
-/// 缺省的状态文件：`$XDG_CONFIG_HOME/qybit/mixer-<声卡 id>.txt`，没有时为
-/// `$HOME/.config/qybit/…`；都没有为 `None`（须用 `--file`）。
-pub fn default_state_path(card_id: &str) -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|v| !v.is_empty())
-                .map(|h| PathBuf::from(h).join(".config"))
-        })?;
-    Some(base.join("qybit").join(format!("mixer-{card_id}.txt")))
+/// 播放期间的设备硬件音量（A4）：创建时设置音量并打开同组的静音开关，[`restore`](Self::restore)
+/// 或析构时恢复原值。进程被强制结束（如第二次 Ctrl+C、SIGKILL）时来不及恢复。
+pub struct PlaybackVolume {
+    mixer: CardMixer,
+    /// 改动过的元素与原值。
+    saved: Vec<(Control, Vec<i64>)>,
 }
 
-fn state_path(file: Option<&Path>, card_id: &str) -> Result<PathBuf, String> {
-    match file {
-        Some(f) => Ok(f.to_path_buf()),
-        None => default_state_path(card_id)
-            .ok_or_else(|| "没有 HOME 或 XDG_CONFIG_HOME，请用 --file 指定状态文件".to_string()),
+impl PlaybackVolume {
+    /// 设置 `device` 所在声卡的播放音量为 `percent`（与 alsamixer 相同的百分比），`control` 为
+    /// 用户指定的控制名（缺省按标准名称选择，见 [`playback_volume_group`]）。返回守卫与一行说明。
+    pub fn apply(
+        device: &str,
+        percent: u32,
+        control: Option<&str>,
+    ) -> Result<(Self, String), String> {
+        let mixer = open(device)?;
+        let controls = mixer.controls()?;
+        let group = playback_volume_group(&controls, control)
+            .map_err(|e| format!("{}：{e}", mixer.header()))?;
+        let mut plan: Vec<(&Control, Vec<i64>)> = Vec::new();
+        for c in &group {
+            if !c.writable() || c.values.is_empty() {
+                continue;
+            }
+            match (&c.kind, split_name(&c.name).2) {
+                (Kind::Integer { min, max, step, .. }, Role::Volume) => {
+                    let raw = raw_for_percent(*min, *max, *step, c.db.as_ref(), percent);
+                    plan.push((c, vec![raw; c.values.len()]));
+                }
+                (Kind::Boolean, Role::Switch) => plan.push((c, vec![1; c.values.len()])),
+                _ => {}
+            }
+        }
+        if !plan
+            .iter()
+            .any(|(c, _)| matches!(c.kind, Kind::Integer { .. }))
+        {
+            return Err(format!("{}：所选控制没有可写的音量", mixer.header()));
+        }
+        let before: Vec<String> = plan.iter().map(|(c, _)| c.describe()).collect();
+        let mut guard = PlaybackVolume {
+            mixer,
+            saved: Vec::new(),
+        };
+        for (c, v) in &plan {
+            if c.values != *v {
+                guard.mixer.write(c, v)?;
+                guard.saved.push(((*c).clone(), c.values.clone()));
+            }
+        }
+        let after = guard.mixer.controls()?;
+        let name = split_name(&group[0].name).0.to_string();
+        let now: Vec<String> = plan
+            .iter()
+            .filter_map(|(c, _)| after.iter().find(|a| a.id == c.id).map(Control::describe))
+            .collect();
+        let line = format!(
+            "设备硬件音量：{} {name}：{}（原为 {}；播放结束后恢复）。只调设备自身的硬件音量，送出的数据不变",
+            guard.mixer.header(),
+            now.join("；"),
+            before.join("；")
+        );
+        Ok((guard, line))
     }
-}
 
-/// `qybit mixer --device <设备> --save [--file <路径>]`。
-pub fn save(device: &str, file: Option<&Path>) -> Result<Vec<String>, String> {
-    let m = open(device)?;
-    let controls = m.controls()?;
-    let path = state_path(file, &m.id)?;
-    let (text, skipped) = serialize(&m.id, &m.name, &controls);
-    let saved = text.lines().filter(|l| l.starts_with("ctl\t")).count();
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("创建目录 {} 失败：{e}", dir.display()))?;
+    /// 恢复原值，返回一行说明。
+    pub fn restore(mut self) -> Result<String, String> {
+        self.restore_inner()
     }
-    // 先写临时文件再改名：不会留下写了一半的状态文件。
-    let mut tmp = path.clone().into_os_string();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, text).map_err(|e| format!("写入 {} 失败：{e}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("改名为 {} 失败：{e}", path.display()))?;
-    let mut out = vec![format!(
-        "{}：已保存 {saved} 个控制到 {}",
-        m.header(),
-        path.display()
-    )];
-    if !skipped.is_empty() {
-        out.push(format!("未保存：{}", skipped.join("、")));
-    }
-    Ok(out)
-}
 
-/// `qybit mixer --device <设备> --restore [--file <路径>]`：写回后读回核对。
-pub fn restore(device: &str, file: Option<&Path>) -> Result<Vec<String>, String> {
-    let m = open(device)?;
-    let path = state_path(file, &m.id)?;
-    let meta =
-        std::fs::metadata(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
-    if meta.len() > MAX_STATE_BYTES {
-        return Err(format!(
-            "{} 超过 {MAX_STATE_BYTES} 字节，不是混音器状态文件",
-            path.display()
-        ));
-    }
-    let text =
-        std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
-    let state = parse_state(&text).map_err(|e| format!("{}：{e}", path.display()))?;
-    if state.card_id != m.id {
-        return Err(format!(
-            "{} 保存的是声卡 {}（{}）的状态，与设备 {device} 的声卡 {} 不同，没有恢复",
-            path.display(),
-            state.card_id,
-            state.card_name,
-            m.id
-        ));
-    }
-    let controls = m.controls()?;
-    let plan = plan_restore(&state, &controls);
-    let mut errors = Vec::new();
-    for (c, v) in &plan.writes {
-        if let Err(e) = m.write(c, v) {
-            errors.push(e);
+    fn restore_inner(&mut self) -> Result<String, String> {
+        let saved = std::mem::take(&mut self.saved);
+        if saved.is_empty() {
+            return Ok("设备硬件音量：播放前已是该值，无需恢复".into());
+        }
+        let mut errors = Vec::new();
+        for (c, v) in saved.iter().rev() {
+            if let Err(e) = self.mixer.write(c, v) {
+                errors.push(e);
+            }
+        }
+        let after = self.mixer.controls()?;
+        for (c, v) in &saved {
+            if !after.iter().any(|a| a.id == c.id && a.values == *v) {
+                errors.push(format!("{} 读回与原值不符", c.name));
+            }
+        }
+        if errors.is_empty() {
+            let names: Vec<&str> = saved.iter().map(|(c, _)| c.name.as_str()).collect();
+            Ok(format!("设备硬件音量已恢复：{}", names.join("、")))
+        } else {
+            Err(format!("设备硬件音量恢复不完整：{}", errors.join("；")))
         }
     }
-    // 读回核对：驱动可能拒绝或调整写入的值。
-    let after = m.controls()?;
-    for (c, v) in &plan.writes {
-        match after.iter().find(|a| a.id == c.id) {
-            Some(a) if a.values == *v => {}
-            Some(a) => errors.push(format!("{}：写入 {v:?}，读回 {:?}", c.name, a.values)),
-            None => errors.push(format!("{}：恢复后读不到", c.name)),
-        }
-    }
-    let mut out = vec![format!(
-        "{}：从 {} 恢复 {} 个控制（另有 {} 个已相同）",
-        m.header(),
-        path.display(),
-        plan.writes.len(),
-        plan.unchanged
-    )];
-    for (c, _) in &plan.writes {
-        if let Some(a) = after.iter().find(|a| a.id == c.id) {
-            out.push(format!("  {}：{}", a.name, a.describe()));
-        }
-    }
-    if !plan.skipped.is_empty() {
-        out.push(format!("跳过：{}", plan.skipped.join("、")));
-    }
-    if errors.is_empty() {
-        Ok(out)
-    } else {
-        Err(format!(
-            "{}\n恢复不完整：{}",
-            out.join("\n"),
-            errors.join("；")
-        ))
-    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn control_index_suffix() {
-        assert_eq!(split_index("Master"), ("Master", 0));
-        assert_eq!(split_index("Headphone,1"), ("Headphone", 1));
-        assert_eq!(split_index("A,B"), ("A,B", 0));
-        assert_eq!(split_index("X,"), ("X,", 0));
+impl Drop for PlaybackVolume {
+    fn drop(&mut self) {
+        let _ = self.restore_inner();
     }
 }

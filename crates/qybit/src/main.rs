@@ -85,7 +85,15 @@ fn run(cmd: Command) -> ExitCode {
             container,
             mono_to_stereo,
             float_to_int,
+            volume,
+            volume_control,
         } => {
+            if matches!(volume, args::Volume::Percent(_)) || volume_control.is_some() {
+                eprintln!(
+                    "错误：--volume 目前只用于 Linux；Windows 上设备的硬件音量在 qybit-gui 中调节（GUI T5）"
+                );
+                return ExitCode::FAILURE;
+            }
             let info = match endpoint_info(&device) {
                 Ok(i) => i,
                 Err(e) => {
@@ -192,6 +200,8 @@ fn run(cmd: Command) -> ExitCode {
             container,
             mono_to_stereo,
             float_to_int,
+            volume,
+            volume_control,
         } => {
             if container.is_some() {
                 eprintln!("错误：--container 目前只用于 Windows WASAPI");
@@ -201,10 +211,8 @@ fn run(cmd: Command) -> ExitCode {
                 eprintln!("错误：{e}");
                 return ExitCode::FAILURE;
             }
+            use qy_host_alsa::linux::mixer::{PlaybackVolume, playback_hint};
             println!("设备：{device}（ALSA hw）");
-            if let Some(h) = qy_host_alsa::linux::mixer::playback_hint(&device) {
-                println!("{h}");
-            }
             let mut res = match qy_player::HostResources::new() {
                 Ok(r) => r,
                 Err(e) => {
@@ -214,9 +222,36 @@ fn run(cmd: Command) -> ExitCode {
             };
             apply_channel_policy(&mut res, mono_to_stereo);
             apply_float_policy(&mut res, float_to_int);
+            // 播放期间的设备硬件音量（tasks/A4.md）：设置失败时照常播放并说明原因。
+            let percent = match volume {
+                args::Volume::Default => Some(args::DEFAULT_VOLUME_PERCENT),
+                args::Volume::Percent(p) => Some(p),
+                args::Volume::Off => None,
+            };
+            let guard = percent.and_then(|p| {
+                match PlaybackVolume::apply(&device, p, volume_control.as_deref()) {
+                    Ok((g, line)) => {
+                        println!("{line}");
+                        Some(g)
+                    }
+                    Err(e) => {
+                        println!("未调整设备硬件音量：{e}（不以软件缩放代替）");
+                        None
+                    }
+                }
+            });
+            if let Some(h) = playback_hint(&device) {
+                println!("{h}");
+            }
             let mut backend = AlsaBackend::new(device, KernelOpener, RtPriority::default());
             let stop = interrupt_flag(qy_host_alsa::linux::interrupt::install());
             let report = play_live(&mut backend, &mut res, &files, stop);
+            if let Some(g) = guard {
+                match g.restore() {
+                    Ok(l) => println!("{l}"),
+                    Err(e) => eprintln!("警告：{e}"),
+                }
+            }
             ExitCode::from(report.exit_code())
         }
         Command::Matrix { device, out } => {
@@ -254,27 +289,17 @@ fn run(cmd: Command) -> ExitCode {
                 }
             }
         }
-        Command::Mixer {
-            device,
-            control,
-            values,
-            state,
-            file,
-        } => {
-            use args::MixerState;
-            use qy_host_alsa::linux::mixer;
-            let r = match (state, control) {
-                (Some(MixerState::Save), _) => mixer::save(&device, file.as_deref()),
-                (Some(MixerState::Restore), _) => mixer::restore(&device, file.as_deref()),
-                (None, None) => mixer::show(&device),
-                (None, Some(c)) => mixer::set(&device, &c, &values),
-            };
+        Command::Mixer { device } => {
+            let r = qy_host_alsa::linux::mixer::show(&device);
             match r {
                 Ok(lines) => {
                     for l in lines {
                         println!("{l}");
                     }
-                    println!("说明：只调设备自身的硬件控制，送出的数据不变（软件增益恒为 1）。");
+                    println!(
+                        "说明：只读。播放时的音量用 qybit --device … --volume N% 指定（默认 {}%），播放结束后恢复。",
+                        args::DEFAULT_VOLUME_PERCENT
+                    );
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

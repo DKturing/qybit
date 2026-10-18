@@ -8,7 +8,8 @@
 #      其余单元测试用假设备与夹具，在宿主上运行）；
 #   3. 设备测试（hw:CARD=Loopback,DEV=0：格式矩阵 48 项、顺序换曲、WAV/FLAC 播放）；
 #   4. B 层回环矩阵（tests/loopback_aloop.rs，逐字节比对）；
-#   5. 混音器读写（A2，tests/mixer.rs，snd-dummy 虚拟声卡 hw:CARD=Dummy）。
+#   5. 混音器查看与播放期间的硬件音量（A2/A4，tests/mixer.rs，snd-dummy 虚拟声卡 hw:CARD=Dummy）；
+#   6. 命令行播放 --volume 60% 后混音器与播放前完全相同（A4）。
 #
 # QYBIT_VM_ARCH：
 #   x86_64（默认）：x86_64 内核，运行 x86_64-unknown-linux-musl 程序；
@@ -81,7 +82,7 @@ echo "内核：$(cat "$WORK/pkg/ok")（$DEB_ARCH）"
 I=$WORK/initrd
 rm -rf "$I" && mkdir -p "$I"/{bin,proc,sys,dev,tmp,ko,t}
 cp "$WORK/pkg/busybox" "$I/bin/busybox"
-for c in sh mount insmod ls cat echo poweroff mkdir; do ln -s busybox "$I/bin/$c"; done
+for c in sh mount insmod ls cat echo poweroff mkdir grep; do ln -s busybox "$I/bin/$c"; done
 cp "$WORK"/pkg/ko/*.ko "$I/ko/"
 # 设备测试的 FLAC 夹具按编译时的路径（CARGO_MANIFEST_DIR/../qy-codec-flac/…）读取。
 flac=crates/qy-codec-flac/tests/fixtures/cli_16_stereo_44k_default.flac
@@ -117,6 +118,17 @@ cat /proc/asound/cards
 export QYBIT_ALSA_DEVICE=hw:CARD=Loopback,DEV=0 QYBIT_MIXER_DEVICE=hw:CARD=Dummy RUST_BACKTRACE=1
 cd /tmp
 step() { name=$1; shift; echo "=== step $name"; "$@" 2>&1; echo "=== result $name $?"; }
+# A4：命令行播放期间调整硬件音量，结束后混音器与播放前完全相同。
+cli_volume() {
+    $1/qybit tone /tmp/v.wav --rate 44100 --bits 16 --seconds 1 > /dev/null || return 1
+    $1/qybit mixer --device hw:CARD=Dummy > /tmp/m1 || return 1
+    $1/qybit --device hw:CARD=Dummy,DEV=0 --volume 60% /tmp/v.wav > /tmp/p.txt 2>&1
+    rc=$?
+    grep -E "设备硬件音量|结论" /tmp/p.txt
+    [ $rc -eq 0 ] && grep -q "设备硬件音量已恢复" /tmp/p.txt || return 1
+    $1/qybit mixer --device hw:CARD=Dummy > /tmp/m2 || return 1
+    [ "$(cat /tmp/m1)" = "$(cat /tmp/m2)" ]
+}
 for t in $TARGETS; do
     d=/t/$t
     export QYBIT_REPORT_DIR=/tmp/report/$t
@@ -126,6 +138,7 @@ for t in $TARGETS; do
     step "$t/device" $d/device --ignored --nocapture --test-threads=1
     step "$t/loopback" $d/loopback_aloop --ignored --nocapture --test-threads=1
     step "$t/mixer" $d/mixer --ignored --nocapture --test-threads=1
+    step "$t/cli-volume" cli_volume $d
     for f in $QYBIT_REPORT_DIR/*; do
         [ -f "$f" ] || continue
         echo "=== begin $t/${f##*/}"; cat "$f"; echo; echo "=== end $t/${f##*/}"
@@ -158,7 +171,7 @@ grep -E '=== kernel|^=== (result|done)' "$log" || true
 grep -q '^=== done' "$log" || { echo "虚拟机未正常结束，见 $log" >&2; exit 1; }
 fail=0
 for t in $TARGETS; do
-    for s in list-devices unit device loopback mixer; do
+    for s in list-devices unit device loopback mixer cli-volume; do
         grep -q "^=== result $t/$s 0\$" "$log" || { echo "失败：$t/$s（见 $log）" >&2; fail=1; }
     done
 done
