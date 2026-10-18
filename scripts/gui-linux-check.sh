@@ -11,6 +11,8 @@ xdnd=$2
 out=$(realpath -m "$3")
 mkdir -p "$out"
 export HOME="$out/home"
+# 设置文件按 XDG 规范写到 $XDG_CONFIG_HOME（GitHub runner 设置了该变量），一并指向临时目录。
+export XDG_CONFIG_HOME="$HOME/.config"
 rm -rf "$HOME"
 mkdir -p "$HOME"
 export DISPLAY=:93
