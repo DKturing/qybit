@@ -116,6 +116,7 @@ qybit --device hw:CARD=DAC,DEV=0 a.flac b.wav   # ALSA hw 顺序播放（按文�
 qybit matrix --device hw:CARD=DAC,DEV=0 --out report
 qybit mixer --device hw:CARD=DAC                # 列出声卡的硬件混音器（静音开关、音量、dB）
 qybit mixer --device hw:CARD=DAC Master 40% on  # 打开静音开关、音量 40%（只调设备硬件控制）
+qybit mixer --device hw:CARD=DAC --save         # 保存混音器状态；--restore 恢复（开机恢复见 docs/a2-mixer.md §7）
 ```
 
 没有桌面的系统上没有音频服务去打开混音器，主板声卡常停在开机时的静音状态：参数读回一致、无欠载却听不到声音时，用 `qybit mixer` 查看并打开（[docs/a2-mixer.md](docs/a2-mixer.md)）；播放前若该卡有播放控制处于关闭或最小音量，会先打印提示。

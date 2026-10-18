@@ -1,4 +1,5 @@
-//! 声卡硬件混音器（A2，`qybit mixer`）：经控制设备列出、读取与设置混音器元素。
+//! 声卡硬件混音器（A2，`qybit mixer`）：经控制设备列出、读取与设置混音器元素；A3 起可把
+//! 状态保存到文件并恢复（格式见 [`crate::kernel::mixer_state`]）。
 //!
 //! 只调设备自身的硬件控制（编解码器放大器、静音开关、USB 功能单元等），送到设备的数据不变，
 //! 软件增益仍恒为 1；只在用户明确运行命令时改动。出处：内核 `sound/core/control.c`
@@ -13,7 +14,9 @@ use crate::kernel::abi::{
     ELEM_TYPE_ENUMERATED, ELEM_TYPE_INTEGER, ELEM_TYPE_INTEGER64, ElemValue, Zeroed, c_text,
 };
 use crate::kernel::mixer::{Control, Kind, apply, groups, parse_setting, resolve, silent_playback};
+use crate::kernel::mixer_state::{parse as parse_state, plan_restore, serialize};
 use crate::kernel::tlv::parse_db;
+use std::path::{Path, PathBuf};
 
 /// 值数组的声道上限（`long value[128]`；`long long` 为 64）。
 const MAX_VALUES: usize = 128;
@@ -259,6 +262,126 @@ pub fn playback_hint(device: &str) -> Option<String> {
             silent.join("、")
         )
     })
+}
+
+/// 状态文件大小上限（解析另有行数与行长限制）。
+const MAX_STATE_BYTES: u64 = 1 << 20;
+
+/// 缺省的状态文件：`$XDG_CONFIG_HOME/qybit/mixer-<声卡 id>.txt`，没有时为
+/// `$HOME/.config/qybit/…`；都没有为 `None`（须用 `--file`）。
+pub fn default_state_path(card_id: &str) -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .map(|h| PathBuf::from(h).join(".config"))
+        })?;
+    Some(base.join("qybit").join(format!("mixer-{card_id}.txt")))
+}
+
+fn state_path(file: Option<&Path>, card_id: &str) -> Result<PathBuf, String> {
+    match file {
+        Some(f) => Ok(f.to_path_buf()),
+        None => default_state_path(card_id)
+            .ok_or_else(|| "没有 HOME 或 XDG_CONFIG_HOME，请用 --file 指定状态文件".to_string()),
+    }
+}
+
+/// `qybit mixer --device <设备> --save [--file <路径>]`。
+pub fn save(device: &str, file: Option<&Path>) -> Result<Vec<String>, String> {
+    let m = open(device)?;
+    let controls = m.controls()?;
+    let path = state_path(file, &m.id)?;
+    let (text, skipped) = serialize(&m.id, &m.name, &controls);
+    let saved = text.lines().filter(|l| l.starts_with("ctl\t")).count();
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("创建目录 {} 失败：{e}", dir.display()))?;
+    }
+    // 先写临时文件再改名：不会留下写了一半的状态文件。
+    let mut tmp = path.clone().into_os_string();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, text).map_err(|e| format!("写入 {} 失败：{e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("改名为 {} 失败：{e}", path.display()))?;
+    let mut out = vec![format!(
+        "{}：已保存 {saved} 个控制到 {}",
+        m.header(),
+        path.display()
+    )];
+    if !skipped.is_empty() {
+        out.push(format!("未保存：{}", skipped.join("、")));
+    }
+    Ok(out)
+}
+
+/// `qybit mixer --device <设备> --restore [--file <路径>]`：写回后读回核对。
+pub fn restore(device: &str, file: Option<&Path>) -> Result<Vec<String>, String> {
+    let m = open(device)?;
+    let path = state_path(file, &m.id)?;
+    let meta =
+        std::fs::metadata(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    if meta.len() > MAX_STATE_BYTES {
+        return Err(format!(
+            "{} 超过 {MAX_STATE_BYTES} 字节，不是混音器状态文件",
+            path.display()
+        ));
+    }
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    let state = parse_state(&text).map_err(|e| format!("{}：{e}", path.display()))?;
+    if state.card_id != m.id {
+        return Err(format!(
+            "{} 保存的是声卡 {}（{}）的状态，与设备 {device} 的声卡 {} 不同，没有恢复",
+            path.display(),
+            state.card_id,
+            state.card_name,
+            m.id
+        ));
+    }
+    let controls = m.controls()?;
+    let plan = plan_restore(&state, &controls);
+    let mut errors = Vec::new();
+    for (c, v) in &plan.writes {
+        if let Err(e) = m.write(c, v) {
+            errors.push(e);
+        }
+    }
+    // 读回核对：驱动可能拒绝或调整写入的值。
+    let after = m.controls()?;
+    for (c, v) in &plan.writes {
+        match after.iter().find(|a| a.id == c.id) {
+            Some(a) if a.values == *v => {}
+            Some(a) => errors.push(format!("{}：写入 {v:?}，读回 {:?}", c.name, a.values)),
+            None => errors.push(format!("{}：恢复后读不到", c.name)),
+        }
+    }
+    let mut out = vec![format!(
+        "{}：从 {} 恢复 {} 个控制（另有 {} 个已相同）",
+        m.header(),
+        path.display(),
+        plan.writes.len(),
+        plan.unchanged
+    )];
+    for (c, _) in &plan.writes {
+        if let Some(a) = after.iter().find(|a| a.id == c.id) {
+            out.push(format!("  {}：{}", a.name, a.describe()));
+        }
+    }
+    if !plan.skipped.is_empty() {
+        out.push(format!("跳过：{}", plan.skipped.join("、")));
+    }
+    if errors.is_empty() {
+        Ok(out)
+    } else {
+        Err(format!(
+            "{}\n恢复不完整：{}",
+            out.join("\n"),
+            errors.join("；")
+        ))
+    }
 }
 
 #[cfg(test)]

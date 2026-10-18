@@ -7,10 +7,10 @@
 //! - `External I/O Box`：枚举 None / CD Player，选 None 时 `CD Volume` 与 `CD Capture Switch`
 //!   变为未启用（INACTIVE）。
 //!
-//! 期望值都按 dummy.c 与 alsa-lib 的换算规则独立算出。
+//! 期望值都按 dummy.c 与 alsa-lib 的换算规则独立算出。A3：保存、改动、恢复后读回与保存时一致。
 #![cfg(target_os = "linux")]
 
-use qy_host_alsa::linux::mixer::{playback_hint, set, show};
+use qy_host_alsa::linux::mixer::{playback_hint, restore, save, set, show};
 
 fn device() -> String {
     match std::env::var("QYBIT_MIXER_DEVICE") {
@@ -108,4 +108,69 @@ fn dummy_mixer_read_and_write() {
     assert!(!hint.contains("Master（"), "{hint}");
     // 恢复初始状态（同一虚拟机中下一个目标架构的程序再跑一遍）。
     set_ok(&dev, "Master Capture Switch", &["off"]);
+}
+
+/// A3：保存 → 改动三类控制 → 恢复 → 列表与保存时完全相同；另一块卡的状态文件被拒绝；
+/// 损坏的文件报错且不改动设备。
+#[test]
+#[ignore = "需要 snd-dummy 与 QYBIT_MIXER_DEVICE"]
+fn dummy_mixer_save_and_restore() {
+    let dev = device();
+    let dir = std::env::temp_dir().join(format!("qybit-mixer-{}", std::process::id()));
+    let file = dir.join("dummy.txt");
+    let before = show(&dev).map(|l| l.join("\n")).unwrap_or_default();
+    match save(&dev, Some(&file)) {
+        Ok(l) => println!("{}", l.join("\n")),
+        Err(e) => panic!("{e}"),
+    }
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    println!("{text}");
+    assert!(
+        text.starts_with("# qybit mixer state v1\ncard\tDummy\t"),
+        "{text}"
+    );
+    assert!(text.contains("\tinteger\t0 0\tMaster Volume\n"), "{text}");
+    assert!(text.contains("\tenum\t1\tExternal I/O Box\n"), "{text}");
+
+    set_ok(&dev, "Master", &["40%"]);
+    set_ok(&dev, "Synth Capture Switch", &["on"]);
+    set_ok(&dev, "External I/O Box", &["None"]);
+    let changed = show(&dev).map(|l| l.join("\n")).unwrap_or_default();
+    assert_ne!(changed, before);
+
+    match restore(&dev, Some(&file)) {
+        Ok(l) => {
+            let s = l.join("\n");
+            println!("{s}");
+            assert!(s.contains("恢复 3 个控制"), "{s}");
+        }
+        Err(e) => panic!("{e}"),
+    }
+    let after = show(&dev).map(|l| l.join("\n")).unwrap_or_default();
+    assert_eq!(after, before);
+    // 再恢复一次：全部已相同。
+    let again = restore(&dev, Some(&file))
+        .map(|l| l.join("\n"))
+        .unwrap_or_default();
+    assert!(again.contains("恢复 0 个控制"), "{again}");
+
+    // 另一块卡的文件：拒绝，设备不变。
+    let other = dir.join("other.txt");
+    let _ = std::fs::write(
+        &other,
+        text.replacen("card\tDummy\t", "card\tLoopback\t", 1)
+            .replace("\t0 0\tMaster Volume", "\t50 50\tMaster Volume"),
+    );
+    let e = restore(&dev, Some(&other)).err().unwrap_or_default();
+    assert!(e.contains("Loopback") && e.contains("没有恢复"), "{e}");
+    // 损坏的文件：报错，设备不变。
+    let bad = dir.join("bad.txt");
+    let _ = std::fs::write(
+        &bad,
+        "# qybit mixer state v1\ncard\tDummy\tx\nctl\t0\tinteger\tx\tMaster Volume\n",
+    );
+    let e = restore(&dev, Some(&bad)).err().unwrap_or_default();
+    assert!(e.contains("第 3 行"), "{e}");
+    assert_eq!(show(&dev).map(|l| l.join("\n")).unwrap_or_default(), before);
+    let _ = std::fs::remove_dir_all(&dir);
 }

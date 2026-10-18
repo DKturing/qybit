@@ -258,11 +258,16 @@ fn run(cmd: Command) -> ExitCode {
             device,
             control,
             values,
+            state,
+            file,
         } => {
+            use args::MixerState;
             use qy_host_alsa::linux::mixer;
-            let r = match control {
-                None => mixer::show(&device),
-                Some(c) => mixer::set(&device, &c, &values),
+            let r = match (state, control) {
+                (Some(MixerState::Save), _) => mixer::save(&device, file.as_deref()),
+                (Some(MixerState::Restore), _) => mixer::restore(&device, file.as_deref()),
+                (None, None) => mixer::show(&device),
+                (None, Some(c)) => mixer::set(&device, &c, &values),
             };
             match r {
                 Ok(lines) => {

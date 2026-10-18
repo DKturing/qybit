@@ -74,6 +74,8 @@ qybit mixer --device hw:CARD=Generic_1 'Auto-Mute Mode' Disabled
 | 纯函数 | 名称分组、显示文字、值解析、百分比 ↔ 原始值（含步长）、dB 目标取档、名称匹配、提示规则；dB TLV 四种类型与容器、损坏与嵌套过深的输入；`snd_ctl_elem_list` 布局（64 位对照头文件编译值，32 位按头文件布局）与常量 | 通过，含 qemu-user 下的 32 位 armv7 |
 | 用户机器的数值 | DB_SCALE −65.25 dB、每档 0.75 dB、0..87：0 档 −65.25 dB、87 档 0 dB，与 amixer 一致 | 通过（单元测试） |
 | QEMU 虚拟机（snd-dummy，`tests/mixer.rs`） | 见下 | x86_64、aarch64、armv7（经 64 位内核的 32 位兼容层）通过 |
+| A3 状态文件（纯函数） | 序列化与解析往返；恢复计划逐项核对类型、声道数、范围、只读、缺失；损坏文件（版本、重复、非数字、溢出、超长、超行数等 15 种）报错 | 通过 |
+| A3 虚拟机（snd-dummy） | 保存 11 个控制 → 改动音量、开关、枚举 → 恢复 3 个（8 个已相同）→ 列表与保存时完全相同；再恢复为 0 个；另一块卡的文件与损坏文件被拒绝，设备不变 | x86_64 通过；aarch64 与 armv7 见下 |
 | 用户机器真实声卡（2026-10-18） | `Master 40% on` 读回 35/87、−39.00 dB、开；之后 3.5 mm 耳机出声，读回一致、无欠载 | 通过（真机，用户运行） |
 
 虚拟机中的检查。期望值按 `sound/drivers/dummy.c` 与 alsa-lib 换算规则独立算出：`Master Volume` 范围 −50..100，−45 dB 起每档 0.30 dB。
@@ -107,26 +109,58 @@ qybit mixer --device hw:CARD=Generic_1 'Auto-Mute Mode' Disabled
 - 如果列表里还有 Headphone、Front、Speaker 等处于关闭或 0% 的控制，同样打开。
 - 如果有 `Auto-Mute Mode`，可试 `Disabled`。
 
-## 7. 设置是否持久
+## 7. 设置是否持久；保存与恢复（A3）
 
-混音器的值保存在内核驱动中，直到重启、驱动重新加载或设备重新插拔（USB 设备）为止。开机时驱动回到默认值，HD-Audio 编解码器的默认值常常是静音。QyBit 不保存状态，要开机后自动生效，有两种做法：
+混音器的值保存在内核驱动中，直到重启、驱动重新加载或设备重新插拔（USB 设备）为止。开机时驱动回到默认值，HD-Audio 编解码器的默认值常常是静音。
 
-- **装有 alsa-utils 时**：`sudo alsactl store` 把当前状态保存到 `/var/lib/alsa/asound.state`。Debian 的 alsa-utils 软件包带有开机恢复（udev 规则与 `alsa-restore` 服务），通常也会在关机时自动保存。
-- **不装 alsa-utils 时**：开机运行一次 `qybit mixer`，例如一个 systemd 服务：
+A3（[tasks/A3.md](../tasks/A3.md)）起 qybit 可以自己保存和恢复，不需要 alsa-utils：
 
 ```
+qybit mixer --device hw:CARD=Generic_1 --save                  # 保存到 ~/.config/qybit/mixer-Generic_1.txt
+qybit mixer --device hw:CARD=Generic_1 --restore               # 按文件恢复
+qybit mixer --device hw:CARD=Generic_1 --save --file /etc/qybit/mixer-Generic_1.txt
+```
+
+- **保存**：该卡所有可读、可写的混音器元素（开关、整数、枚举）。
+  - 只读元素（如电平表）不属于状态，不保存。
+  - 不支持的类型与名称含制表符的元素列出不保存。
+  - 先写临时文件再改名，不会留下写了一半的文件。
+- **文件格式**：文本，可读可改。
+  - 第一行 `# qybit mixer state v1`；`card` 行为声卡 id 与名称；每个元素一行：`ctl`、序号、类型、各声道的原始值、元素名，以制表符分隔。
+  - 文件是不可信输入：解析只报错不 panic，并限制大小、行数、行长与值的个数。
+- **恢复**：
+  - 按“元素名 + 序号”逐项核对类型、声道数与取值范围，不符、找不到或只读的逐个列出原因并跳过，其余照常写入。
+  - 写入后从内核读回核对，驱动拒绝或调整了值即报错。
+  - 文件的声卡 id 与设备不同即拒绝，不会把一块卡的状态写到另一块卡上。
+  - 值已相同的元素不重写。
+- **只在运行命令时恢复**，播放时不会自动恢复。开机自动恢复用一个 systemd 服务（以 root 运行，用 `--file` 指定固定路径）：
+
+```
+# 先保存一次（以 root 或普通用户，路径与下面一致）
+sudo /usr/local/bin/qybit mixer --device hw:CARD=Generic_1 --save --file /etc/qybit/mixer-Generic_1.txt
+
 # /etc/systemd/system/qybit-mixer.service
 [Unit]
-Description=QyBit：打开声卡混音器
+Description=QyBit：恢复声卡混音器状态
 After=sound.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/qybit mixer --device hw:CARD=Generic_1 Master 40% on
+ExecStart=/usr/local/bin/qybit mixer --device hw:CARD=Generic_1 --restore --file /etc/qybit/mixer-Generic_1.txt
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-  然后运行 `sudo systemctl enable qybit-mixer.service`。
+  然后运行 `sudo systemctl enable qybit-mixer.service`。装有 alsa-utils 时也可以用 `sudo alsactl store`（Debian 的 alsa-utils 开机恢复、通常关机时自动保存），两者择一即可。
+- **保存与恢复本身不影响音质**：只是把同样的硬件控制值写回，送到设备的数据不变。硬件音量本身的影响见 §8。
 
+## 8. 硬件音量与音质
+
+- **QyBit 送出的数据**：不论音量设为多少都不变，软件增益恒为 1。
+- **设备内部**：音量控制在设备的哪一级实现，由设备决定，ALSA 接口不说明这一点。
+  - 可能是 DAC 之后的模拟放大或衰减；
+  - 也可能是编解码器或 USB DAC 内部的数字衰减。
+  - 数字衰减在设备内部降低信号电平，小于 0 dB 时设备实际输出的数字信号已不是原样，这与转动设备旋钮相同，是设备自身的行为。
+- **要让设备收到并原样使用数据**：把这一路的音量设在 0 dB（如上面的 Master 为 87 档，即 100%），用功放、耳放或音箱自己的音量调节响度。直接接耳机时 0 dB 往往太响，需要按情况取舍。
+- **列表中的 dB 值**：由驱动提供，表示该控制的增益，不说明它在设备的数字段还是模拟段。

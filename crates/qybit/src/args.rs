@@ -13,6 +13,10 @@ pub const USAGE: &str = "\
                                              Linux：列出或设置声卡的硬件混音器（静音开关与音量）；值为
                                              on、off、40%、-20dB、原始值或枚举项名称。只调设备自身的
                                              硬件控制，送出的数据不变
+  qybit mixer --device <设备> --save|--restore [--file <路径>]
+                                             Linux：保存或恢复该卡的混音器状态（缺省文件
+                                             ~/.config/qybit/mixer-<声卡 id>.txt）；恢复时逐项核对，
+                                             不符的跳过并说明
   qybit decode <输入> <输出.wav>              诊断：自有解码 + pack 写成标准 WAV，可用任何播放器试听
   qybit tone <输出.wav|.aiff> [--rate 44100] [--bits 16|24|32 | --float 32|64] [--seconds 5] [--freq 1000]
                                              诊断：写一个双声道正弦测试音（约 −12 dBFS）；输出文件扩展名为
@@ -38,6 +42,13 @@ PowerShell 会把未加引号的 {…} 当成脚本块，端点 ID 要加单引�
 
 退出码：0 完整播放；2 播放完成但有欠载；1 失败（含设备不支持、打开失败、设备错误、中断）。";
 
+/// 混音器状态文件操作（A3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MixerState {
+    Save,
+    Restore,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     ListDevices,
@@ -54,11 +65,14 @@ pub enum Command {
         device: String,
         out: PathBuf,
     },
-    /// 声卡硬件混音器（Linux，tasks/A2.md）：`control` 为空时列出。
+    /// 声卡硬件混音器（Linux，tasks/A2.md）：`control` 为空且 `state` 为空时列出；
+    /// `state` 为保存或恢复状态文件（tasks/A3.md）。
     Mixer {
         device: String,
         control: Option<String>,
         values: Vec<String>,
+        state: Option<MixerState>,
+        file: Option<PathBuf>,
     },
     Decode {
         input: PathBuf,
@@ -173,9 +187,23 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         Some("mixer") => {
             let mut device = None;
             let mut rest = Vec::new();
+            let mut state = None;
+            let mut file = None;
             while let Some(a) = it.next() {
                 if a == "--device" {
                     device = Some(device_value(&mut it)?);
+                } else if a == "--save" || a == "--restore" {
+                    let s = if a == "--save" {
+                        MixerState::Save
+                    } else {
+                        MixerState::Restore
+                    };
+                    if state.is_some_and(|x| x != s) {
+                        return Err("--save 与 --restore 只能选一个".into());
+                    }
+                    state = Some(s);
+                } else if a == "--file" {
+                    file = Some(PathBuf::from(value(&mut it, "--file")?));
                 } else if a.starts_with("--") {
                     return Err(format!("未知参数：{a}"));
                 } else {
@@ -183,6 +211,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 }
             }
             let device = device.ok_or("mixer 需要 --device <hw 设备>")?;
+            if state.is_some() && !rest.is_empty() {
+                return Err("--save / --restore 不能与设置控制同时使用".into());
+            }
+            if state.is_none() && file.is_some() {
+                return Err("--file 只用于 --save 或 --restore".into());
+            }
             let mut rest = rest.into_iter();
             let control = rest.next();
             let values: Vec<String> = rest.collect();
@@ -196,6 +230,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 device,
                 control,
                 values,
+                state,
+                file,
             })
         }
         Some("--device") => {
@@ -342,7 +378,9 @@ mod tests {
             Ok(Command::Mixer {
                 device: "hw:CARD=X".into(),
                 control: None,
-                values: vec![]
+                values: vec![],
+                state: None,
+                file: None
             })
         );
         // 负的 dB 值以单个 “-” 开头，不当作参数。
@@ -351,12 +389,42 @@ mod tests {
             Ok(Command::Mixer {
                 device: "hw:0".into(),
                 control: Some("Master".into()),
-                values: vec!["-20dB".into(), "on".into()]
+                values: vec!["-20dB".into(), "on".into()],
+                state: None,
+                file: None
             })
         );
         assert!(p(&["mixer", "--device", "hw:0", "Master"]).is_err());
         assert!(p(&["mixer", "Master", "40%"]).is_err());
         assert!(p(&["mixer", "--device", "hw:0", "--x"]).is_err());
+        assert_eq!(
+            p(&[
+                "mixer",
+                "--device",
+                "hw:0",
+                "--restore",
+                "--file",
+                "/etc/m.txt"
+            ]),
+            Ok(Command::Mixer {
+                device: "hw:0".into(),
+                control: None,
+                values: vec![],
+                state: Some(MixerState::Restore),
+                file: Some("/etc/m.txt".into())
+            })
+        );
+        assert!(matches!(
+            p(&["mixer", "--save", "--device", "hw:0"]),
+            Ok(Command::Mixer {
+                state: Some(MixerState::Save),
+                file: None,
+                ..
+            })
+        ));
+        assert!(p(&["mixer", "--device", "hw:0", "--save", "--restore"]).is_err());
+        assert!(p(&["mixer", "--device", "hw:0", "--save", "Master", "40%"]).is_err());
+        assert!(p(&["mixer", "--device", "hw:0", "--file", "x"]).is_err());
     }
 
     /// PowerShell 吞掉未加引号的 `{…}` 后，文件名落到 `--device` 的位置：给出原因。
