@@ -194,4 +194,6 @@ CI（run 39058369531，提交 6dc07fc，2026-10-17）：`linux-static` 五个架
    - `sudo modprobe snd-aloop`，确认 `cat /proc/asound/cards` 中有 Loopback；
    - 运行 `QYBIT_REPORT_DIR=./report ./qybit-loopback-aloop --ignored --nocapture --test-threads=1`。
 
+2026-10-18 真机结果（用户）：USB 耳机（`hw:CARD=em006,DEV=0`，S24_3LE）播放正常、读回一致、无欠载；主板声卡 `hw:CARD=Generic_1,DEV=0` 读回一致、无欠载，但 3.5 mm 耳机无声，原因是混音器 Master 为 0% 且静音（没有桌面服务去打开它）。格式矩阵 48 项中 8 项读回一致并播放完整，顺序换曲通过。`SCHED_FIFO` 以普通用户运行时为 EPERM（未授予实时调度），没有欠载。为混音器增加了 A2 `qybit mixer`（[a2-mixer.md](a2-mixer.md)）。
+
 设备被 PipeWire / PulseAudio 占用时会报告 EBUSY 与占用进程，需先停止它们。没有桌面的系统通常没有这些服务。把输出与 `report/` 下的 JSON 发回即可记录。

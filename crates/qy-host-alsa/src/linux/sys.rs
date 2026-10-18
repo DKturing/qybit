@@ -19,7 +19,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use crate::kernel::abi::Xferi;
+use crate::kernel::abi::{ElemId, ElemList, Xferi, Zeroed};
 use crate::pcm::errno;
 
 fn last_errno() -> i32 {
@@ -93,6 +93,25 @@ pub fn ioctl_tlv(f: &File, req: u32, buf: &mut [u32]) -> Result<i32, i32> {
     // 按头中的 length 限制），二者都在 buf 之内。
     let r = unsafe { libc::ioctl(f.as_raw_fd(), req as _, buf.as_mut_ptr()) };
     if r < 0 { Err(last_errno()) } else { Ok(r) }
+}
+
+/// 列出控制元素（`SNDRV_CTL_IOCTL_ELEM_LIST`）：从第 `offset` 个起，把至多 `ids.len()` 个元素的
+/// 标识写入 `ids`。返回（写入的个数, 元素总数）。`ids` 为空时只取总数。
+pub fn elem_list(f: &File, req: u32, offset: u32, ids: &mut [ElemId]) -> Result<(usize, u32), i32> {
+    if ioc_size(req) != size_of::<ElemList>() {
+        return Err(errno::EINVAL);
+    }
+    let mut l = ElemList::zeroed();
+    l.offset = offset;
+    l.space = u32::try_from(ids.len()).map_err(|_| errno::EINVAL)?;
+    l.pids = ids.as_mut_ptr() as usize;
+    // SAFETY: fd 有效；l 的大小与编号一致；内核向 pids 写至多 space 个 `ElemId`
+    // （`snd_ctl_elem_list` 按 space 限制），space 等于 ids 的长度；ElemId 只含整数字段。
+    let r = unsafe { libc::ioctl(f.as_raw_fd(), req as _, &mut l as *mut ElemList) };
+    if r < 0 {
+        return Err(last_errno());
+    }
+    Ok(((l.used as usize).min(ids.len()), l.count))
 }
 
 /// 写入交错帧（`SNDRV_PCM_IOCTL_WRITEI_FRAMES`），返回内核实际写入的帧数。

@@ -152,6 +152,12 @@ fn run(cmd: Command) -> ExitCode {
                 }
             }
         }
+        Command::Mixer { .. } => {
+            eprintln!(
+                "错误：qybit mixer 只用于 Linux ALSA；Windows 上设备的硬件音量在 qybit-gui 中调节（GUI T5）"
+            );
+            ExitCode::FAILURE
+        }
         Command::Help | Command::Version | Command::Decode { .. } | Command::Tone { .. } => {
             ExitCode::SUCCESS
         }
@@ -196,6 +202,9 @@ fn run(cmd: Command) -> ExitCode {
                 return ExitCode::FAILURE;
             }
             println!("设备：{device}（ALSA hw）");
+            if let Some(h) = qy_host_alsa::linux::mixer::playback_hint(&device) {
+                println!("{h}");
+            }
             let mut res = match qy_player::HostResources::new() {
                 Ok(r) => r,
                 Err(e) => {
@@ -241,6 +250,30 @@ fn run(cmd: Command) -> ExitCode {
                 }
                 Err(e) => {
                     eprintln!("错误：写报告失败：{e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::Mixer {
+            device,
+            control,
+            values,
+        } => {
+            use qy_host_alsa::linux::mixer;
+            let r = match control {
+                None => mixer::show(&device),
+                Some(c) => mixer::set(&device, &c, &values),
+            };
+            match r {
+                Ok(lines) => {
+                    for l in lines {
+                        println!("{l}");
+                    }
+                    println!("说明：只调设备自身的硬件控制，送出的数据不变（软件增益恒为 1）。");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("错误：{e}");
                     ExitCode::FAILURE
                 }
             }

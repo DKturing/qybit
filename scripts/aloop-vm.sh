@@ -1,5 +1,5 @@
 #!/bin/bash
-# A1：在 QEMU 虚拟机（Ubuntu 通用内核 + snd-aloop）中运行内核 ALSA 接口的真实测试。
+# A1：在 QEMU 虚拟机（Ubuntu 通用内核 + snd-aloop、snd-dummy）中运行内核 ALSA 接口的真实测试。
 #
 # 用途：CI runner 与很多开发机不能加载内核模块；这里启动一个只含 busybox、声卡模块与 musl 静态
 # 测试程序的最小虚拟机，以 root 对每个目标架构运行：
@@ -7,7 +7,8 @@
 #   2. qy-host-alsa 中直接调用内核的单元测试（linux::，含打开每个 hw 设备、查询格式与声道映射；
 #      其余单元测试用假设备与夹具，在宿主上运行）；
 #   3. 设备测试（hw:CARD=Loopback,DEV=0：格式矩阵 48 项、顺序换曲、WAV/FLAC 播放）；
-#   4. B 层回环矩阵（tests/loopback_aloop.rs，逐字节比对）。
+#   4. B 层回环矩阵（tests/loopback_aloop.rs，逐字节比对）；
+#   5. 混音器读写（A2，tests/mixer.rs，snd-dummy 虚拟声卡 hw:CARD=Dummy）。
 #
 # QYBIT_VM_ARCH：
 #   x86_64（默认）：x86_64 内核，运行 x86_64-unknown-linux-musl 程序；
@@ -51,7 +52,7 @@ fetch() { # 包名 版本 → 解压到 $WORK/pkg/root
     curl -fsS -o "$WORK/pkg/$name.deb" "$MIRROR/pool/main/$first/$src/${name}_${ver}_$DEB_ARCH.deb"
     dpkg-deb -x "$WORK/pkg/$name.deb" "$WORK/pkg/root"
 }
-if [ ! -f "$WORK/pkg/ok" ]; then
+if [ ! -f "$WORK/pkg/ok" ] || [ ! -f "$WORK/pkg/ko/snd-dummy.ko" ]; then
     rm -rf "$WORK/pkg" && mkdir -p "$WORK/pkg/ko"
     image=$(apt-cache depends linux-image-generic | sed -n 's/.*Depends: \(linux-image-[0-9][^ ]*\)/\1/p' | head -1)
     kver=${image#linux-image-}
@@ -61,7 +62,7 @@ if [ ! -f "$WORK/pkg/ok" ]; then
     for p in linux-image-unsigned linux-modules linux-modules-extra; do fetch "$p-$kver" "$pver"; done
     fetch busybox-static "${bver#*:}"
     cp "$WORK/pkg/root/boot/vmlinuz-$kver" "$WORK/pkg/vmlinuz"
-    for m in soundcore snd snd-timer snd-pcm snd-aloop; do
+    for m in soundcore snd snd-timer snd-pcm snd-aloop snd-dummy; do
         f=$(find "$WORK/pkg/root/lib/modules/$kver" -name "$m.ko*" | head -1)
         [ -n "$f" ] || { echo "未运行：内核 $kver 没有模块 $m" >&2; exit 2; }
         case "$f" in
@@ -94,7 +95,7 @@ for t in $TARGETS; do
     cargo test --locked --release -p qy-host-alsa --target "$t" --no-run
     mkdir -p "$I/t/$t"
     cp "target/$t/release/qybit" "$I/t/$t/"
-    for b in qy_host_alsa device loopback_aloop; do
+    for b in qy_host_alsa device loopback_aloop mixer; do
         cp "$(ls -t target/"$t"/release/deps/"$b"-* | grep -v '\.d$' | head -1)" "$I/t/$t/$b"
     done
 done
@@ -105,10 +106,10 @@ TARGETS="$TARGETS"
 EOF
 cat >> "$I/init" <<'EOF'
 mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev; mount -t tmpfs tmp /tmp
-for m in soundcore snd snd-timer snd-pcm snd-aloop; do insmod /ko/$m.ko; done
+for m in soundcore snd snd-timer snd-pcm snd-aloop snd-dummy; do insmod /ko/$m.ko; done
 echo "=== kernel $(cat /proc/sys/kernel/osrelease)"
 cat /proc/asound/cards
-export QYBIT_ALSA_DEVICE=hw:CARD=Loopback,DEV=0 RUST_BACKTRACE=1
+export QYBIT_ALSA_DEVICE=hw:CARD=Loopback,DEV=0 QYBIT_MIXER_DEVICE=hw:CARD=Dummy RUST_BACKTRACE=1
 cd /tmp
 step() { name=$1; shift; echo "=== step $name"; "$@" 2>&1; echo "=== result $name $?"; }
 for t in $TARGETS; do
@@ -119,6 +120,7 @@ for t in $TARGETS; do
     step "$t/unit" $d/qy_host_alsa --nocapture --test-threads=1 linux::
     step "$t/device" $d/device --ignored --nocapture --test-threads=1
     step "$t/loopback" $d/loopback_aloop --ignored --nocapture --test-threads=1
+    step "$t/mixer" $d/mixer --ignored --nocapture --test-threads=1
     for f in $QYBIT_REPORT_DIR/*; do
         [ -f "$f" ] || continue
         echo "=== begin $t/${f##*/}"; cat "$f"; echo; echo "=== end $t/${f##*/}"
@@ -151,7 +153,7 @@ grep -E '=== kernel|^=== (result|done)' "$log" || true
 grep -q '^=== done' "$log" || { echo "虚拟机未正常结束，见 $log" >&2; exit 1; }
 fail=0
 for t in $TARGETS; do
-    for s in list-devices unit device loopback; do
+    for s in list-devices unit device loopback mixer; do
         grep -q "^=== result $t/$s 0\$" "$log" || { echo "失败：$t/$s（见 $log）" >&2; fail=1; }
     done
 done

@@ -254,8 +254,31 @@ pub struct ElemId {
 
 /// `SNDRV_CTL_ELEM_IFACE_PCM`。
 pub const ELEM_IFACE_PCM: i32 = 3;
-/// `SNDRV_CTL_ELEM_TYPE_INTEGER`。
+/// `SNDRV_CTL_ELEM_IFACE_MIXER`（混音器元素，A2）。
+pub const ELEM_IFACE_MIXER: i32 = 2;
+/// `SNDRV_CTL_ELEM_TYPE_*`。
+pub const ELEM_TYPE_BOOLEAN: i32 = 1;
 pub const ELEM_TYPE_INTEGER: i32 = 2;
+pub const ELEM_TYPE_ENUMERATED: i32 = 3;
+pub const ELEM_TYPE_INTEGER64: i32 = 6;
+/// `SNDRV_CTL_ELEM_ACCESS_*`。
+pub const ELEM_ACCESS_READ: u32 = 1 << 0;
+pub const ELEM_ACCESS_WRITE: u32 = 1 << 1;
+pub const ELEM_ACCESS_TLV_READ: u32 = 1 << 4;
+pub const ELEM_ACCESS_INACTIVE: u32 = 1 << 8;
+pub const ELEM_ACCESS_LOCK: u32 = 1 << 9;
+
+/// `struct snd_ctl_elem_list`（`pids` 指向调用方的 `ElemId` 数组，在系统调用边界填写）。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElemList {
+    pub offset: u32,
+    pub space: u32,
+    pub used: u32,
+    pub count: u32,
+    pub pids: usize,
+    pub reserved: [u8; 50],
+}
 
 /// 值联合（`long value[128]` / `long long value[64]` / `unsigned char data[512]` …）的存储：
 /// 大小为 128 个 `long`，按 8 字节对齐（联合含 `long long`）。按 `long` 读写见
@@ -272,47 +295,89 @@ pub struct ElemValue {
     pub reserved: [u8; 128],
 }
 
-impl ElemValue {
-    /// 第 `i` 个 `long`（`value.integer.value[i]`）；越界为 `None`。
-    pub fn integer(&self, i: usize) -> Option<i64> {
-        if size_of::<isize>() == 8 {
-            self.value.get(i).map(|&w| w as i64)
-        } else {
-            let w = *self.value.get(i / 2)?;
-            let half = if i.is_multiple_of(2) {
-                w as u32
-            } else {
-                (w >> 32) as u32
-            };
-            Some(i64::from(half as i32))
+/// 值联合中的第 `i` 个 `long`（64 位为一个字，32 位为半个字）；越界为 `None`。
+fn long_in(words: &[u64], i: usize) -> Option<i64> {
+    if size_of::<isize>() == 8 {
+        words.get(i).map(|&w| w as i64)
+    } else {
+        u32_in(words, i).map(|h| i64::from(h as i32))
+    }
+}
+
+/// 设定第 `i` 个 `long`；越界或超出 `long` 的范围时返回 `false`。
+fn set_long_in(words: &mut [u64], i: usize, v: i64) -> bool {
+    if size_of::<isize>() == 8 {
+        match words.get_mut(i) {
+            Some(w) => {
+                *w = v as u64;
+                true
+            }
+            None => false,
         }
+    } else {
+        match i32::try_from(v) {
+            Ok(v) => set_u32_in(words, i, v as u32),
+            Err(_) => false,
+        }
+    }
+}
+
+/// 值联合中的第 `i` 个 `unsigned int`（小端：字的低半在前）。
+fn u32_in(words: &[u64], i: usize) -> Option<u32> {
+    let w = *words.get(i / 2)?;
+    Some(if i.is_multiple_of(2) {
+        w as u32
+    } else {
+        (w >> 32) as u32
+    })
+}
+
+fn set_u32_in(words: &mut [u64], i: usize, v: u32) -> bool {
+    let Some(w) = words.get_mut(i / 2) else {
+        return false;
+    };
+    let half = u64::from(v);
+    *w = if i.is_multiple_of(2) {
+        (*w & !0xffff_ffff) | half
+    } else {
+        (*w & 0xffff_ffff) | (half << 32)
+    };
+    true
+}
+
+impl ElemValue {
+    /// 第 `i` 个 `long`（`value.integer.value[i]`，也用于 BOOLEAN）；越界为 `None`。
+    pub fn integer(&self, i: usize) -> Option<i64> {
+        long_in(&self.value, i)
     }
 
     /// 设定第 `i` 个 `long`；越界或超出 `long` 的范围时返回 `false`。
     pub fn set_integer(&mut self, i: usize, v: i64) -> bool {
-        if size_of::<isize>() == 8 {
-            match self.value.get_mut(i) {
-                Some(w) => {
-                    *w = v as u64;
-                    true
-                }
-                None => false,
+        set_long_in(&mut self.value, i, v)
+    }
+
+    /// 第 `i` 个 `long long`（`value.integer64.value[i]`）。
+    pub fn integer64(&self, i: usize) -> Option<i64> {
+        self.value.get(i).map(|&w| w as i64)
+    }
+
+    pub fn set_integer64(&mut self, i: usize, v: i64) -> bool {
+        match self.value.get_mut(i) {
+            Some(w) => {
+                *w = v as u64;
+                true
             }
-        } else {
-            let Ok(v) = i32::try_from(v) else {
-                return false;
-            };
-            let Some(w) = self.value.get_mut(i / 2) else {
-                return false;
-            };
-            let half = u64::from(v as u32);
-            *w = if i.is_multiple_of(2) {
-                (*w & !0xffff_ffff) | half
-            } else {
-                (*w & 0xffff_ffff) | (half << 32)
-            };
-            true
+            None => false,
         }
+    }
+
+    /// 第 `i` 个枚举项号（`value.enumerated.item[i]`）。
+    pub fn enumerated(&self, i: usize) -> Option<u32> {
+        u32_in(&self.value, i)
+    }
+
+    pub fn set_enumerated(&mut self, i: usize, v: u32) -> bool {
+        set_u32_in(&mut self.value, i, v)
     }
 }
 
@@ -329,6 +394,45 @@ pub struct ElemInfo {
     pub reserved: [u8; 64],
 }
 
+impl ElemInfo {
+    /// INTEGER 的 `(min, max, step)`（`value.integer`，三个 `long`）。
+    pub fn integer_range(&self) -> Option<(i64, i64, i64)> {
+        Some((
+            long_in(&self.value, 0)?,
+            long_in(&self.value, 1)?,
+            long_in(&self.value, 2)?,
+        ))
+    }
+
+    /// INTEGER64 的 `(min, max, step)`（三个 `long long`）。
+    pub fn integer64_range(&self) -> (i64, i64, i64) {
+        (
+            self.value[0] as i64,
+            self.value[1] as i64,
+            self.value[2] as i64,
+        )
+    }
+
+    /// ENUMERATED 的项数（`value.enumerated.items`）。
+    pub fn enum_items(&self) -> u32 {
+        self.value[0] as u32
+    }
+
+    /// 设定要查询名称的项号（`value.enumerated.item`，查询前写入）。
+    pub fn set_enum_item(&mut self, item: u32) {
+        self.value[0] = (self.value[0] & 0xffff_ffff) | (u64::from(item) << 32);
+    }
+
+    /// 内核填写的项名称（`value.enumerated.name[64]`，联合的第 8 字节起）。
+    pub fn enum_name(&self) -> String {
+        let mut bytes = [0u8; 64];
+        for (k, w) in self.value[1..9].iter().enumerate() {
+            bytes[k * 8..k * 8 + 8].copy_from_slice(&w.to_le_bytes());
+        }
+        c_text(&bytes)
+    }
+}
+
 /// `struct snd_ctl_tlv` 的头（其后为 `length` 字节的 TLV 数据）。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,6 +446,16 @@ pub const TLVT_CONTAINER: u32 = 0;
 pub const TLVT_CHMAP_FIXED: u32 = 0x101;
 pub const TLVT_CHMAP_VAR: u32 = 0x102;
 pub const TLVT_CHMAP_PAIRED: u32 = 0x103;
+/// dB 信息的 TLV 类型（`sound/tlv.h`）。
+pub const TLVT_DB_SCALE: u32 = 1;
+pub const TLVT_DB_LINEAR: u32 = 2;
+pub const TLVT_DB_RANGE: u32 = 3;
+pub const TLVT_DB_MINMAX: u32 = 4;
+pub const TLVT_DB_MINMAX_MUTE: u32 = 5;
+/// `SNDRV_CTL_TLVD_DB_SCALE_MUTE`：DB_SCALE 第二个字中的“最小档为静音”标志。
+pub const TLVD_DB_SCALE_MUTE: u32 = 0x1_0000;
+/// `SNDRV_CTL_TLVD_DB_GAIN_MUTE`：表示静音的 dB 值（单位 0.01 dB）。
+pub const TLVD_DB_GAIN_MUTE: i32 = -9_999_999;
 /// `SNDRV_CHMAP_POSITION_MASK`：位置值的有效位，之上为标志（反相、驱动自定义）。
 pub const CHMAP_POSITION_MASK: u32 = 0xffff;
 
@@ -365,6 +479,7 @@ pub const PCM_IOCTL_READI_FRAMES: u32 = ior(b'A', 0x51, size_of::<Xferi>());
 
 pub const CTL_IOCTL_PVERSION: u32 = ior(b'U', 0x00, size_of::<i32>());
 pub const CTL_IOCTL_CARD_INFO: u32 = ior(b'U', 0x01, size_of::<CardInfo>());
+pub const CTL_IOCTL_ELEM_LIST: u32 = iowr(b'U', 0x10, size_of::<ElemList>());
 pub const CTL_IOCTL_ELEM_INFO: u32 = iowr(b'U', 0x11, size_of::<ElemInfo>());
 pub const CTL_IOCTL_ELEM_READ: u32 = iowr(b'U', 0x12, size_of::<ElemValue>());
 pub const CTL_IOCTL_ELEM_WRITE: u32 = iowr(b'U', 0x13, size_of::<ElemValue>());
@@ -385,6 +500,7 @@ const _: () = assert!(size_of::<ElemId>() == 64);
 const _: () = assert!(size_of::<ElemValue>() == if W64 { 1224 } else { 712 });
 const _: () = assert!(size_of::<ElemInfo>() == 272);
 const _: () = assert!(size_of::<TlvHeader>() == 8);
+const _: () = assert!(size_of::<ElemList>() == if W64 { 80 } else { 72 });
 
 /// 全零的值（所有结构体的字段都是整数或整数数组，全零是合法值）。
 pub trait Zeroed: Sized {
@@ -491,6 +607,14 @@ zeroed! {
         components: [0; 128],
     },
     ElemId => ZERO_ID,
+    ElemList => ElemList {
+        offset: 0,
+        space: 0,
+        used: 0,
+        count: 0,
+        pids: 0,
+        reserved: [0; 50],
+    },
     ElemValue => ElemValue {
         id: ZERO_ID,
         indirect: 0,
@@ -650,6 +774,74 @@ mod tests {
         assert_eq!(PCM_IOCTL_USER_PVERSION, 0x4004_4104);
         assert_eq!(CTL_IOCTL_PCM_PREFER_SUBDEVICE, 0x4004_5532);
         assert_eq!(protocol_major(PCM_VERSION), 2);
+    }
+
+    /// A2 用到的混音器部分（gcc 与 glibc 的 `sound/asound.h`、`sound/tlv.h` 编译运行得到的
+    /// 64 位值；32 位按同一头文件的布局：四个 `unsigned int`、4 字节指针、50 字节保留，按 4 对齐）。
+    #[test]
+    fn mixer_layouts_and_constants() {
+        if size_of::<usize>() == 8 {
+            assert_eq!(size_of::<ElemList>(), 80);
+            assert_eq!(offset_of!(ElemList, reserved), 24);
+            assert_eq!(CTL_IOCTL_ELEM_LIST, 0xc050_5510);
+        } else {
+            assert_eq!(size_of::<ElemList>(), 72);
+            assert_eq!(offset_of!(ElemList, reserved), 20);
+            assert_eq!(CTL_IOCTL_ELEM_LIST, 0xc048_5510);
+        }
+        assert_eq!(offset_of!(ElemList, pids), 16);
+        // 枚举名称在 snd_ctl_elem_info 中的偏移为 88（值联合在 80，名称在联合内第 8 字节）。
+        assert_eq!(offset_of!(ElemInfo, value) + 8, 88);
+        assert_eq!(
+            (
+                TLVT_DB_SCALE,
+                TLVT_DB_LINEAR,
+                TLVT_DB_RANGE,
+                TLVT_DB_MINMAX,
+                TLVT_DB_MINMAX_MUTE
+            ),
+            (1, 2, 3, 4, 5)
+        );
+        assert_eq!(
+            (TLVD_DB_SCALE_MUTE, TLVD_DB_GAIN_MUTE),
+            (0x10000, -9_999_999)
+        );
+        assert_eq!(
+            (ELEM_ACCESS_READ, ELEM_ACCESS_WRITE, ELEM_ACCESS_TLV_READ),
+            (1, 2, 0x10)
+        );
+        assert_eq!((ELEM_ACCESS_INACTIVE, ELEM_ACCESS_LOCK), (0x100, 0x200));
+        assert_eq!(
+            (
+                ELEM_TYPE_BOOLEAN,
+                ELEM_TYPE_ENUMERATED,
+                ELEM_TYPE_INTEGER64,
+                ELEM_IFACE_MIXER
+            ),
+            (1, 3, 6, 2)
+        );
+    }
+
+    #[test]
+    fn elem_info_accessors() {
+        let mut i = ElemInfo::zeroed();
+        // INTEGER：min −50、max 100、step 1（按本进程 long 的宽度写入）。
+        assert!(set_long_in(&mut i.value, 0, -50));
+        assert!(set_long_in(&mut i.value, 1, 100));
+        assert!(set_long_in(&mut i.value, 2, 1));
+        assert_eq!(i.integer_range(), Some((-50, 100, 1)));
+        // ENUMERATED：items 与 item 共用第一个字，名称从联合第 8 字节起。
+        let mut e = ElemInfo::zeroed();
+        e.value[0] = 3;
+        e.set_enum_item(2);
+        assert_eq!((e.enum_items(), e.value[0] >> 32), (3, 2));
+        e.value[1] = u64::from_le_bytes(*b"Enabled\0");
+        assert_eq!(e.enum_name(), "Enabled");
+        let mut v = ElemValue::zeroed();
+        assert!(v.set_enumerated(0, 1) && v.set_enumerated(1, 2));
+        assert_eq!((v.enumerated(0), v.enumerated(1)), (Some(1), Some(2)));
+        assert!(v.set_integer64(1, -7));
+        assert_eq!(v.integer64(1), Some(-7));
     }
 
     #[test]

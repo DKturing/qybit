@@ -9,6 +9,10 @@ pub const USAGE: &str = "\
                                              按顺序播放 WAV/FLAC/AIFF（按文件头识别）；Ctrl+C 停止并输出报告
   qybit matrix --device <设备> [--out <目录>]
                                              运行设备格式矩阵，写出 JSON/CSV 报告
+  qybit mixer --device <设备> [<控制>[,<序号>] <值>...]
+                                             Linux：列出或设置声卡的硬件混音器（静音开关与音量）；值为
+                                             on、off、40%、-20dB、原始值或枚举项名称。只调设备自身的
+                                             硬件控制，送出的数据不变
   qybit decode <输入> <输出.wav>              诊断：自有解码 + pack 写成标准 WAV，可用任何播放器试听
   qybit tone <输出.wav|.aiff> [--rate 44100] [--bits 16|24|32 | --float 32|64] [--seconds 5] [--freq 1000]
                                              诊断：写一个双声道正弦测试音（约 −12 dBFS）；输出文件扩展名为
@@ -49,6 +53,12 @@ pub enum Command {
     Matrix {
         device: String,
         out: PathBuf,
+    },
+    /// 声卡硬件混音器（Linux，tasks/A2.md）：`control` 为空时列出。
+    Mixer {
+        device: String,
+        control: Option<String>,
+        values: Vec<String>,
     },
     Decode {
         input: PathBuf,
@@ -158,6 +168,34 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             Ok(Command::Matrix {
                 device: device.ok_or("matrix 需要 --device <端点ID>")?,
                 out: out.unwrap_or_else(|| PathBuf::from("qybit-report")),
+            })
+        }
+        Some("mixer") => {
+            let mut device = None;
+            let mut rest = Vec::new();
+            while let Some(a) = it.next() {
+                if a == "--device" {
+                    device = Some(device_value(&mut it)?);
+                } else if a.starts_with("--") {
+                    return Err(format!("未知参数：{a}"));
+                } else {
+                    rest.push(a.to_string());
+                }
+            }
+            let device = device.ok_or("mixer 需要 --device <hw 设备>")?;
+            let mut rest = rest.into_iter();
+            let control = rest.next();
+            let values: Vec<String> = rest.collect();
+            if control.is_some() && values.is_empty() {
+                return Err(
+                    "设置混音器控制需要值，例如：qybit mixer --device hw:CARD=X Master 40% on"
+                        .into(),
+                );
+            }
+            Ok(Command::Mixer {
+                device,
+                control,
+                values,
             })
         }
         Some("--device") => {
@@ -295,6 +333,30 @@ mod tests {
                 out: "r".into()
             })
         );
+    }
+
+    #[test]
+    fn parses_mixer() {
+        assert_eq!(
+            p(&["mixer", "--device", "hw:CARD=X"]),
+            Ok(Command::Mixer {
+                device: "hw:CARD=X".into(),
+                control: None,
+                values: vec![]
+            })
+        );
+        // 负的 dB 值以单个 “-” 开头，不当作参数。
+        assert_eq!(
+            p(&["mixer", "--device", "hw:0", "Master", "-20dB", "on"]),
+            Ok(Command::Mixer {
+                device: "hw:0".into(),
+                control: Some("Master".into()),
+                values: vec!["-20dB".into(), "on".into()]
+            })
+        );
+        assert!(p(&["mixer", "--device", "hw:0", "Master"]).is_err());
+        assert!(p(&["mixer", "Master", "40%"]).is_err());
+        assert!(p(&["mixer", "--device", "hw:0", "--x"]).is_err());
     }
 
     /// PowerShell 吞掉未加引号的 `{…}` 后，文件名落到 `--device` 的位置：给出原因。

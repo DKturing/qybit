@@ -1,5 +1,5 @@
 //! 内核 ALSA 控制接口（`/dev/snd/controlC{卡}`，A1）：声卡信息、PCM 设备枚举、子设备偏好与
-//! 声道映射元素。
+//! 声道映射元素；A2 起另有元素列表与通用的元素读写（混音器）。
 //!
 //! 出处：内核 `include/uapi/sound/asound.h`（控制协议 2.0.9）、`sound/core/control.c`、
 //! `sound/core/pcm.c`（`snd_pcm_control_ioctl`）与 `sound/core/pcm_lib.c`
@@ -14,10 +14,11 @@ use qy_pcm_format::alsa::{CHMAP_POSITION_MASK, Card, ChmapType};
 
 use super::sys;
 use crate::kernel::abi::{
-    CTL_IOCTL_CARD_INFO, CTL_IOCTL_ELEM_INFO, CTL_IOCTL_ELEM_READ, CTL_IOCTL_ELEM_WRITE,
-    CTL_IOCTL_PCM_INFO, CTL_IOCTL_PCM_NEXT_DEVICE, CTL_IOCTL_PCM_PREFER_SUBDEVICE,
-    CTL_IOCTL_PVERSION, CTL_IOCTL_TLV_READ, CardInfo, ELEM_IFACE_PCM, ElemId, ElemInfo, ElemValue,
-    PcmInfo, STREAM_PLAYBACK, Zeroed, c_text, protocol_major, set_c_text,
+    CTL_IOCTL_CARD_INFO, CTL_IOCTL_ELEM_INFO, CTL_IOCTL_ELEM_LIST, CTL_IOCTL_ELEM_READ,
+    CTL_IOCTL_ELEM_WRITE, CTL_IOCTL_PCM_INFO, CTL_IOCTL_PCM_NEXT_DEVICE,
+    CTL_IOCTL_PCM_PREFER_SUBDEVICE, CTL_IOCTL_PVERSION, CTL_IOCTL_TLV_READ, CardInfo,
+    ELEM_IFACE_PCM, ElemId, ElemInfo, ElemValue, PcmInfo, STREAM_PLAYBACK, Zeroed, c_text,
+    protocol_major, set_c_text,
 };
 use crate::kernel::tlv::parse_chmaps;
 use crate::pcm::{PcmError, errno};
@@ -190,6 +191,84 @@ impl Ctl {
                 call: "SNDRV_CTL_IOCTL_ELEM_WRITE（Channel Map）",
                 errno: e,
             })
+    }
+}
+
+/// 元素列表一次取的个数。
+const LIST_CHUNK: usize = 256;
+
+impl Ctl {
+    /// 全部控制元素的标识（`ELEM_LIST`，按内核顺序）。
+    pub fn elem_ids(&self) -> Result<Vec<ElemId>, PcmError> {
+        let e = |errno| PcmError {
+            call: "SNDRV_CTL_IOCTL_ELEM_LIST",
+            errno,
+        };
+        let (_, total) = sys::elem_list(&self.file, CTL_IOCTL_ELEM_LIST, 0, &mut []).map_err(e)?;
+        let mut out = Vec::new();
+        let mut buf = vec![ElemId::zeroed(); LIST_CHUNK];
+        while (out.len() as u64) < u64::from(total) {
+            let offset = u32::try_from(out.len()).map_err(|_| e(errno::EINVAL))?;
+            let (n, _) =
+                sys::elem_list(&self.file, CTL_IOCTL_ELEM_LIST, offset, &mut buf).map_err(e)?;
+            if n == 0 {
+                break; // 其间有元素被删除
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        Ok(out)
+    }
+
+    /// 元素信息（`ELEM_INFO`）。
+    pub fn elem_info(&self, id: &ElemId) -> Result<ElemInfo, PcmError> {
+        let mut info = ElemInfo::zeroed();
+        info.id = *id;
+        sys::ioctl(&self.file, CTL_IOCTL_ELEM_INFO, &mut info).map_err(|errno| PcmError {
+            call: "SNDRV_CTL_IOCTL_ELEM_INFO",
+            errno,
+        })?;
+        Ok(info)
+    }
+
+    /// 枚举元素第 `item` 项的名称。
+    pub fn enum_item_name(&self, id: &ElemId, item: u32) -> Result<String, PcmError> {
+        let mut info = ElemInfo::zeroed();
+        info.id = *id;
+        info.set_enum_item(item);
+        sys::ioctl(&self.file, CTL_IOCTL_ELEM_INFO, &mut info).map_err(|errno| PcmError {
+            call: "SNDRV_CTL_IOCTL_ELEM_INFO（枚举项）",
+            errno,
+        })?;
+        Ok(info.enum_name())
+    }
+
+    /// 元素当前值（`ELEM_READ`）。
+    pub fn elem_read(&self, id: &ElemId) -> Result<ElemValue, PcmError> {
+        let mut v = ElemValue::zeroed();
+        v.id = *id;
+        sys::ioctl(&self.file, CTL_IOCTL_ELEM_READ, &mut v).map_err(|errno| PcmError {
+            call: "SNDRV_CTL_IOCTL_ELEM_READ",
+            errno,
+        })?;
+        Ok(v)
+    }
+
+    /// 写元素值（`ELEM_WRITE`）；`v.id` 须已填写。
+    pub fn elem_write(&self, v: &mut ElemValue) -> Result<(), PcmError> {
+        sys::ioctl(&self.file, CTL_IOCTL_ELEM_WRITE, v)
+            .map(|_| ())
+            .map_err(|errno| PcmError {
+                call: "SNDRV_CTL_IOCTL_ELEM_WRITE",
+                errno,
+            })
+    }
+
+    /// 元素的 TLV（`TLV_READ`，`numid` 取自 `ELEM_INFO`）；读不到为 `None`。
+    pub fn elem_tlv(&self, numid: u32) -> Option<Vec<u32>> {
+        let mut buf = vec![0u32; TLV_WORDS];
+        buf[0] = numid;
+        sys::ioctl_tlv(&self.file, CTL_IOCTL_TLV_READ, &mut buf).ok()?;
+        Some(buf.split_off(2))
     }
 }
 
