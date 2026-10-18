@@ -22,12 +22,24 @@ fn device() -> String {
     }
 }
 
+/// `QYBIT_ALSA_PERIODS`：设备缓冲的周期数（缺省为后端默认值）。`scripts/aloop-vm.sh` 在软件
+/// 仿真的虚拟机中设为 16，只增加时序余量；真机测试不设。
+fn periods() -> Option<u32> {
+    std::env::var("QYBIT_ALSA_PERIODS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&p| (2..=64).contains(&p))
+}
+
 fn play_one(file: PathBuf, frames: u64) {
     let dev = device();
     let Ok(mut res) = HostResources::new() else {
         panic!("资源分配失败");
     };
     let mut backend = AlsaBackend::new(dev.clone(), KernelOpener, RtPriority::default());
+    if let Some(p) = periods() {
+        backend.periods = p;
+    }
     let report = play(&mut backend, &mut res, &[file]);
     println!("设备 {dev}\n{}", report.summary());
     assert!(
@@ -70,7 +82,7 @@ fn hw_playback_flac_44k_16bit() {
 fn hw_format_matrix_and_sequential() {
     let dev = device();
     let work = std::env::temp_dir().join("qybit-alsa-device-matrix");
-    let report = match qy_host_alsa::device_matrix(&dev, &work) {
+    let report = match qy_host_alsa::device_matrix_with(&dev, &work, periods()) {
         Ok(r) => r,
         Err(e) => panic!("{e}"),
     };

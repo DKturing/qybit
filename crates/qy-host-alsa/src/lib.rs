@@ -47,6 +47,17 @@ pub fn device_matrix(
     device: &str,
     work_dir: &std::path::Path,
 ) -> Result<matrix::MatrixReport, String> {
+    device_matrix_with(device, work_dir, None)
+}
+
+/// 同 [`device_matrix`]，`periods` 指定设备缓冲的周期数（`None` 为后端默认值；测试在软件仿真的
+/// 虚拟机中用更大的缓冲留出时序余量）。
+#[cfg(target_os = "linux")]
+pub fn device_matrix_with(
+    device: &str,
+    work_dir: &std::path::Path,
+    periods: Option<u32>,
+) -> Result<matrix::MatrixReport, String> {
     use linux::KernelOpener;
     use linux::priority::RtPriority;
     use matrix::{MatrixReport, backend_version, matrix_items, run_matrix, run_sequential};
@@ -57,10 +68,16 @@ pub fn device_matrix(
     let entries = run_matrix(&matrix_items(), &mut res, work_dir, |item| {
         let mut b = AlsaBackend::new(device, KernelOpener, RtPriority::default());
         b.forced = Some(item.format);
+        if let Some(p) = periods {
+            b.periods = p;
+        }
         b
     })
     .map_err(|e| e.to_string())?;
     let mut backend = AlsaBackend::new(device, KernelOpener, RtPriority::default());
+    if let Some(p) = periods {
+        backend.periods = p;
+    }
     let sequential =
         run_sequential(&entries, &mut res, work_dir, &mut backend).map_err(|e| e.to_string())?;
     Ok(MatrixReport {
