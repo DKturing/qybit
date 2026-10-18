@@ -1,0 +1,6 @@
+result Malformed
+format none
+mask none
+repairs none
+detail ds64:TooShort { size: 20 }
+samples 0

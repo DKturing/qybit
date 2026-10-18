@@ -48,7 +48,7 @@ pub enum Probe {
 }
 
 /// 可加入播放列表的扩展名（小写比较）。
-pub const EXTENSIONS: [&str; 6] = ["wav", "wave", "flac", "aif", "aiff", "aifc"];
+pub const EXTENSIONS: [&str; 8] = ["wav", "wave", "rf64", "bw64", "flac", "aif", "aiff", "aifc"];
 
 /// 扫描文件夹的最大深度（防止符号链接环）。
 const MAX_DEPTH: usize = 32;

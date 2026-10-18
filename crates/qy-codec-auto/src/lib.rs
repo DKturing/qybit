@@ -64,6 +64,10 @@ pub enum AutoInitError {
 }
 
 /// 流式 PCM 容器（WAV、AIFF）共用的工作区，同一时刻只由一个解码器持有。
+///
+/// F4 之后 WAV 解码器（含 ds64 块大小表）比 AIFF 大约 300 字节。`no_std`、无 alloc，不能装箱；
+/// 本枚举在 `AutoDecoder` 中只有一份，随宿主一次性取得的存储存放，大小差异只是固定的几百字节。
+#[allow(clippy::large_enum_variant)]
 enum Stream {
     /// 未提供工作区。
     None,

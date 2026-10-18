@@ -268,15 +268,16 @@ pub const MAX_REPAIRS: usize = 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Repair {
     /// 长度字段是流式写入程序留下的占位值（未回填），按读到源末尾处理；`read` 为实际读到的字节数。
+    /// `declared` 为长度字段的原值（RF64 / BW64 的 64 位长度也能如实报告，F4）。
     LengthPlaceholder {
         chunk: [u8; 4],
-        declared: u32,
+        declared: u64,
         read: u64,
     },
     /// 长度字段与源的实际长度不符，以数据块的声明长度为准；`actual` 为源中该块实际的字节数。
     LengthMismatch {
         chunk: [u8; 4],
-        declared: u32,
+        declared: u64,
         actual: u64,
     },
     /// 数据长度不是整帧，丢弃末尾不足一帧的字节。

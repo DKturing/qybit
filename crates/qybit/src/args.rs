@@ -270,9 +270,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
 fn device_value<'a>(it: &mut impl Iterator<Item = &'a str>) -> Result<String, String> {
     let v = value(it, "--device")?;
     let lower = v.to_ascii_lowercase();
-    if [".wav", ".flac", ".fla", ".aif", ".aiff", ".aifc"]
-        .iter()
-        .any(|e| lower.ends_with(e))
+    if [
+        ".wav", ".rf64", ".bw64", ".flac", ".fla", ".aif", ".aiff", ".aifc",
+    ]
+    .iter()
+    .any(|e| lower.ends_with(e))
     {
         return Err(format!(
             "--device 的值 {v} 看起来是音频文件，设备 ID 没有传进来。\

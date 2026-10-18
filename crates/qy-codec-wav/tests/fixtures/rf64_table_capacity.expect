@@ -1,0 +1,6 @@
+result CapacityExceeded
+format none
+mask none
+repairs none
+detail ds64:TableCapacity { entries: 9, capacity: 8 }
+samples 0

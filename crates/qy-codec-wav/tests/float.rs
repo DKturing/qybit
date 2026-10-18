@@ -41,6 +41,7 @@ fn parse(text: &str) -> Expect {
         "Malformed" => Err(DecodeError::Malformed),
         "Unsupported" => Err(DecodeError::Unsupported),
         "Truncated" => Err(DecodeError::Truncated),
+        "CapacityExceeded" => Err(DecodeError::CapacityExceeded),
         o => panic!("未知结果 {o}"),
     };
     let format = match field("format").as_str() {

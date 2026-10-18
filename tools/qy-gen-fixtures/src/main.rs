@@ -10,6 +10,7 @@
 mod aiff;
 mod flac;
 mod wav_float;
+mod wav_rf64;
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -210,9 +211,11 @@ struct Case {
     /// W1：期望的结构修正（文本形式，见 `expect_text`），由生成器按构造独立给出。
     repairs: Vec<String>,
     /// W1 R5：期望的 `DataShort` 明细（声明长度，缺少的字节数）。
-    short: Option<(u32, u64)>,
+    short: Option<(u64, u64)>,
     /// 期望的压缩码流明细（类型，在 data 中的偏移）。
     bitstream: Option<(&'static str, u32)>,
+    /// 其他明细的文本（F4 的 `ds64:…`），优先于上面两项。
+    detail: Option<String>,
 }
 
 fn err_case(name: &'static str, data: Vec<u8>, result: &'static str) -> Case {
@@ -230,6 +233,7 @@ fn err_case(name: &'static str, data: Vec<u8>, result: &'static str) -> Case {
         repairs: Vec::new(),
         short: None,
         bitstream: None,
+        detail: None,
     }
 }
 
@@ -262,6 +266,7 @@ fn ok_pcm(
         repairs: Vec::new(),
         short: None,
         bitstream: None,
+        detail: None,
     });
 }
 
@@ -290,6 +295,7 @@ fn ok_ext(
         repairs: Vec::new(),
         short: None,
         bitstream: None,
+        detail: None,
     });
 }
 
@@ -318,10 +324,11 @@ fn manual(
         repairs: Vec::new(),
         short: None,
         bitstream: None,
+        detail: None,
     });
 }
 
-fn build_cases() -> Vec<Case> {
+fn build_cases() -> Result<Vec<Case>> {
     let mut cases = Vec::new();
     let cs = &mut cases;
 
@@ -621,16 +628,6 @@ fn build_cases() -> Vec<Case> {
         un,
     ));
     cs.push(err_case(
-        "unsup_rf64",
-        riff_with(
-            &[fmt_pcm(pcm(2, 44_100, 16)), d.clone()],
-            0,
-            b"RF64",
-            b"WAVE",
-        ),
-        un,
-    ));
-    cs.push(err_case(
         "unsup_bits64",
         riff(&[fmt_pcm(pcm(1, 44_100, 64)), d.clone()]),
         un,
@@ -801,7 +798,8 @@ fn build_cases() -> Vec<Case> {
     );
     w1_cases(cs);
     bitstream_cases(cs);
-    cases
+    wav_rf64::cases(cs)?;
+    Ok(cases)
 }
 
 /// 可复现的伪随机字节。
@@ -894,7 +892,7 @@ fn set_repairs(cs: &mut [Case], repairs: &[String]) {
     }
 }
 
-fn set_short(cs: &mut [Case], declared: u32, missing: u64) {
+fn set_short(cs: &mut [Case], declared: u64, missing: u64) {
     if let Some(c) = cs.last_mut() {
         c.short = Some((declared, missing));
     }
@@ -969,6 +967,7 @@ fn w1_cases(cs: &mut Vec<Case>) {
         repairs: r,
         short: None,
         bitstream: None,
+        detail: None,
     });
 
     // RIFF 占位、data 长度正确（只有 R1）：data 之后的 LIST 照常跳过。
@@ -1232,6 +1231,7 @@ fn w1_cases(cs: &mut Vec<Case>) {
         repairs: vec!["partial:17".to_string()],
         short: None,
         bitstream: None,
+        detail: None,
     });
 
     // R3 + R4：RIFF 偏短，data 不是整帧。
@@ -1389,6 +1389,9 @@ fn expect_text(c: &Case) -> String {
         let _ = writeln!(s, "repairs {}", c.repairs.join(";"));
     }
     match (c.short, c.bitstream) {
+        _ if c.detail.is_some() => {
+            let _ = writeln!(s, "detail {}", c.detail.as_deref().unwrap_or_default());
+        }
         (Some((declared, missing)), _) => {
             let _ = writeln!(s, "detail data-short:{declared}:{missing}");
         }
@@ -1432,7 +1435,7 @@ fn main() -> Result<()> {
 
 fn wav_main(out: PathBuf) -> Result<()> {
     std::fs::create_dir_all(&out)?;
-    let cases = build_cases();
+    let cases = build_cases()?;
     let mut names = std::collections::HashSet::new();
     for c in &cases {
         if !names.insert(c.name) {

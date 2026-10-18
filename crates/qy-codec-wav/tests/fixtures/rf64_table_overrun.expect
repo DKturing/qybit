@@ -1,0 +1,6 @@
+result Malformed
+format none
+mask none
+repairs none
+detail ds64:TableOverrun { entries: 3, size: 40 }
+samples 0

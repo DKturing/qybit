@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use super::paint::{Align, Canvas, Rect};
 use super::x11::{Mods, keysym};
 
-const AUDIO: [&str; 6] = ["wav", "wave", "flac", "aif", "aiff", "aifc"];
+const AUDIO: [&str; 8] = ["wav", "wave", "rf64", "bw64", "flac", "aif", "aiff", "aifc"];
 
 /// 面板交给主视图的结果。
 pub enum FileResult {

@@ -452,6 +452,58 @@ fn build() -> Vec<Case> {
         ffmpeg_raw: false,
         ffmpeg_convert: false,
     });
+    let c = &mut cs;
+    // ---- F4：RF64 浮点。ffmpeg `-rf64 always` 的结构：fact 为 0xFFFFFFFF，帧数见 ds64.sampleCount ----
+    let rf = |body: &[u8], samples: u64, fact_value: Option<u32>, fmt: Vec<u8>| {
+        let mut chunks = vec![fmt];
+        if let Some(v) = fact_value {
+            chunks.push(chunk(b"fact", &v.to_le_bytes()));
+        }
+        chunks.push(super::wav_rf64::data(u32::MAX, body));
+        super::wav_rf64::rf64(
+            b"RF64",
+            super::wav_rf64::ds64(super::wav_rf64::AUTO, body.len() as u64, samples, &[], &[]),
+            &chunks,
+        )
+    };
+    let b = finite(31, 120 * 2, Enc::F32);
+    let body = encode(&b, Enc::F32);
+    ok_raw(
+        c,
+        "rf64_f32_fact_ds64",
+        rf(
+            &body,
+            120,
+            Some(u32::MAX),
+            fmt_float_ext(2, 44_100, Enc::F32, 3),
+        ),
+        (44_100, 2, Enc::F32),
+        Some(3),
+        b,
+        false,
+    );
+    bad(
+        c,
+        "rf64_f32_fact_mismatch",
+        rf(
+            &body,
+            121,
+            Some(u32::MAX),
+            fmt_float_ext(2, 44_100, Enc::F32, 3),
+        ),
+        "Malformed",
+        "fact:121:120:0",
+    );
+    let b = finite(32, 77, Enc::F64);
+    ok_raw(
+        c,
+        "rf64_f64_mono_no_fact",
+        rf(&encode(&b, Enc::F64), 0, None, fmt_tag3(1, 96_000, 64)),
+        (96_000, 1, Enc::F64),
+        None,
+        b,
+        false,
+    );
     cs
 }
 

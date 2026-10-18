@@ -1632,7 +1632,7 @@ fn pick(owner: HWND, folders: bool) -> Vec<PathBuf> {
             let specs = [
                 COMDLG_FILTERSPEC {
                     pszName: w!("音频文件（WAV、FLAC、AIFF）"),
-                    pszSpec: w!("*.wav;*.wave;*.flac;*.aif;*.aiff;*.aifc"),
+                    pszSpec: w!("*.wav;*.wave;*.rf64;*.bw64;*.flac;*.aif;*.aiff;*.aifc"),
                 },
                 COMDLG_FILTERSPEC {
                     pszName: w!("所有文件"),

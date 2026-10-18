@@ -1,6 +1,6 @@
-result Unsupported
+result Malformed
 format none
 mask none
 repairs none
-detail none
+detail ds64:Duplicate
 samples 0

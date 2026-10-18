@@ -42,6 +42,7 @@ fn parse_expect(text: &str) -> Expect {
         "Malformed" => Err(DecodeError::Malformed),
         "Unsupported" => Err(DecodeError::Unsupported),
         "Truncated" => Err(DecodeError::Truncated),
+        "CapacityExceeded" => Err(DecodeError::CapacityExceeded),
         other => panic!("未知结果 {other}"),
     };
     let format = match field("format").as_str() {
@@ -182,6 +183,7 @@ fn run(
         Some(WavDetail::DataShort { declared, missing }) => {
             Some(format!("data-short:{declared}:{missing}"))
         }
+        Some(WavDetail::Ds64(p)) => Some(format!("ds64:{p:?}")),
         Some(WavDetail::Bitstream { kind, offset }) => {
             let k = match kind {
                 Bitstream::Dts14 => "dts14",
