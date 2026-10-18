@@ -70,7 +70,7 @@ qybit mixer --device hw:CARD=Generic_1 'Auto-Mute Mode' Disabled
 |---|---|---|
 | 纯函数 | 名称分组、显示文字、值解析、百分比 ↔ 原始值（含步长）、dB 目标取档、名称匹配、提示规则；dB TLV 四种类型与容器、损坏与嵌套过深的输入；`snd_ctl_elem_list` 布局（64 位对照头文件编译值，32 位按头文件布局）与常量 | 通过，含 qemu-user 下的 32 位 armv7 |
 | 用户机器的数值 | DB_SCALE −65.25 dB、每档 0.75 dB、0..87：0 档 −65.25 dB、87 档 0 dB，与 amixer 一致 | 通过（单元测试） |
-| QEMU 虚拟机（snd-dummy，`tests/mixer.rs`） | 见下 | x86_64 通过；aarch64 与 armv7 见 CI |
+| QEMU 虚拟机（snd-dummy，`tests/mixer.rs`） | 见下 | x86_64、aarch64、armv7（经 64 位内核的 32 位兼容层）通过 |
 | 用户机器真实声卡 | 打开 Master 后 3.5 mm 耳机出声 | **未运行** |
 
 虚拟机中的检查。期望值按 `sound/drivers/dummy.c` 与 alsa-lib 换算规则独立算出：`Master Volume` 范围 −50..100，−45 dB 起每档 0.30 dB。
