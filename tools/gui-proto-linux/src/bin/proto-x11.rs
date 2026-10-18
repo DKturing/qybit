@@ -198,7 +198,14 @@ fn dpi_scale(c: &RustConnection, root: u32) -> f32 {
 
 fn run() -> Res<()> {
     let start = Instant::now();
-    let (conn, screen_num) = RustConnection::connect(None)?;
+    let (conn, screen_num) = RustConnection::connect(None).map_err(|e| {
+        format!(
+            "连接不到 X 显示服务（{e}）。本程序需要图形桌面（X11，或 Wayland 桌面自带的 XWayland）：\n\
+             - 在桌面的终端窗口里运行；\n\
+             - 经 SSH 从另一台有桌面的电脑运行时，用 ssh -X 登录；\n\
+             - 没有桌面的系统（文本控制台）上本原型不能运行。"
+        )
+    })?;
     let conn = Arc::new(conn);
     let setup = conn.setup();
     let screen = setup.roots.get(screen_num).ok_or("没有该屏幕")?;
