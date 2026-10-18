@@ -1220,6 +1220,11 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
         self.core_handle(Event::Configured { generation });
     }
 
+    /// 最近一次产出样本的曲目序号与源格式（[`Core::track_format`]）。
+    pub fn track_format(&self) -> Option<(u32, SourceFormat)> {
+        self.core.track_format()
+    }
+
     /// 当前曲目是否按 [`ChannelPolicy::DuplicateMono`] 配置（打开设备时宿主据此在协商记录中写明
     /// 源的实际格式）。
     pub fn duplicating(&self) -> bool {

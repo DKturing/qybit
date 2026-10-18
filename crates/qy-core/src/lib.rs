@@ -273,6 +273,8 @@ pub struct Core<D: Decoder> {
     source_eof: bool,
     source_open: bool,
     configured: Option<SourceFormat>,
+    /// 最近一次产出样本的曲目序号与源格式（见 [`Core::track_format`]）。
+    track_format: Option<(u32, SourceFormat)>,
     track: u32,
     track_count: u32,
     /// 尚未交给解码器的定位目标帧（S1）。
@@ -304,6 +306,7 @@ impl<D: Decoder> Core<D> {
             source_eof: false,
             source_open: false,
             configured: None,
+            track_format: None,
             track: 0,
             track_count: 0,
             seek: None,
@@ -336,6 +339,13 @@ impl<D: Decoder> Core<D> {
     /// 当前曲目序号。
     pub fn track(&self) -> u32 {
         self.track
+    }
+
+    /// 最近一次产出样本的曲目序号与解码器给出的源格式。宿主据此按曲目记录源格式（如 E1 的有损
+    /// 标记）：产出样本时序号就是该曲目；[`Core::track`] 在曲目结束后、下一首打开前已指向下一首，
+    /// 此时解码器的格式仍是上一首的。同格式的相邻曲目不重新配置，但每首都会更新本记录。
+    pub fn track_format(&self) -> Option<(u32, SourceFormat)> {
+        self.track_format
     }
 
     pub fn decoder(&self) -> &D {
@@ -603,6 +613,7 @@ impl<D: Decoder> Core<D> {
                 return None;
             }
         }
+        self.track_format = Some((self.track, format));
         if self.configured != Some(format) {
             self.state = State::Configure(format);
             return None;

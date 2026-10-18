@@ -863,6 +863,10 @@ pub fn write_plan(w: &mut impl fmt::Write, p: &PlaybackPlan) -> fmt::Result {
         s.channels(),
         s.bits()
     )?;
+    if s.is_lossy() {
+        // E1：有损编码，bits 是解码输出精度。
+        w.write_str("lossy=1 ")?;
+    }
     if let Some(d) = &p.device {
         write!(w, "device={}-{} ", d.container_bits(), d.valid_bits())?;
     }

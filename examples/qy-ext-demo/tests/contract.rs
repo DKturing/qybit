@@ -120,3 +120,27 @@ fn composite_decoder_satisfies_the_contract() {
         );
     }
 }
+
+/// E1：有损变体 QYL1 满足同样的契约；格式标为有损（同一个源内不变，`qy-testkit` 检查格式不变），
+/// 其余字段与 QYT1 相同，样本与生成值逐个相同。
+#[test]
+fn qyl1_is_marked_lossy_and_satisfies_the_contract() {
+    let s = samples(500, 2, 16, 7);
+    let lossy = qy_ext_demo::qyt1::encode_lossy(44_100, 2, 16, &s);
+    let plain = encode(44_100, 2, 16, &s);
+    let r = match check(qyt1, &[lossy.as_slice(), plain.as_slice()]) {
+        Ok(r) => r,
+        Err(v) => panic!("{v}"),
+    };
+    let (Some(fl), Some(fp)) = (r[0].format, r[1].format) else {
+        panic!("格式");
+    };
+    assert!(fl.is_lossy() && !fp.is_lossy());
+    assert_eq!(fl, fp.lossy(), "除有损标记外格式相同");
+    assert_eq!(r[0].words, s);
+    assert_eq!(r[0].words, r[1].words);
+    assert_eq!(
+        check_seek(qyt1, &lossy, &[0, 1, 250, 499]),
+        Ok(SeekSupport::Supported)
+    );
+}

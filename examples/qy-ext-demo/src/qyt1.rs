@@ -4,12 +4,16 @@
 //!
 //! | 偏移 | 长度 | 内容 |
 //! | --- | --- | --- |
-//! | 0 | 4 | 魔数 `QYT1` |
+//! | 0 | 4 | 魔数 `QYT1`，或 `QYL1`（有损变体，见下） |
 //! | 4 | 4 | 采样率（Hz，非 0） |
 //! | 8 | 2 | 声道数（1 或 2） |
 //! | 10 | 2 | 有效位数 N（1..=32） |
 //! | 12 | 8 | 帧数 |
 //! | 20 | … | 交错样本：每个样本占 ⌈N/8⌉ 字节，小端补码，值必须在 N 位有符号范围内 |
+//!
+//! `QYL1` 与 `QYT1` 布局相同，只是把解码出的格式标为有损（E1，[`SourceFormat::lossy`]）：它代表
+//! 有损格式的插件解码器——样本是解码重建的信号，N 是解码输出的精度，不是音源位深；报告与界面据此
+//! 写明“有损”。
 //!
 //! 写法与仓库里的自有解码器相同，满足扩展契约（`docs/x1-extensions.md`）：
 //! - 不用 `alloc`、不写 `unsafe`；PCM 工作区由宿主以 `&'static mut [i32]` 提供，`reset` 后复用；
@@ -23,6 +27,8 @@ use qy_core::{DecodeError, Decoder, Progress, SeekError, SourceFormat, Status};
 
 /// 魔数。
 pub const MAGIC: &[u8; 4] = b"QYT1";
+/// 有损变体的魔数（E1）。
+pub const MAGIC_LOSSY: &[u8; 4] = b"QYL1";
 /// 文件头字节数。
 pub const HEADER: usize = 20;
 
@@ -97,7 +103,8 @@ impl Qyt1Decoder {
     }
 
     fn header(&mut self, h: &[u8]) -> Result<(), (Qyt1Detail, DecodeError)> {
-        if &h[..4] != MAGIC {
+        let lossy = &h[..4] == MAGIC_LOSSY;
+        if &h[..4] != MAGIC && !lossy {
             return Err((Qyt1Detail::Magic, DecodeError::Malformed));
         }
         let rate = u32::from_le_bytes([h[4], h[5], h[6], h[7]]);
@@ -109,6 +116,7 @@ impl Qyt1Decoder {
         }
         let format = SourceFormat::new(rate, channels, bits as u8)
             .map_err(|_| (Qyt1Detail::Header, DecodeError::Malformed))?;
+        let format = if lossy { format.lossy() } else { format };
         self.format = Some(format);
         self.channels = usize::from(channels);
         self.bits = u32::from(bits);
@@ -272,7 +280,7 @@ impl Resources for Qyt1Decoder {}
 impl core::fmt::Display for Qyt1Detail {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Magic => f.write_str("魔数不是 QYT1"),
+            Self::Magic => f.write_str("魔数不是 QYT1 或 QYL1"),
             Self::Header => f.write_str("文件头的采样率、声道数或位数不合规定"),
             Self::SampleRange { frame } => write!(f, "第 {frame} 帧的样本超出声明位数"),
             Self::Truncated { frames } => write!(f, "数据在第 {frames} 帧处提前结束"),
@@ -282,10 +290,19 @@ impl core::fmt::Display for Qyt1Detail {
 
 /// 生成一个 QYT1 文件（示例与测试用）：`samples` 为交错样本，必须在 `bits` 位有符号范围内。
 pub fn encode(rate: u32, channels: u16, bits: u16, samples: &[i32]) -> Vec<u8> {
+    encode_with(MAGIC, rate, channels, bits, samples)
+}
+
+/// 生成一个 QYL1 文件（有损变体，E1）：布局与 [`encode`] 相同。
+pub fn encode_lossy(rate: u32, channels: u16, bits: u16, samples: &[i32]) -> Vec<u8> {
+    encode_with(MAGIC_LOSSY, rate, channels, bits, samples)
+}
+
+fn encode_with(magic: &[u8; 4], rate: u32, channels: u16, bits: u16, samples: &[i32]) -> Vec<u8> {
     let bytes = usize::from(bits).div_ceil(8);
     let frames = samples.len() / usize::from(channels.max(1));
     let mut v = Vec::with_capacity(HEADER + samples.len() * bytes);
-    v.extend_from_slice(MAGIC);
+    v.extend_from_slice(magic);
     v.extend_from_slice(&rate.to_le_bytes());
     v.extend_from_slice(&channels.to_le_bytes());
     v.extend_from_slice(&bits.to_le_bytes());

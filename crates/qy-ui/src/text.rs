@@ -34,13 +34,21 @@ pub fn duration(frames: u64, rate: u32) -> String {
     clock(frames / u64::from(rate))
 }
 
-/// 源格式：`44.1 kHz 16 位 2 声道`。
+/// 源格式：`44.1 kHz 16 位 2 声道`；有损编码（E1）为 `44.1 kHz 解码 24 位 2 声道 有损`（位数是
+/// 解码输出的精度，不是音源位深）。
 pub fn source_text(f: &SourceFormat) -> String {
     let bits = if f.encoding().is_float() {
         format!("{} 位浮点", f.bits())
     } else {
         format!("{} 位", f.bits())
     };
+    if f.is_lossy() {
+        return format!(
+            "{} kHz 解码 {bits} {} 声道 有损",
+            khz(f.sample_rate()),
+            f.channels()
+        );
+    }
     format!("{} kHz {bits} {} 声道", khz(f.sample_rate()), f.channels())
 }
 
@@ -163,6 +171,14 @@ pub fn fidelity_line(m: &Model) -> String {
                 "声道已改变：本次播放有 {altered} 首单声道复制到左右两路（明确开启的选项，样本值未改变）"
             );
         }
+        if p.status
+            .and_then(|s| s.source)
+            .is_some_and(|f| f.is_lossy())
+        {
+            // E1：有损编码时不能说成音源的无损数据。
+            return "软件路径：未改动解码输出、无欠载；当前曲目是有损编码，播放的是解码重建的信号"
+                .into();
+        }
         return "软件路径：未改动样本、无欠载（不证明设备端 bit-perfect）".into();
     }
     String::new()
@@ -243,5 +259,27 @@ pub fn rate_lamp(m: &Model) -> (RateLamp, String) {
             None => (RateLamp::Rejected, "设备未打开".into()),
         },
         _ => (RateLamp::Off, "采样率 —".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// E1：有损编码的源写明“解码 N 位 … 有损”，无损源不变。
+    #[test]
+    fn lossy_source_text() {
+        let Ok(f) = SourceFormat::new(44_100, 2, 24) else {
+            panic!("格式");
+        };
+        assert_eq!(source_text(&f), "44.1 kHz 24 位 2 声道");
+        assert_eq!(source_text(&f.lossy()), "44.1 kHz 解码 24 位 2 声道 有损");
+        let Ok(x) = f
+            .lossy()
+            .with_encoding(qy_core::SampleEncoding::Float32, 32)
+        else {
+            panic!("浮点");
+        };
+        assert_eq!(source_text(&x), "44.1 kHz 解码 32 位浮点 2 声道 有损");
     }
 }

@@ -122,7 +122,7 @@ impl qy_core::Decoder for ExtDecoder {
             Some(a) => a,
             None => {
                 let a = match input.get(..4) {
-                    Some(m) if m == qyt1::MAGIC => Active::Qyt1,
+                    Some(m) if m == qyt1::MAGIC || m == qyt1::MAGIC_LOSSY => Active::Qyt1,
                     Some(_) => Active::Auto,
                     // 不足 4 字节且源未结束：先不选。
                     None if !eof => {

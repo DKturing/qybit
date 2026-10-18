@@ -425,13 +425,20 @@ impl<B: Backend, S: TrackSource, D: Decoder + Resources + Diagnostics> Player<'_
         true
     }
 
-    /// 记录正在解码的曲目的源格式（文件头解析完成后才有）。
+    /// 记录各曲目的源格式：按引擎配置该曲目时的序号与解码器格式（[`Engine::configured_source`]）。
+    /// 不能用“当前曲目序号 + 解码器格式”：曲目结束后、下一首打开前序号已指向下一首，解码器的
+    /// 格式仍是上一首的（短曲目可能在一次 `poll` 内解码完）。
     fn note_format(&mut self) {
-        let e = &self.res.engine;
-        let Some(f) = qy_core::Decoder::format(e.decoder()) else {
+        let Some(entry) = self.res.engine.track_format() else {
             return;
         };
-        let entry = (e.track(), f);
+        let (track, f) = entry;
+        if f.is_lossy() && !self.report.lossy_tracks.contains(&track) {
+            // E1：有损编码的曲目在实时输出与报告中明确写出。
+            self.report.lossy_tracks.push(track);
+            self.line(&format!("  {}", crate::report::lossy_track_text(track, &f)));
+        }
+        let e = &self.res.engine;
         if self.formats.back() != Some(&entry) {
             // 引擎按顺序播放：仍需要的是正在播放的曲目到正在解码的曲目之间的各首（切歌后正在解码的
             // 曲目可能在前，此时只保留这两首）。

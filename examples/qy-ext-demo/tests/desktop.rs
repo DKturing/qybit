@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use qy_codec_auto::profile::DESKTOP;
-use qy_ext_demo::qyt1::encode;
+use qy_ext_demo::qyt1::{encode, encode_lossy};
 use qy_ext_demo::{ExtDecoder, MemorySource, Output, Recorder};
 use qy_player::{
     Command, CommandSender, HostResources, PlayControl, PlaybackReport, Status, command_channel,
@@ -279,4 +279,43 @@ fn decode_error_reports_detail() {
     let played: Vec<u8> = outs.iter().flat_map(|o| o.bytes.clone()).collect();
     let want = [place(&good, 16, 16), place(&s12[..2_000], 12, 16)].concat();
     assert!(played == want, "出错前的有效音频应完整播放");
+}
+
+/// E1：有损变体 QYL1 与同参数的 QYT1、WAV 混排。有损标记只影响报告，不改变设备选择与送出的数据：
+/// 三首共用一个 16/16 设备流，设备字节逐字节等于参考；报告与实时输出只把第 2 首写成有损编码。
+#[test]
+fn lossy_track_is_reported_but_not_altered() {
+    let a = samples(4_410, 2, 16, 11);
+    let b = samples(4_410, 2, 16, 12);
+    let wav = fixture("qy-codec-wav", "pcm16_stereo_44k.wav");
+    let mut res = resources(true);
+    let (r, outs, log) = run(
+        &mut res,
+        vec![
+            named("a.qyt1", encode(44_100, 2, 16, &a)),
+            named("b.qyl1", encode_lossy(44_100, 2, 16, &b)),
+            named("c.wav", wav.clone()),
+        ],
+        true,
+        |_, _| {},
+    );
+    assert!(r.finished && r.fault.is_none(), "{}", r.summary());
+    assert_eq!(outs.len(), 1, "有损标记不应导致重新打开设备");
+    let played: Vec<u8> = outs.iter().flat_map(|o| o.bytes.clone()).collect();
+    let want = [place(&a, 16, 16), place(&b, 16, 16), data_chunk(&wav)].concat();
+    assert!(played == want, "设备字节");
+    assert_eq!(r.lossy_tracks, vec![1], "{log}");
+    let summary = r.summary();
+    assert!(
+        summary.contains("曲目 2 是有损编码") && !summary.contains("曲目 1 是有损编码"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("解码输出本身不是音源的无损数据"),
+        "{summary}"
+    );
+    assert!(
+        log.contains("曲目 2 是有损编码：播放的是解码重建的信号，16 位是解码输出的精度"),
+        "{log}"
+    );
 }

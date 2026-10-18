@@ -3,7 +3,7 @@
 
 use qy_core::engine::ErrorPolicy;
 use qy_ext_demo::embedded::{EmbeddedPlayer, Tracks, World, build, run};
-use qy_ext_demo::qyt1::encode;
+use qy_ext_demo::qyt1::{encode, encode_lossy};
 use qy_host_embedded::Notice;
 
 /// 独立参考：N 位样本放进 C 位小端左对齐容器，取低 C/8 字节。
@@ -244,4 +244,38 @@ fn seek_direct_and_sequential() {
             "{what}：定位前播出的应是曲目开头"
         );
     }
+}
+
+/// E1：嵌入式串口的播放计划行对有损曲目写 `lossy=1`；有损标记不影响设备，两首共用一个设备流，
+/// 播出的字节等于两份参考依次相接。
+#[test]
+fn lossy_plan_line_on_serial() {
+    let a = samples(4_410, 2, 16, 21);
+    let b = samples(4_410, 2, 16, 22);
+    let tracks = vec![
+        named("a.qyl1", encode_lossy(44_100, 2, 16, &a)),
+        named("b.qyt1", encode(44_100, 2, 16, &b)),
+    ];
+    let (mut p, w) = player(tracks, true, true, ErrorPolicy::Stop);
+    assert!(p.play(0));
+    let notices = match run(&mut p, &w, 30_000_000, |_, _| {}) {
+        Ok(n) => n,
+        Err(n) => panic!("超时：{n:?}"),
+    };
+    let mut text = String::new();
+    for n in &notices {
+        if matches!(n, Notice::Plan { .. }) {
+            let _ = qy_host_embedded::player::write_notice(&mut text, n);
+            text.push('\n');
+        }
+    }
+    let plans: Vec<&str> = text.lines().collect();
+    assert!(!plans.is_empty(), "{notices:?}");
+    assert!(plans[0].contains(" lossy=1 "), "{text}");
+    assert!(plans.iter().skip(1).all(|l| !l.contains("lossy")), "{text}");
+    no_underrun(&p);
+    let w = w.borrow();
+    let segs: Vec<_> = w.segments.iter().filter(|s| !s.data.is_empty()).collect();
+    assert_eq!(segs.len(), 1);
+    assert!(segs[0].data == [place(&a, 16, 16), place(&b, 16, 16)].concat());
 }

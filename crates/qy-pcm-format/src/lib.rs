@@ -116,6 +116,10 @@ pub enum Placement {
 
 /// 源 PCM 格式：解码器输出为交错、右对齐的 `i32`，携带有效位数 N 与声道布局；浮点源（F3）
 /// 按位存放，见 [`SampleEncoding`]。
+///
+/// 有损标记（E1，AGENTS §3）：有损格式（由插件提供，如 MP3、AAC）解码出的是重建信号，解码器用
+/// [`SourceFormat::lossy`] 标记；此时 [`SourceFormat::bits`] 是解码输出的精度，不是音源位深，报告与
+/// 界面据 [`SourceFormat::is_lossy`] 明确写出。标记只影响报告，不改变设备选择与送出的数据。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceFormat {
     sample_rate: u32,
@@ -123,6 +127,7 @@ pub struct SourceFormat {
     bits: u8,
     layout: ChannelLayout,
     encoding: SampleEncoding,
+    lossy: bool,
 }
 
 impl SourceFormat {
@@ -158,6 +163,7 @@ impl SourceFormat {
             bits,
             layout,
             encoding: SampleEncoding::Int,
+            lossy: false,
         })
     }
 
@@ -180,7 +186,22 @@ impl SourceFormat {
             bits,
             layout,
             encoding,
+            lossy: false,
         })
+    }
+
+    /// 标记为有损编码的解码输出（E1）。只能由解码器在构造格式时调用；无损格式不调用。
+    #[must_use]
+    pub const fn lossy(self) -> Self {
+        Self {
+            lossy: true,
+            ..self
+        }
+    }
+
+    /// 是否为有损编码的解码输出（E1）：为真时 [`SourceFormat::bits`] 是解码精度，不是音源位深。
+    pub const fn is_lossy(&self) -> bool {
+        self.lossy
     }
 
     pub const fn sample_rate(&self) -> u32 {
@@ -212,23 +233,33 @@ impl SourceFormat {
     }
 
     /// 同采样率、同编码与位数，声道布局换成 `layout`（O1 单声道复制时的设备侧声道）。
+    /// 有损标记保持不变。
     pub const fn relayout(&self, layout: ChannelLayout) -> Result<Self, FormatError> {
-        match self.encoding {
+        let r = match self.encoding {
             SampleEncoding::Int => Self::with_layout(self.sample_rate, layout, self.bits),
             _ => Self::float(self.sample_rate, layout, self.encoding),
+        };
+        self.keep_lossy(r)
+    }
+
+    const fn keep_lossy(&self, r: Result<Self, FormatError>) -> Result<Self, FormatError> {
+        match r {
+            Ok(f) if self.lossy => Ok(f.lossy()),
+            r => r,
         }
     }
 
-    /// 同采样率、同布局、编码与位数换成 `encoding` / `bits` 的格式（整数时 `bits` 为 N）。
+    /// 同采样率、同布局、编码与位数换成 `encoding` / `bits` 的格式（整数时 `bits` 为 N）。有损标记保持不变。
     pub const fn with_encoding(
         &self,
         encoding: SampleEncoding,
         bits: u8,
     ) -> Result<Self, FormatError> {
-        match encoding {
+        let r = match encoding {
             SampleEncoding::Int => Self::with_layout(self.sample_rate, self.layout, bits),
             _ => Self::float(self.sample_rate, self.layout, encoding),
-        }
+        };
+        self.keep_lossy(r)
     }
 }
 
@@ -490,6 +521,40 @@ pub const fn frames_for_millis(sample_rate: u32, millis: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// E1：有损标记默认关闭；换布局、换编码后保持；不影响设备是否接受。
+    #[test]
+    fn lossy_flag_is_kept_and_does_not_affect_acceptance() {
+        let Ok(f) = SourceFormat::new(44_100, 2, 24) else {
+            panic!("格式");
+        };
+        assert!(!f.is_lossy());
+        let l = f.lossy();
+        assert!(l.is_lossy() && l != f);
+        assert_eq!((l.sample_rate(), l.channels(), l.bits()), (44_100, 2, 24));
+        assert!(
+            l.relayout(ChannelLayout::STEREO)
+                .is_ok_and(|x| x.is_lossy())
+        );
+        assert!(
+            l.with_encoding(SampleEncoding::Int, 16)
+                .is_ok_and(|x| x.is_lossy() && x.bits() == 16)
+        );
+        assert!(
+            l.with_encoding(SampleEncoding::Float32, 32)
+                .is_ok_and(|x| x.is_lossy())
+        );
+        assert!(
+            f.relayout(ChannelLayout::STEREO)
+                .is_ok_and(|x| !x.is_lossy())
+        );
+        let Ok(d) = DeviceFormat::new(44_100, 2, 32, 24, Endian::Little, Placement::MsbAligned)
+        else {
+            panic!("设备格式");
+        };
+        assert_eq!(d.accepts(&l), d.accepts(&f));
+        assert!(d.accepts(&l));
+    }
 
     #[test]
     fn device_format_derived_fields() {

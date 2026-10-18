@@ -245,6 +245,8 @@ pub struct PlaybackReport<A> {
     pub samples_altered: Vec<(u32, u8)>,
     /// 浮点曲目的统计（F3；同一曲目定位后的多段已累加）。
     pub float_stats: Vec<(u32, FloatReport)>,
+    /// 有损编码的曲目（E1：解码器把格式标为有损；播放的是解码重建的信号，位数是解码精度）。
+    pub lossy_tracks: Vec<u32>,
     /// I/O 错误等附加说明。
     pub messages: Vec<String>,
     pub finished: bool,
@@ -274,6 +276,7 @@ impl<A> Default for PlaybackReport<A> {
             channels_altered: Vec::new(),
             samples_altered: Vec::new(),
             float_stats: Vec::new(),
+            lossy_tracks: Vec::new(),
             messages: Vec::new(),
             finished: false,
             device_error: false,
@@ -368,13 +371,28 @@ fn format_text(f: &DeviceFormat) -> String {
     )
 }
 
-/// 源样本的位数文字：整数为“N 位有效”，浮点为“32 / 64 位浮点”（F3）。
+/// 源样本的位数文字：整数为“N 位有效”，浮点为“32 / 64 位浮点”（F3）；有损编码（E1）写明位数
+/// 是解码输出的精度，不是音源位深。
 pub fn source_bits_text(s: &SourceFormat) -> String {
-    if s.encoding().is_float() {
+    match (s.is_lossy(), s.encoding().is_float()) {
+        (false, true) => encoding_text(s.encoding()).to_string(),
+        (false, false) => format!("{} 位有效", s.bits()),
+        (true, true) => format!("有损编码，解码输出{}", encoding_text(s.encoding())),
+        (true, false) => format!("有损编码，解码输出 {} 位", s.bits()),
+    }
+}
+
+/// 有损曲目的说明（E1，实时输出与报告共用）。
+pub fn lossy_track_text(track: u32, s: &SourceFormat) -> String {
+    let what = if s.encoding().is_float() {
         encoding_text(s.encoding()).to_string()
     } else {
-        format!("{} 位有效", s.bits())
-    }
+        format!("{} 位", s.bits())
+    };
+    format!(
+        "曲目 {} 是有损编码：播放的是解码重建的信号，{what}是解码输出的精度，不是音源位深",
+        track + 1
+    )
 }
 
 fn applied_text(out: &mut String, a: Option<AppliedParams>) {
@@ -650,6 +668,13 @@ impl<A: AttemptRecord> PlaybackReport<A> {
                 None => {}
             }
         }
+        for track in &self.lossy_tracks {
+            let _ = writeln!(
+                o,
+                "曲目 {} 是有损编码：播放的是解码重建的信号，不是音源的无损数据（位数为解码精度）",
+                track + 1
+            );
+        }
         if let Some((track, fault)) = self.fault {
             let _ = writeln!(o, "曲目 {} 失败：{}", track + 1, fault_text(&fault));
         }
@@ -700,6 +725,11 @@ impl<A: AttemptRecord> PlaybackReport<A> {
             );
         } else {
             o.push_str("结论：播放未完整完成。\n");
+        }
+        if self.software_path_intact() && !self.lossy_tracks.is_empty() {
+            o.push_str(
+                "其中有损编码的曲目：软件路径没有改动解码输出，但解码输出本身不是音源的无损数据。\n",
+            );
         }
         if self.software_path_intact() && !self.repairs.is_empty() {
             // 声道已改变时不能再说“软件路径无损”，只说结构修正没有改动样本。
