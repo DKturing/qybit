@@ -1,6 +1,6 @@
 # E4：接口版本
 
-日期：2026-10-19。任务卡：[tasks/E4.md](../tasks/E4.md)。**版本规则（§2）请用户审定**；审定前按本文执行，改动时同步修改本文、CHANGELOG 与兼容检查脚本。
+日期：2026-10-19。任务卡：[tasks/E4.md](../tasks/E4.md)。版本规则（§2）用户已于 2026-10-19 审定；改动时同步修改本文、CHANGELOG 与兼容检查脚本，并先征得用户同意（AGENTS §4）。
 
 ## 1. 版本与依赖方式
 
@@ -19,7 +19,7 @@ qy-testkit = { git = "https://github.com/DKturing/qybit", tag = "v0.1.0" }   # �
 
 同一个仓库的多个 crate 必须用同一个 tag（Cargo 按 tag 解析为同一个提交，类型才是同一个）。依赖 `branch = "main"` 不受下面的规则保护。
 
-## 2. 兼容规则（请审定）
+## 2. 兼容规则（2026-10-19 审定）
 
 按 Cargo 的 SemVer 约定，0.x 阶段以**次版本号**区分兼容系列：
 
@@ -36,6 +36,12 @@ qy-testkit = { git = "https://github.com/DKturing/qybit", tag = "v0.1.0" }   # �
 - 给公开的 `enum` 增加变体（插件的穷尽 `match` 不再能编译）；给字段全公开的结构体增加字段；
 - 不改签名但改变契约语义，使原来遵守契约的插件变为违约（例如收紧 `Decoder` 的状态规则、改变 `i32` 样本的对齐约定、改变 `Identify` 各回答的含义）；
 - 提高最低 Rust 版本（`rust-version`）。
+
+**做法**（审定时补充）：
+
+- 给 trait 增加方法时尽量带默认实现（如 E5 的 `take_preroll`、E6 的 `take_jump`），让已有插件不改代码即可编译，以减少次版本号的升级；
+- 插件仓库只按 tag 依赖本仓库，不用 `branch = "main"`；本仓库每发一个版本，插件随之升级并重跑 `qy-testkit` 契约测试；
+- 版本 tag 由用户在 GitHub 网页（Releases → Create a new release）创建：开发会话的 git 代理不允许推送 tag。
 
 **不算破坏性**：报告、命令行与界面的文字（不是机器接口，测试只断言关键片段）；`#[doc(hidden)]` 项、`test-support` 等测试特性下的项；新增类型、函数与有默认实现的 trait 方法；修正与契约文档不一致的错误行为（在 CHANGELOG 中写“修正”，如果插件可能依赖了错误行为，同时写明影响）。
 
