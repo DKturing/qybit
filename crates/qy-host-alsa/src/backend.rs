@@ -204,11 +204,16 @@ impl<O: Opener, P: ThreadPriority + Clone + Send + 'static> Backend for AlsaBack
                 ));
             }
         };
-        let period = (source.sample_rate() * self.period_ms / 1000).max(1);
         let mut attempts = Vec::new();
         for alsa_format in list {
-            let Ok(format) =
-                alsa_format.device_format_layout(source.sample_rate(), chmap_plan.layout())
+            // D1：DSD 的设备帧率是字率 × e，周期与缓冲取 e 的整数倍（每个 DSD 字都是完整的 e 个
+            // 设备帧）。PCM 的 e 为 1。
+            let e = alsa_format.dsd_transport().map_or(1, |t| t.expansion());
+            let Some(device_rate) = source.sample_rate().checked_mul(e) else {
+                continue;
+            };
+            let period = ((device_rate * self.period_ms / 1000).max(1)).div_ceil(e) * e;
+            let Ok(format) = alsa_format.device_format_layout(device_rate, chmap_plan.layout())
             else {
                 continue;
             };
@@ -221,14 +226,15 @@ impl<O: Opener, P: ThreadPriority + Clone + Send + 'static> Backend for AlsaBack
                 mismatch: None,
                 chmap: None,
             };
-            if !supported.contains(&alsa_format) {
+            // DoP（D1）以承载它的整数格式打开设备，查询结果里看那个格式。
+            if !supported.contains(&alsa_format.wire()) {
                 attempt.mismatch = Some("设备不接受该格式（test_format）".into());
                 attempts.push(attempt);
                 continue;
             }
             let plan = HwPlan {
                 format: alsa_format,
-                sample_rate: source.sample_rate(),
+                sample_rate: device_rate,
                 channels: source.channels(),
                 layout: chmap_plan.layout(),
                 period_frames: period,
@@ -316,19 +322,23 @@ impl<X: Pcm, P: ThreadPriority + Clone + Send + 'static> PendingStream for AlsaP
 
     fn submission(&self) -> Submission {
         Submission::ShortWrite {
-            buffer_frames: Some(self.buffer_frames),
+            // 按 DSD 字计（D1；PCM 即设备帧）。
+            buffer_frames: Some(self.buffer_frames / self.format.expansion()),
         }
     }
 
     fn start(self, mut consumer: FrameConsumer, ctl: Arc<RenderControl>) -> AlsaRunning {
+        // D1：渲染循环按 DSD 字（e 个设备帧）计，适配层换算为设备帧。PCM 的 e 为 1。
+        let e = self.format.expansion();
         let cfg = WriteConfig {
             block_align: usize::from(self.format.block_align()),
-            period_frames: self.period_frames,
+            period_frames: self.period_frames / e,
             event_timeout_ms: WAIT_TIMEOUT_MS,
             idle_sleep: Duration::from_millis(1),
+            silence: self.format.silence_frame(),
         };
         let mut priority = self.priority;
-        let mut api = AlsaWriteApi { pcm: self.pcm };
+        let mut api = AlsaWriteApi::new(self.pcm, &self.format);
         AlsaRunning(std::thread::spawn(move || {
             let report = render(&mut api, &mut priority, &mut consumer, &ctl, cfg);
             // PCM 在线程结束时关闭。

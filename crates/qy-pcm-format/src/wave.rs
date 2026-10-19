@@ -148,7 +148,7 @@ impl WaveFormatEx {
     /// 掩码；`WAVE_FORMAT_PCM` 的 `wBitsPerSample` 为 8 或 16。其他布局（如只占左声道位置的
     /// 单声道）无法用它表示，返回 [`FormatError::UndefinedLayout`]，以免丢失声道位置。
     pub const fn from_device(f: &DeviceFormat) -> Result<Self, FormatError> {
-        if f.encoding().is_float() {
+        if f.encoding().is_float() || f.encoding().is_dsd() {
             return Err(FormatError::Encoding);
         }
         if !matches!(f.endian(), Endian::Little) {
@@ -280,6 +280,14 @@ impl WaveFormatExtensible {
 
     /// 由设备格式构造；要求小端、有效位高位对齐（WASAPI 语义）。浮点设备格式用 IEEE_FLOAT 子格式。
     pub const fn from_device(f: &DeviceFormat) -> Result<Self, FormatError> {
+        // D1：DoP 以承载它的整数 PCM 描述（设备帧率、有效 24 位）；原生 DSD 没有 WAVE 描述。
+        let f = &match f.dsd_transport() {
+            None => *f,
+            Some(_) => match f.dop_wire() {
+                Some(w) => w,
+                None => return Err(FormatError::Encoding),
+            },
+        };
         if !matches!(f.endian(), Endian::Little) || !matches!(f.placement(), Placement::MsbAligned)
         {
             return Err(FormatError::Layout);

@@ -606,3 +606,173 @@ fn chmap_var_fixed_none_readback_and_inverse() {
     assert!(outs[0].rendered == data_chunk(&fixture("pcm16_stereo_44k.wav")));
     assert!(r.summary().contains("声道映射：可变，已设置并读回 FL FR"));
 }
+
+// ---- D1：DSD ----
+
+/// 测试用 DSD 解码器：输入就是交错的 32 位大端 DSD 字（双声道 DSD64），没有文件头。
+struct RawDsd {
+    pcm: Vec<i32>,
+    pending: usize,
+}
+
+impl qy_core::Decoder for RawDsd {
+    fn reset(&mut self) {
+        self.pcm.clear();
+        self.pending = 0;
+    }
+    fn format(&self) -> Option<SourceFormat> {
+        SourceFormat::dsd(2_822_400, qy_core::ChannelLayout::STEREO).ok()
+    }
+    fn decode(&mut self, input: &[u8], eof: bool) -> Result<qy_core::Progress, DecodeError> {
+        use qy_core::{Progress, Status};
+        if self.pending > 0 {
+            return Ok(Progress {
+                consumed: 0,
+                status: Status::NeedOutput,
+            });
+        }
+        let frames = (input.len() / 8).min(512);
+        if frames == 0 {
+            return Ok(Progress {
+                consumed: 0,
+                status: if eof { Status::End } else { Status::NeedInput },
+            });
+        }
+        self.pcm = input[..frames * 8]
+            .chunks_exact(4)
+            .map(|b| i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        self.pending = frames;
+        Ok(Progress {
+            consumed: frames * 8,
+            status: Status::Frames(frames),
+        })
+    }
+    fn pcm(&self) -> &[i32] {
+        &self.pcm[self.pcm.len() - self.pending * 2..]
+    }
+    fn release(&mut self, frames: usize) {
+        self.pending -= frames.min(self.pending);
+    }
+}
+
+impl qy_core::engine::Resources for RawDsd {}
+impl qy_player::Diagnostics for RawDsd {}
+
+struct OneTrack(Vec<u8>);
+
+impl qy_player::TrackSource for OneTrack {
+    type Reader = std::io::Cursor<Vec<u8>>;
+    fn count(&self) -> u32 {
+        1
+    }
+    fn open(&mut self, _: u32) -> std::io::Result<Self::Reader> {
+        Ok(std::io::Cursor::new(self.0.clone()))
+    }
+}
+
+fn dsd_words(n: usize) -> Vec<u32> {
+    let mut x = 0x2545_F491_u64;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u32
+        })
+        .collect()
+}
+
+fn play_dsd(b: &mut Fake, words: &[u32]) -> (PlaybackReport, Vec<FakeAlsaOutput>) {
+    let dec = RawDsd {
+        pcm: Vec::new(),
+        pending: 0,
+    };
+    let Ok(mut res) = HostResources::with_decoder(dec, 8192, qy_codec_auto::profile::DESKTOP)
+    else {
+        panic!("res");
+    };
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
+    let r = qy_player::play_source(b, &mut res, &mut OneTrack(bytes));
+    let outs = b
+        .opener
+        .outputs()
+        .into_iter()
+        .filter(|o| o.calls.contains(&PCall::Start))
+        .collect();
+    (r, outs)
+}
+
+/// D1：设备支持原生 DSD_U32_BE 时优先选它（设备帧率 = 字率 88.2 kHz），否则 DoP（S32_LE，
+/// 176.4 kHz）；随机短写也不打乱字（适配层把写了一半的字留到下次）。字节按独立公式核对：
+/// 原生为每声道 4 字节大端；DoP 为每声道 [0, 较晚字节, 较早字节, 标记]，标记逐设备帧交替。
+#[test]
+fn dsd_native_first_then_dop_with_short_writes() {
+    let words = dsd_words(20_000 * 2);
+    // 原生。
+    let mut b = backend(FakeAlsaConfig {
+        supported: vec![AlsaFormat::S32Le, AlsaFormat::DsdU32Be],
+        short_writes: true,
+        ..FakeAlsaConfig::default()
+    });
+    let (r, outs) = play_dsd(&mut b, &words);
+    assert!(r.finished && r.software_path_intact(), "{}", r.summary());
+    let native: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
+    assert_eq!(outs.len(), 1);
+    assert!(outs[0].rendered == native, "原生 DSD_U32_BE 字节");
+    let plan = outs[0].configured.last().map(|c| c.request);
+    assert_eq!(
+        plan.map(|p| (p.format, p.sample_rate)),
+        Some((AlsaFormat::DsdU32Be, 88_200))
+    );
+    assert!(r.summary().contains("原生 DSD_U32_BE"), "{}", r.summary());
+    // DoP（设备没有原生 DSD）。
+    for seed in 1..=3 {
+        let mut b = backend(FakeAlsaConfig {
+            supported: vec![AlsaFormat::S16Le, AlsaFormat::S32Le],
+            short_writes: true,
+            seed,
+            ..FakeAlsaConfig::default()
+        });
+        let (r, outs) = play_dsd(&mut b, &words);
+        assert!(r.finished && r.software_path_intact(), "{}", r.summary());
+        let mut dop = Vec::new();
+        for f in words.chunks_exact(2) {
+            for half in 0..2 {
+                let marker = if half == 0 { 0x05 } else { 0xFA };
+                for &w in f {
+                    let b = w.to_be_bytes();
+                    let (early, late) = (b[half * 2], b[half * 2 + 1]);
+                    dop.extend_from_slice(&[0, late, early, marker]);
+                }
+            }
+        }
+        assert!(outs[0].rendered == dop, "seed {seed}：DoP 字节");
+        let p = outs[0].configured.last().map(|c| c.request);
+        assert_eq!(
+            p.map(|p| (p.format, p.sample_rate, p.period_frames % 2)),
+            Some((AlsaFormat::DopS32Le, 176_400, 0))
+        );
+        // 短写确实发生在字的中间（奇数个设备帧）。
+        let odd = outs[0]
+            .calls
+            .iter()
+            .filter(|c| matches!(c, PCall::Write(_, n) if *n > 0 && n % 2 == 1))
+            .count();
+        assert!(odd > 0, "seed {seed}：未覆盖写了半个字的短写");
+        assert!(r.summary().contains("DoP"), "{}", r.summary());
+    }
+}
+
+/// D1：设备只接受 16 位 PCM（承载不了 DoP、没有原生 DSD）：明确拒绝，不转 PCM，不播放。
+#[test]
+fn dsd_rejected_by_pcm16_only_device() {
+    let mut b = backend(FakeAlsaConfig {
+        supported: vec![AlsaFormat::S16Le],
+        ..FakeAlsaConfig::default()
+    });
+    let (r, outs) = play_dsd(&mut b, &dsd_words(2_000));
+    assert!(outs.is_empty());
+    assert!(!r.software_path_intact());
+    assert!(r.summary().contains("DSD"), "{}", r.summary());
+}

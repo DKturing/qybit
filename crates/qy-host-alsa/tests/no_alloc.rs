@@ -92,8 +92,9 @@ fn alsa_render_loop_does_not_allocate() {
         period_frames: 441,
         event_timeout_ms: 2000,
         idle_sleep: Duration::from_micros(50),
+        silence: format.silence_frame(),
     };
-    let mut api = AlsaWriteApi { pcm };
+    let mut api = AlsaWriteApi::new(pcm, &format);
     let h = std::thread::spawn(move || {
         TRACK.with(|t| t.set(true));
         let r = render(&mut api, &mut prio, &mut c, &ctl, cfg);

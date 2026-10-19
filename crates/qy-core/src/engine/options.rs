@@ -182,7 +182,9 @@ impl Options {
     /// 配置开始：按声道策略得到交给能力检查与设备协商的格式（开启单声道复制且源为 `[FC]` 时为
     /// 同采样率、同位数的 `[FL FR]`，否则为源格式本身），回退阶段归零。
     pub(super) fn begin(&mut self, actual: SourceFormat) -> SourceFormat {
+        // 单声道复制（O1）只批准用于 PCM；DSD 单声道按严格路径协商（D1）。
         let laid = if self.channels == ChannelPolicy::DuplicateMono
+            && !actual.encoding().is_dsd()
             && actual.layout() == crate::ChannelLayout::MONO
             && let Ok(f) = actual.relayout(crate::ChannelLayout::STEREO)
         {
@@ -374,7 +376,7 @@ fn count_nonfinite<M: qy_pcm_format::pack::Fidelity>(pcm: &Pcm<'_, M>, frames: u
     let n = frames * f.words_per_frame();
     let samples = pcm.samples().get(..n).unwrap_or_default();
     match f.encoding() {
-        SampleEncoding::Int => 0,
+        SampleEncoding::Int | SampleEncoding::Dsd => 0,
         SampleEncoding::Float32 => samples
             .iter()
             .filter(|&&w| (w as u32) & 0x7F80_0000 == 0x7F80_0000)

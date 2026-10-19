@@ -35,7 +35,55 @@ pub fn encoding_text(e: SampleEncoding) -> &'static str {
         SampleEncoding::Int => "整数",
         SampleEncoding::Float32 => "32 位浮点",
         SampleEncoding::Float64 => "64 位浮点",
+        SampleEncoding::Dsd => "DSD",
     }
+}
+
+/// DSD 倍率名（D1）：位率为 44.1 kHz 或 48 kHz 的整数倍时为 `DSD64` 一类，否则为 `DSD`。
+pub fn dsd_name(bit_rate: u32) -> String {
+    for base in [44_100u32, 48_000] {
+        if bit_rate.is_multiple_of(base) {
+            return format!("DSD{}", bit_rate / base);
+        }
+    }
+    "DSD".into()
+}
+
+/// DSD 位率文字（D1）：`DSD64（2.8224 MHz）`。
+pub fn dsd_rate_text(bit_rate: u32) -> String {
+    let mhz = format!("{:.4}", f64::from(bit_rate) / 1e6);
+    let mhz = mhz.trim_end_matches('0').trim_end_matches('.');
+    format!("{}（{mhz} MHz）", dsd_name(bit_rate))
+}
+
+/// 源的采样率文字：PCM 为 `44100 Hz`，DSD 为 [`dsd_rate_text`]。
+pub fn source_rate_text(s: &SourceFormat) -> String {
+    match s.dsd_bit_rate() {
+        Some(b) => dsd_rate_text(b),
+        None => format!("{} Hz", s.sample_rate()),
+    }
+}
+
+/// DSD 设备格式的传输方式文字（D1）；PCM 为 `None`。DoP 写明设备实际以什么 PCM 格式打开。
+pub fn dsd_transport_text(f: &DeviceFormat) -> Option<String> {
+    use qy_core::{DsdTransport, DsdWord};
+    Some(match f.dsd_transport()? {
+        DsdTransport::Native(w) => format!(
+            "原生 {}",
+            match w {
+                DsdWord::U8 => "DSD_U8",
+                DsdWord::U16Le => "DSD_U16_LE",
+                DsdWord::U16Be => "DSD_U16_BE",
+                DsdWord::U32Le => "DSD_U32_LE",
+                DsdWord::U32Be => "DSD_U32_BE",
+            }
+        ),
+        DsdTransport::Dop(_) => format!(
+            "DoP（以 PCM {} Hz / 容器 {} 位 / 有效 24 位封装；DAC 须识别 DoP 标记，否则会当作 PCM 播放成噪声）",
+            f.device_rate(),
+            f.container_bits()
+        ),
+    })
 }
 
 /// 后端的一次格式尝试记录。
@@ -357,6 +405,13 @@ impl<A> PlaybackReport<A> {
 }
 
 fn format_text(f: &DeviceFormat) -> String {
+    if let Some(t) = dsd_transport_text(f) {
+        return format!(
+            "{} / {} 声道 / {t}",
+            dsd_rate_text(f.sample_rate() * 32),
+            f.channels()
+        );
+    }
     if f.encoding().is_float() {
         return format!(
             "{} Hz / {} 声道 / {}（IEEE_FLOAT）",
@@ -377,6 +432,9 @@ fn format_text(f: &DeviceFormat) -> String {
 /// 源样本的位数文字：整数为“N 位有效”，浮点为“32 / 64 位浮点”（F3）；有损编码（E1）写明位数
 /// 是解码输出的精度，不是音源位深。
 pub fn source_bits_text(s: &SourceFormat) -> String {
+    if s.encoding().is_dsd() {
+        return "1 位 DSD".into();
+    }
     match (s.is_lossy(), s.encoding().is_float()) {
         (false, true) => encoding_text(s.encoding()).to_string(),
         (false, false) => format!("{} 位有效", s.bits()),
@@ -427,8 +485,8 @@ pub(crate) fn negotiation_text<A: AttemptRecord>(out: &mut String, n: &Negotiati
     let channels = if n.duplicated_mono { 1 } else { s.channels() };
     let _ = write!(
         out,
-        "  源格式：{} Hz / {channels} 声道 / {}",
-        s.sample_rate(),
+        "  源格式：{} / {channels} 声道 / {}",
+        source_rate_text(s),
         source_bits_text(s)
     );
     if n.duplicated_mono {

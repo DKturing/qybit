@@ -52,6 +52,8 @@ pub enum SelectError {
     Bits(u8),
     /// 源为浮点（F3）：I²S 槽位只承载整数 PCM；明确开启浮点转整数时引擎会改请求整数格式。
     Float,
+    /// 源为 DSD（D1）：本宿主暂不提供 DSD 输出（原生或 DoP），不转 PCM。
+    Dsd,
 }
 
 impl fmt::Display for SelectError {
@@ -64,6 +66,7 @@ impl fmt::Display for SelectError {
                 f.write_str("本板 I²S 输出只承载整数 PCM，不接受浮点（可明确开启浮点转整数）")
             }
             Self::Bits(b) => write!(f, "本板没有能无损承载 {b} 位的槽位格式"),
+            Self::Dsd => f.write_str("嵌入式宿主暂不提供 DSD 输出（原生或 DoP），不转为 PCM"),
         }
     }
 }
@@ -71,6 +74,9 @@ impl fmt::Display for SelectError {
 impl OutputCaps {
     /// 为源选择设备格式：采样率与声道精确相同、布局相同，取第一个能无损承载源（N ≤ V）的槽位。
     pub fn select(&self, src: &SourceFormat) -> Result<DeviceFormat, SelectError> {
+        if src.encoding().is_dsd() {
+            return Err(SelectError::Dsd);
+        }
         if src.encoding().is_float() {
             return Err(SelectError::Float);
         }

@@ -155,6 +155,8 @@ pub fn device_bytes(samples: &[i32], n: u8, format: AlsaFormat) -> Vec<u8> {
             AlsaFormat::FloatLe | AlsaFormat::Float64Le => {
                 panic!("整数样本不放入浮点格式 {format}")
             }
+            // DSD（D1）不是整数样本。
+            _ => panic!("整数样本不放入 DSD 格式 {format}"),
         }
     }
     out

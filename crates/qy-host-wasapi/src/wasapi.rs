@@ -186,8 +186,9 @@ impl PendingStream for WasapiPending {
     }
 
     fn submission(&self) -> Submission {
+        // 按 DSD 字计（D1；PCM 即设备帧）。
         Submission::Packet {
-            frames: self.buffer_frames,
+            frames: self.buffer_frames / self.format.expansion(),
         }
     }
 
@@ -250,15 +251,19 @@ fn stream_thread(
     }
     // 生产端预填完成后移交消费端；若生产端放弃（通道关闭），释放流并退出。
     let (mut consumer, ctl) = go.recv().ok()?;
+    // D1：渲染循环按 DSD 字计帧，API 适配层换算为设备帧（PCM 的 e 为 1）。
+    let expansion = stream.format.expansion();
     let cfg = PacketConfig {
-        buffer_frames: stream.buffer_frames,
+        buffer_frames: stream.buffer_frames / expansion,
         block_align: usize::from(stream.format.block_align()),
         drain_packets: DRAIN_PACKETS,
         event_timeout_ms: EVENT_TIMEOUT_MS,
+        silence: stream.format.silence_frame(),
     };
     let mut api = WasapiApi {
         stream: &stream,
         block_align: cfg.block_align,
+        expansion,
     };
     let mut mmcss = Mmcss(None);
     let report = render(&mut api, &mut mmcss, &mut consumer, &ctl, cfg);
@@ -402,7 +407,8 @@ fn try_format(
             attempt.initialize = Some(hr(&e));
             // SAFETY: 文档规定未对齐失败后 GetBufferSize 返回下一个对齐的缓冲帧数。
             let frames = unsafe { client.GetBufferSize() }.ok()?;
-            let rate = i64::from(format.sample_rate());
+            // 设备帧率（DSD 的 DoP 为字率 × 2，D1）。
+            let rate = i64::from(format.device_rate());
             period = (10_000_000 * i64::from(frames) + rate / 2) / rate;
             attempt.period_hns = Some(period);
             // 已失效的实例不得复用：释放后激活新客户端。
@@ -428,6 +434,10 @@ fn try_format(
     // SAFETY: 客户端已初始化。
     let buffer_frames = unsafe { client.GetBufferSize() }.ok()?;
     attempt.buffer_frames = Some(buffer_frames);
+    // D1：DoP 的每个 DSD 字是 2 个设备帧，整包必须是完整的字。
+    if !buffer_frames.is_multiple_of(format.expansion()) {
+        return None;
+    }
     // SAFETY: 客户端已初始化。
     let render = unsafe { client.GetService::<IAudioRenderClient>() }.ok()?;
     Some(Stream {
@@ -441,7 +451,10 @@ fn try_format(
 
 struct WasapiApi<'a> {
     stream: &'a Stream,
+    /// 每个循环帧的字节数（DSD 为一个字的 e 个设备帧）。
     block_align: usize,
+    /// 每个循环帧的设备帧数 e（DSD 的 DoP 为 2，PCM 为 1）。
+    expansion: u32,
 }
 
 impl PacketApi for WasapiApi<'_> {
@@ -481,10 +494,14 @@ impl PacketApi for WasapiApi<'_> {
         // 端点缓冲，在本线程配对的 ReleaseBuffer 之前有效且只由本线程写入。
         // 返回切片借用 &mut self，借用检查保证 ReleaseBuffer 前不会再次取得。
         unsafe {
-            let ptr = self.stream.render.GetBuffer(frames).map_err(|e| ApiError {
-                op: ApiOp::GetBuffer,
-                code: ErrorCode::Hresult(hr(&e)),
-            })?;
+            let ptr = self
+                .stream
+                .render
+                .GetBuffer(frames * self.expansion)
+                .map_err(|e| ApiError {
+                    op: ApiOp::GetBuffer,
+                    code: ErrorCode::Hresult(hr(&e)),
+                })?;
             if ptr.is_null() {
                 return Err(ApiError {
                     op: ApiOp::GetBuffer,
@@ -500,7 +517,12 @@ impl PacketApi for WasapiApi<'_> {
 
     fn release_buffer(&mut self, frames: u32, flags: u32) -> Result<(), ApiError> {
         // SAFETY: 与本线程上一次 GetBuffer 配对，帧数相同。
-        unsafe { self.stream.render.ReleaseBuffer(frames, flags) }.map_err(|e| ApiError {
+        unsafe {
+            self.stream
+                .render
+                .ReleaseBuffer(frames * self.expansion, flags)
+        }
+        .map_err(|e| ApiError {
             op: ApiOp::ReleaseBuffer,
             code: ErrorCode::Hresult(hr(&e)),
         })

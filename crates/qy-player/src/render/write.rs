@@ -69,6 +69,9 @@ pub struct WriteConfig {
     pub event_timeout_ms: u32,
     /// 队列暂时为空、无事可做时的休眠间隔。
     pub idle_sleep: Duration,
+    /// 设备格式的一帧静音（[`qy_core::DeviceFormat::silence_frame`]；PCM 为全零，D1 起 DSD 有自己的
+    /// 静音模式）。暂停时写出它。
+    pub silence: qy_core::SilenceFrame,
 }
 
 struct Loop<'a, A: WriteApi> {
@@ -76,6 +79,8 @@ struct Loop<'a, A: WriteApi> {
     consumer: &'a mut FrameConsumer,
     ctl: &'a RenderControl,
     cfg: WriteConfig,
+    /// 暂停时写出的静音（整帧重复静音帧；启动前填好，循环内不再计算）。
+    silence: [u8; SILENCE.len()],
 }
 
 /// 一轮写入的结果。
@@ -95,11 +100,15 @@ pub fn render<A: WriteApi, P: ThreadPriority>(
     cfg: WriteConfig,
 ) -> RenderReport {
     with_priority(priority, ctl, |report| {
+        let mut silence = SILENCE;
+        let whole = SILENCE.len() / cfg.block_align.max(1) * cfg.block_align.max(1);
+        cfg.silence.fill(&mut silence[..whole]);
         let mut l = Loop {
             api,
             consumer,
             ctl,
             cfg,
+            silence,
         };
         match l.run(report) {
             Ok(end) => end,
@@ -220,7 +229,7 @@ impl<A: WriteApi> Loop<'_, A> {
             std::thread::sleep(self.cfg.idle_sleep);
             return Ok(None);
         }
-        match self.api.write(&SILENCE[..frames * ba])? {
+        match self.api.write(&self.silence[..frames * ba])? {
             Written::Frames(n) => {
                 report.paused(self.ctl, u64::from(n));
                 Ok(None)
@@ -329,6 +338,7 @@ mod tests {
             block_align: usize::from(f.block_align()),
             event_timeout_ms: 2000,
             idle_sleep: Duration::from_micros(50),
+            silence: f.silence_frame(),
         }
     }
 
@@ -579,5 +589,56 @@ mod tests {
         assert_eq!(j, expected.len(), "有效字节不完整");
         assert_eq!(inserted, r.paused_frames * 2);
         check_write_calls(&api.calls);
+    }
+
+    /// D1：原生 DSD（`DSD_U8`）暂停时写入的是 DSD 静音 0x69，不是零字节；去掉插入的静音后与源
+    /// 逐字节一致。
+    #[test]
+    fn dsd_pause_writes_dsd_silence() {
+        use qy_core::{ChannelLayout, DsdTransport, DsdWord};
+        let Ok(f) = DeviceFormat::dsd(
+            88_200,
+            ChannelLayout::STEREO,
+            DsdTransport::Native(DsdWord::U8),
+        ) else {
+            panic!("dsd");
+        };
+        let ba = usize::from(f.block_align());
+        let (mut p, mut c) = ring(&f, 1 << 20);
+        // 源数据不含 0x69 字节，插入的静音才能区分。
+        let data: Vec<u8> = (0..2_000 * ba).map(|i| (i % 97) as u8 | 0x80).collect();
+        assert_eq!(p.push_frames(&data), Ok(2_000));
+        let ctl = Arc::new(RenderControl::default());
+        ctl.eof.store(true, Ordering::Release);
+        let hook_ctl = Arc::clone(&ctl);
+        let hook = move |i: u64| {
+            hook_ctl
+                .pause
+                .store((5..15).contains(&i), Ordering::Release)
+        };
+        let mut api = FakeWriteApi::new(
+            256,
+            ba,
+            7,
+            WriteWait::Scripted {
+                hook: Box::new(hook),
+                play: 80,
+            },
+        );
+        let mut prio = FakePriority::default();
+        let r = render(&mut api, &mut prio, &mut c, &ctl, cfg(&f));
+        assert_eq!(r.end, RenderEnd::Drained);
+        assert!(r.paused_frames > 0);
+        let (mut j, mut inserted) = (0usize, 0u64);
+        for &b in &api.rendered {
+            if j < data.len() && b == data[j] {
+                j += 1;
+            } else {
+                assert_eq!(b, 0x69, "插入的字节须为 DSD 静音");
+                inserted += 1;
+            }
+        }
+        assert_eq!(j, data.len());
+        assert_eq!(inserted, r.paused_frames * ba as u64);
     }
 }

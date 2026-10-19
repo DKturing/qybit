@@ -79,6 +79,13 @@ pub fn decode<F: Formats>(formats: &F, input: &Path, out: &Path) -> Result<Strin
         match p.status {
             Status::Frames(n) => {
                 let src = d.format().ok_or("产出帧时格式未知")?;
+                if src.encoding().is_dsd() {
+                    // D1：WAV 只装 PCM；本程序不把 DSD 转为 PCM。
+                    return Err(format!(
+                        "源为 {}，DSD 码流不能写成 WAV（本程序不把 DSD 转为 PCM）",
+                        qy_player::source_rate_text(&src)
+                    ));
+                }
                 let dev = match device {
                     Some(f) => f,
                     None => {

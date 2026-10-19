@@ -41,9 +41,14 @@ fn chmap_positions(m: &alsa::pcm::Chmap) -> Option<Vec<u32>> {
 fn to_alsa(f: AlsaFormat) -> Format {
     match f {
         AlsaFormat::S16Le => Format::S16LE,
-        AlsaFormat::S24_3Le => Format::S243LE,
-        AlsaFormat::S24Le => Format::S24LE,
-        AlsaFormat::S32Le => Format::S32LE,
+        AlsaFormat::S24_3Le | AlsaFormat::DopS24_3Le => Format::S243LE,
+        AlsaFormat::S24Le | AlsaFormat::DopS24Le => Format::S24LE,
+        AlsaFormat::S32Le | AlsaFormat::DopS32Le => Format::S32LE,
+        AlsaFormat::DsdU8 => Format::DSDU8,
+        AlsaFormat::DsdU16Le => Format::DSDU16LE,
+        AlsaFormat::DsdU32Le => Format::DSDU32LE,
+        AlsaFormat::DsdU16Be => Format::DSDU16BE,
+        AlsaFormat::DsdU32Be => Format::DSDU32BE,
         AlsaFormat::FloatLe => Format::FloatLE,
         AlsaFormat::Float64Le => Format::Float64LE,
     }

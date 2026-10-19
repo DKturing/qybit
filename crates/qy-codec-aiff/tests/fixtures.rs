@@ -135,6 +135,7 @@ fn fmt(d: &AiffDecoder) -> String {
             SampleEncoding::Int => "",
             SampleEncoding::Float32 => " f32",
             SampleEncoding::Float64 => " f64",
+            SampleEncoding::Dsd => " dsd",
         };
         format!("{} {} {}{enc}", f.sample_rate(), f.channels(), f.bits())
     })

@@ -37,6 +37,16 @@ pub fn duration(frames: u64, rate: u32) -> String {
 /// 源格式：`44.1 kHz 16 位 2 声道`；有损编码（E1）为 `44.1 kHz 解码 24 位 2 声道 有损`（位数是
 /// 解码输出的精度，不是音源位深）。
 pub fn source_text(f: &SourceFormat) -> String {
+    // D1：DSD 写倍率与位率，如 `DSD64 2.8224 MHz 2 声道`。
+    if let Some(b) = f.dsd_bit_rate() {
+        return format!(
+            "{} {} 声道",
+            qy_player::dsd_rate_text(b)
+                .replace(['（', '）'], " ")
+                .trim_end(),
+            f.channels()
+        );
+    }
     let bits = if f.encoding().is_float() {
         format!("{} 位浮点", f.bits())
     } else {
@@ -54,6 +64,24 @@ pub fn source_text(f: &SourceFormat) -> String {
 
 /// 设备格式：`44.1 kHz 2 声道 容器 32 位 / 有效 24 位`。
 pub fn device_text(f: &DeviceFormat) -> String {
+    // D1：DSD 设备写倍率与传输方式（原生 DSD_U32_BE / DoP 及其 PCM 封装）。
+    if let Some(t) = f.dsd_transport() {
+        let how = match t {
+            qy_core::DsdTransport::Native(_) => {
+                qy_player::dsd_transport_text(f).unwrap_or_default()
+            }
+            qy_core::DsdTransport::Dop(_) => format!(
+                "DoP（PCM {} kHz 容器 {} 位）",
+                khz(f.device_rate()),
+                f.container_bits()
+            ),
+        };
+        return format!(
+            "{} {} 声道 {how}",
+            qy_player::dsd_name(f.sample_rate() * 32),
+            f.channels()
+        );
+    }
     if f.encoding().is_float() {
         return format!(
             "{} kHz {} 声道 {} 位浮点",
@@ -231,6 +259,19 @@ pub fn rate_lamp(m: &Model) -> (RateLamp, String) {
             return (RateLamp::Opening, "正在打开…".into());
         };
         return match (&s.source, &s.device) {
+            // D1：DSD 的指示灯写倍率与传输方式，不写字率（不是 PCM 采样率）。
+            (Some(src), Some(d)) if src.encoding().is_dsd() && d.accepts(src) => (
+                RateLamp::Native,
+                format!(
+                    "{} {}",
+                    qy_player::dsd_name(src.sample_rate() * 32),
+                    if matches!(d.dsd_transport(), Some(qy_core::DsdTransport::Dop(_))) {
+                        "DoP"
+                    } else {
+                        "原生"
+                    }
+                ),
+            ),
             (Some(src), Some(d)) if src.sample_rate() != d.sample_rate() => (
                 RateLamp::Mismatch,
                 format!(
@@ -281,5 +322,38 @@ mod tests {
             panic!("浮点");
         };
         assert_eq!(source_text(&x), "44.1 kHz 解码 32 位浮点 2 声道 有损");
+    }
+
+    /// D1：DSD 的格式文字写倍率与位率（不写字率），设备写传输方式。
+    #[test]
+    fn dsd_texts() {
+        use qy_core::{ChannelLayout, DeviceFormat, DopContainer, DsdTransport, DsdWord};
+        let Ok(s) = SourceFormat::dsd(2_822_400, ChannelLayout::STEREO) else {
+            panic!("dsd");
+        };
+        assert_eq!(source_text(&s), "DSD64 2.8224 MHz 2 声道");
+        let Ok(s128) = SourceFormat::dsd(6_144_000, ChannelLayout::MONO) else {
+            panic!("dsd128");
+        };
+        assert_eq!(source_text(&s128), "DSD128 6.144 MHz 1 声道");
+        let Ok(dop) = DeviceFormat::dsd(
+            88_200,
+            ChannelLayout::STEREO,
+            DsdTransport::Dop(DopContainer::S32LeMsb),
+        ) else {
+            panic!("dop");
+        };
+        assert_eq!(
+            device_text(&dop),
+            "DSD64 2 声道 DoP（PCM 176.4 kHz 容器 32 位）"
+        );
+        let Ok(n) = DeviceFormat::dsd(
+            88_200,
+            ChannelLayout::STEREO,
+            DsdTransport::Native(DsdWord::U32Be),
+        ) else {
+            panic!("native");
+        };
+        assert_eq!(device_text(&n), "DSD64 2 声道 原生 DSD_U32_BE");
     }
 }

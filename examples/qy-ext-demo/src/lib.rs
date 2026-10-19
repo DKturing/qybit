@@ -15,6 +15,7 @@
 
 pub mod embedded;
 mod formats;
+pub mod qyd1;
 pub mod qyt1;
 
 use std::io::{self, Cursor, ErrorKind, Read, Seek, SeekFrom};
@@ -411,6 +412,8 @@ pub struct Output {
 #[derive(Clone)]
 pub struct Recorder {
     pub supported: Vec<(u8, u8)>,
+    /// 接受的 DSD 传输方式（D1），按先后协商；空表示不接受 DSD。
+    pub dsd: Vec<qy_core::DsdTransport>,
     pub period: Duration,
     pub outputs: Arc<Mutex<Vec<Output>>>,
 }
@@ -419,6 +422,7 @@ impl Recorder {
     pub fn new(supported: &[(u8, u8)]) -> Self {
         Self {
             supported: supported.to_vec(),
+            dsd: Vec::new(),
             period: Duration::from_millis(5),
             outputs: Arc::default(),
         }
@@ -450,6 +454,35 @@ impl Backend for Recorder {
     fn open(&mut self, source: &SourceFormat) -> Result<Pending, OpenFailure<Attempt>> {
         let mut n = Negotiation::new(*source);
         let bits = source.bits();
+        // D1：DSD 只按 DSD 设备格式协商（原生或 DoP），不放入 PCM 格式。
+        if source.encoding().is_dsd() {
+            for t in [
+                qy_core::DsdTransport::Native(qy_core::DsdWord::U32Be),
+                qy_core::DsdTransport::Native(qy_core::DsdWord::U16Le),
+                qy_core::DsdTransport::Native(qy_core::DsdWord::U8),
+                qy_core::DsdTransport::Dop(qy_core::DopContainer::S32LeMsb),
+                qy_core::DsdTransport::Dop(qy_core::DopContainer::S24_3Le),
+            ] {
+                let Ok(format) = DeviceFormat::dsd(source.sample_rate(), source.layout(), t) else {
+                    continue;
+                };
+                let accepted = self.dsd.contains(&t);
+                n.attempts.push(Attempt { format, accepted });
+                if accepted {
+                    n.chosen = Some(n.attempts.len() - 1);
+                    return Ok(Pending {
+                        format,
+                        negotiation: n,
+                        period: self.period,
+                        outputs: Arc::clone(&self.outputs),
+                    });
+                }
+            }
+            return Err(OpenFailure {
+                negotiation: n,
+                message: "示例设备不接受该 DSD 格式（不转为 PCM）".into(),
+            });
+        }
         if !source.encoding().is_float() {
             for (c, v) in [(16u8, 16u8), (24, 24), (32, 24), (32, 32)] {
                 if bits > v {
@@ -519,6 +552,7 @@ impl PendingStream for Pending {
                 block_align: ba,
                 drain_packets: 2,
                 event_timeout_ms: 2000,
+                silence: format.silence_frame(),
             };
             let report = render(&mut api, &mut NoPriority, &mut consumer, &ctl, cfg);
             api.settle();

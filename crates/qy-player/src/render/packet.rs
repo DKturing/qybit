@@ -47,6 +47,9 @@ pub struct PacketConfig {
     /// 最后有效包之后再提交的静音包数。
     pub drain_packets: u32,
     pub event_timeout_ms: u32,
+    /// 设备格式的一帧静音（[`qy_core::DeviceFormat::silence_frame`]；PCM 为全零，D1 起 DSD 有自己的
+    /// 静音模式）。
+    pub silence: qy_core::SilenceFrame,
 }
 
 struct Loop<'a, A: PacketApi> {
@@ -142,9 +145,9 @@ impl<A: PacketApi> Loop<'_, A> {
         } else {
             0
         };
-        // 其余部分写设备格式静音（有符号 PCM 为全零）。
+        // 其余部分写设备格式的静音帧（有符号 PCM 为全零；DSD 为 0x69 或带标记的 DoP 静音，D1）。
         if let Some(rest) = buf.get_mut(got * ba..) {
-            rest.fill(0);
+            self.cfg.silence.fill(rest);
         }
         // 释放与请求严格配对，再报告长度异常。
         self.api.release_buffer(frames, 0)?;
@@ -225,6 +228,7 @@ mod tests {
             block_align: usize::from(f.block_align()),
             drain_packets: 2,
             event_timeout_ms: 2000,
+            silence: f.silence_frame(),
         }
     }
 
@@ -467,5 +471,60 @@ mod tests {
             .collect();
         assert!(valid == expected, "有效字节不一致");
         check_calls(&api.calls, B);
+    }
+
+    /// D1：DoP 设备格式下，尾部填充、暂停与排空写入的都是 DoP 静音帧（标记 + 0x6969），整个设备流
+    /// 的标记逐设备帧交替 0x05 / 0xFA，没有零字节的“PCM 静音”。
+    #[test]
+    fn dop_silence_keeps_marker_phase() {
+        use qy_core::{ChannelLayout, DopContainer, DsdTransport};
+        let Ok(f) = DeviceFormat::dsd(
+            88_200,
+            ChannelLayout::STEREO,
+            DsdTransport::Dop(DopContainer::S32LeMsb),
+        ) else {
+            panic!("dop");
+        };
+        let ba = usize::from(f.block_align());
+        let (mut p, mut c) = ring(&f, 1 << 20);
+        // 1000 个 DSD 字的数据（字节内容任取，标记按格式写好）：用静音帧以外的另一种合法 DoP 字节。
+        let mut data = Vec::new();
+        for k in 0..1000u32 {
+            for frame in 0..2u8 {
+                let marker = if frame == 0 { 0x05 } else { 0xFA };
+                for ch in 0..2u8 {
+                    data.extend_from_slice(&[0, (k as u8) ^ ch, (k >> 8) as u8, marker]);
+                }
+            }
+        }
+        assert_eq!(p.push_frames(&data), Ok(1000));
+        let ctl = Arc::new(RenderControl::default());
+        ctl.eof.store(true, Ordering::Release);
+        let hook_ctl = Arc::clone(&ctl);
+        // 第 1 次等待之后的一包暂停。
+        let hook = move |w: u64| hook_ctl.pause.store(w == 1, Ordering::Release);
+        let words = 300u32; // 每包 300 个字（600 个设备帧）
+        let mut api = FakeApi::new(words, ba, WaitMode::Scripted(Box::new(hook)));
+        let mut prio = FakePriority::default();
+        let r = render(&mut api, &mut prio, &mut c, &ctl, cfg(words, &f));
+        assert_eq!(r.end, RenderEnd::Drained);
+        assert_eq!(r.valid_frames, 1000);
+        assert!(r.paused_frames > 0 && r.tail_fill_frames > 0 && r.drain_frames > 0);
+        // 每 4 字节一个设备样本：标记在最高字节，逐设备帧交替。
+        let dev_frame = usize::from(f.device_frame_bytes());
+        for (i, frame) in api.rendered.chunks_exact(dev_frame).enumerate() {
+            let want = if i % 2 == 0 { 0x05 } else { 0xFA };
+            assert!(frame.chunks_exact(4).all(|s| s[3] == want), "设备帧 {i}");
+        }
+        // 去掉有效数据之后的每一帧都是静音帧。
+        let silence = f.silence_frame();
+        let valid: Vec<u8> = api
+            .rendered
+            .chunks_exact(ba)
+            .filter(|w| *w != silence.as_bytes())
+            .flatten()
+            .copied()
+            .collect();
+        assert!(valid == data, "有效字节不一致");
     }
 }

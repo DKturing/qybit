@@ -1380,3 +1380,19 @@ fn idle_main_loop_sleeps_until_interrupt() {
     );
     eprintln!("{stats}\n暂停中 step {paused_steps} 次 / 中断 {isr} 次；{activity:?}");
 }
+
+/// D1：嵌入式宿主暂不提供 DSD 输出：DSD 源（任何倍率、声道）在选择设备格式时明确拒绝，不放入
+/// PCM 槽位（DoP 的 24 位样本会被当成 PCM 播放成噪声）。
+#[test]
+fn dsd_is_rejected_before_device_selection() {
+    for (rate, layout) in [
+        (2_822_400, qy_core::ChannelLayout::STEREO),
+        (5_644_800, qy_core::ChannelLayout::MONO),
+    ] {
+        let Ok(s) = qy_core::SourceFormat::dsd(rate, layout) else {
+            panic!("dsd");
+        };
+        assert_eq!(caps().select(&s), Err(SelectError::Dsd));
+    }
+    assert!(SelectError::Dsd.to_string().contains("不转为 PCM"));
+}

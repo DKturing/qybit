@@ -33,7 +33,8 @@ pub mod engine;
 
 pub use qy_pcm_format::pack::{Exact, Pcm};
 pub use qy_pcm_format::{
-    ChannelLayout, DeviceFormat, Endian, MAX_CHANNELS, SampleEncoding, SourceFormat, Speaker,
+    ChannelLayout, DeviceFormat, DopContainer, DsdTransport, DsdWord, Endian, MAX_CHANNELS,
+    SampleEncoding, SilenceFrame, SourceFormat, Speaker,
 };
 
 /// M0 默认输入窗口字节数。

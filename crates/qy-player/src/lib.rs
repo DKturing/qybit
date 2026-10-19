@@ -30,8 +30,9 @@ pub use player::{
 };
 pub use report::{
     AppliedParams, AttemptRecord, Evidence, Negotiation, OpenFailure, PhysicalSpeakers,
-    PlaybackReport, RateProbe, StreamReport, Submission, encoding_text, fault_text,
-    lossy_track_text, source_bits_text,
+    PlaybackReport, RateProbe, StreamReport, Submission, dsd_name, dsd_rate_text,
+    dsd_transport_text, encoding_text, fault_text, lossy_track_text, source_bits_text,
+    source_rate_text,
 };
 
 use qy_codec_auto::profile::{self, Profile};

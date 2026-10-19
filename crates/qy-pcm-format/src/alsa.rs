@@ -20,8 +20,8 @@
 use core::fmt;
 
 use crate::{
-    ChannelLayout, DeviceFormat, Endian, FormatError, MAX_LAYOUT_CHANNELS, Placement,
-    SampleEncoding, SourceFormat, Speaker,
+    ChannelLayout, DeviceFormat, DopContainer, DsdTransport, DsdWord, Endian, FormatError,
+    MAX_LAYOUT_CHANNELS, Placement, SampleEncoding, SourceFormat, Speaker,
 };
 
 /// 支持的 ALSA 样本格式（小端有符号整数；F3 起另有小端 IEEE 754 浮点）。
@@ -39,6 +39,22 @@ pub enum AlsaFormat {
     FloatLe,
     /// `FLOAT64_LE`：binary64（F3）。
     Float64Le,
+    /// `DSD_U8`（D1）：原生 DSD，每声道每帧 8 位，最早的位在最高位。
+    DsdU8,
+    /// `DSD_U16_LE`（D1）。
+    DsdU16Le,
+    /// `DSD_U32_LE`（D1）。
+    DsdU32Le,
+    /// `DSD_U16_BE`（D1）。
+    DsdU16Be,
+    /// `DSD_U32_BE`（D1）。
+    DsdU32Be,
+    /// DoP 封装在 `S24_3LE` 中（D1）：设备以 `S24_3LE` 打开，样本是 DoP 标记 + 16 位 DSD。
+    DopS24_3Le,
+    /// DoP 封装在 `S32_LE` 中（高 24 位，低字节 0）。
+    DopS32Le,
+    /// DoP 封装在 `S24_LE` 中（低 24 位，高字节符号扩展）。
+    DopS24Le,
 }
 
 /// 不支持的 ALSA 格式类别。
@@ -60,22 +76,72 @@ impl AlsaFormat {
     /// 全部支持的整数格式（设备格式矩阵按这些格式测试）。
     pub const ALL: [AlsaFormat; 4] = [Self::S16Le, Self::S24_3Le, Self::S24Le, Self::S32Le];
 
-    /// 查询设备时测试的全部格式：整数与浮点（F3）。
-    pub const QUERY: [AlsaFormat; 6] = [
+    /// 查询设备时测试的全部格式：整数、浮点（F3）与原生 DSD（D1）。DoP 用承载它的整数格式。
+    pub const QUERY: [AlsaFormat; 11] = [
         Self::S16Le,
         Self::S24_3Le,
         Self::S24Le,
         Self::S32Le,
         Self::FloatLe,
         Self::Float64Le,
+        Self::DsdU32Be,
+        Self::DsdU32Le,
+        Self::DsdU16Be,
+        Self::DsdU16Le,
+        Self::DsdU8,
     ];
 
-    /// 样本编码。
+    /// 查询设备时测试的原生 DSD 格式（D1；DoP 不单独查询，看对应的 PCM 格式）。
+    pub const DSD: [AlsaFormat; 5] = [
+        Self::DsdU32Be,
+        Self::DsdU32Le,
+        Self::DsdU16Be,
+        Self::DsdU16Le,
+        Self::DsdU8,
+    ];
+
+    /// DoP 封装，按候选先后（D1）。
+    pub const DOP: [AlsaFormat; 3] = [Self::DopS32Le, Self::DopS24_3Le, Self::DopS24Le];
+
+    /// 样本编码（DoP 也是 DSD：送出的是 DSD 位）。
     pub const fn encoding(self) -> SampleEncoding {
         match self {
             Self::FloatLe => SampleEncoding::Float32,
             Self::Float64Le => SampleEncoding::Float64,
+            Self::DsdU8
+            | Self::DsdU16Le
+            | Self::DsdU32Le
+            | Self::DsdU16Be
+            | Self::DsdU32Be
+            | Self::DopS24_3Le
+            | Self::DopS32Le
+            | Self::DopS24Le => SampleEncoding::Dsd,
             _ => SampleEncoding::Int,
+        }
+    }
+
+    /// DSD 的传输方式（D1）；PCM 格式为 `None`。
+    pub const fn dsd_transport(self) -> Option<DsdTransport> {
+        Some(match self {
+            Self::DsdU8 => DsdTransport::Native(DsdWord::U8),
+            Self::DsdU16Le => DsdTransport::Native(DsdWord::U16Le),
+            Self::DsdU32Le => DsdTransport::Native(DsdWord::U32Le),
+            Self::DsdU16Be => DsdTransport::Native(DsdWord::U16Be),
+            Self::DsdU32Be => DsdTransport::Native(DsdWord::U32Be),
+            Self::DopS24_3Le => DsdTransport::Dop(DopContainer::S24_3Le),
+            Self::DopS32Le => DsdTransport::Dop(DopContainer::S32LeMsb),
+            Self::DopS24Le => DsdTransport::Dop(DopContainer::S24LeLsb),
+            _ => return None,
+        })
+    }
+
+    /// 设备上实际打开的格式（查询设备是否支持时看它）：DoP 为承载它的 PCM 格式，其余为自身。
+    pub const fn wire(self) -> AlsaFormat {
+        match self {
+            Self::DopS24_3Le => Self::S24_3Le,
+            Self::DopS32Le => Self::S32Le,
+            Self::DopS24Le => Self::S24Le,
+            f => f,
         }
     }
 
@@ -88,37 +154,60 @@ impl AlsaFormat {
             Self::S32Le => "S32_LE",
             Self::FloatLe => "FLOAT_LE",
             Self::Float64Le => "FLOAT64_LE",
+            Self::DsdU8 => "DSD_U8",
+            Self::DsdU16Le => "DSD_U16_LE",
+            Self::DsdU32Le => "DSD_U32_LE",
+            Self::DsdU16Be => "DSD_U16_BE",
+            Self::DsdU32Be => "DSD_U32_BE",
+            Self::DopS24_3Le => "S24_3LE（DoP）",
+            Self::DopS32Le => "S32_LE（DoP）",
+            Self::DopS24Le => "S24_LE（DoP）",
         }
     }
 
-    /// `snd_pcm_format_t` 数值。
+    /// `snd_pcm_format_t` 数值（DSD 见内核 `include/uapi/sound/asound.h`：`DSD_U8` = 48、
+    /// `DSD_U16_LE` = 49、`DSD_U32_LE` = 50、`DSD_U16_BE` = 51、`DSD_U32_BE` = 52；DoP 用承载它的
+    /// PCM 格式的代码）。
     pub const fn code(self) -> i32 {
         match self {
             Self::S16Le => 2,
-            Self::S24Le => 6,
-            Self::S32Le => 10,
-            Self::S24_3Le => 32,
+            Self::S24Le | Self::DopS24Le => 6,
+            Self::S32Le | Self::DopS32Le => 10,
+            Self::S24_3Le | Self::DopS24_3Le => 32,
             Self::FloatLe => 14,
             Self::Float64Le => 16,
+            Self::DsdU8 => 48,
+            Self::DsdU16Le => 49,
+            Self::DsdU32Le => 50,
+            Self::DsdU16Be => 51,
+            Self::DsdU32Be => 52,
         }
     }
 
-    /// 容器位宽 C。
+    /// 容器位宽 C（设备样本的位数）。
     pub const fn container_bits(self) -> u8 {
         match self {
-            Self::S16Le => 16,
-            Self::S24_3Le => 24,
-            Self::S24Le | Self::S32Le | Self::FloatLe => 32,
+            Self::DsdU8 => 8,
+            Self::S16Le | Self::DsdU16Le | Self::DsdU16Be => 16,
+            Self::S24_3Le | Self::DopS24_3Le => 24,
+            Self::S24Le
+            | Self::S32Le
+            | Self::FloatLe
+            | Self::DsdU32Le
+            | Self::DsdU32Be
+            | Self::DopS32Le
+            | Self::DopS24Le => 32,
             Self::Float64Le => 64,
         }
     }
 
-    /// 有效位数 V。
+    /// 有效位数 V（DSD 原生格式为容器位数；DoP 为 24）。
     pub const fn valid_bits(self) -> u8 {
         match self {
-            Self::S16Le => 16,
-            Self::S24_3Le | Self::S24Le => 24,
-            Self::S32Le | Self::FloatLe => 32,
+            Self::DsdU8 => 8,
+            Self::S16Le | Self::DsdU16Le | Self::DsdU16Be => 16,
+            Self::S24_3Le | Self::S24Le | Self::DopS24_3Le | Self::DopS32Le | Self::DopS24Le => 24,
+            Self::S32Le | Self::FloatLe | Self::DsdU32Le | Self::DsdU32Be => 32,
             Self::Float64Le => 64,
         }
     }
@@ -126,17 +215,26 @@ impl AlsaFormat {
     /// 有效位放置方式（C = V 时两种放置等价，统一记为高位对齐）。
     pub const fn placement(self) -> Placement {
         match self {
-            Self::S24Le => Placement::LsbAligned,
+            Self::S24Le | Self::DopS24Le => Placement::LsbAligned,
             _ => Placement::MsbAligned,
         }
     }
 
     /// 本格式、指定设备声道布局（设备上的样本顺序）下的设备格式。
+    /// DSD（D1）：`sample_rate` 是设备上实际打开的帧率，必须是每字设备帧数 e 的整数倍；得到的
+    /// 设备格式以 DSD 字率（帧率 ÷ e）为 [`DeviceFormat::sample_rate`]。
     pub const fn device_format_layout(
         self,
         sample_rate: u32,
         layout: ChannelLayout,
     ) -> Result<DeviceFormat, FormatError> {
+        if let Some(t) = self.dsd_transport() {
+            let e = t.expansion();
+            if !sample_rate.is_multiple_of(e) {
+                return Err(FormatError::SampleRate);
+            }
+            return DeviceFormat::dsd(sample_rate / e, layout, t);
+        }
         if self.encoding().is_float() {
             return DeviceFormat::float_layout(
                 sample_rate,
@@ -161,7 +259,7 @@ impl AlsaFormat {
         sample_rate: u32,
         channels: u16,
     ) -> Result<DeviceFormat, FormatError> {
-        if self.encoding().is_float() {
+        if self.encoding().is_float() || self.encoding().is_dsd() {
             return match ChannelLayout::default_for(channels) {
                 Some(l) => self.device_format_layout(sample_rate, l),
                 None => Err(FormatError::UndefinedLayout),
@@ -186,6 +284,11 @@ impl AlsaFormat {
             32 => Ok(Self::S24_3Le),
             14 => Ok(Self::FloatLe),
             16 => Ok(Self::Float64Le),
+            48 => Ok(Self::DsdU8),
+            49 => Ok(Self::DsdU16Le),
+            50 => Ok(Self::DsdU32Le),
+            51 => Ok(Self::DsdU16Be),
+            52 => Ok(Self::DsdU32Be),
             // S16_BE S24_BE S32_BE S20_BE S24_3BE S20_3BE S18_3BE FLOAT_BE FLOAT64_BE
             3 | 7 | 11 | 15 | 17 | 26 | 33 | 37 | 41 => Err(FormatRejection::BigEndian),
             // U8 U16 U24 U32 U20 U24_3 U20_3 U18_3
@@ -205,6 +308,11 @@ impl AlsaFormat {
             "S32_LE" => Ok(Self::S32Le),
             "FLOAT_LE" => Ok(Self::FloatLe),
             "FLOAT64_LE" => Ok(Self::Float64Le),
+            "DSD_U8" => Ok(Self::DsdU8),
+            "DSD_U16_LE" => Ok(Self::DsdU16Le),
+            "DSD_U32_LE" => Ok(Self::DsdU32Le),
+            "DSD_U16_BE" => Ok(Self::DsdU16Be),
+            "DSD_U32_BE" => Ok(Self::DsdU32Be),
             n if n.starts_with("FLOAT") && n.ends_with("BE") => Err(FormatRejection::BigEndian),
             n if n.starts_with("FLOAT") => Err(FormatRejection::Float),
             n if n.ends_with("BE") => Err(FormatRejection::BigEndian),
@@ -216,12 +324,26 @@ impl AlsaFormat {
     /// 设备格式对应的 ALSA 格式。只认小端；C = 32、V = 24 时只认低位对齐（`S24_LE`），
     /// WASAPI 式高位对齐没有对应格式。
     pub const fn from_device(f: &DeviceFormat) -> Result<Self, FormatRejection> {
+        if let Some(t) = f.dsd_transport() {
+            return Ok(match t {
+                DsdTransport::Native(DsdWord::U8) => Self::DsdU8,
+                DsdTransport::Native(DsdWord::U16Le) => Self::DsdU16Le,
+                DsdTransport::Native(DsdWord::U32Le) => Self::DsdU32Le,
+                DsdTransport::Native(DsdWord::U16Be) => Self::DsdU16Be,
+                DsdTransport::Native(DsdWord::U32Be) => Self::DsdU32Be,
+                DsdTransport::Dop(DopContainer::S24_3Le) => Self::DopS24_3Le,
+                DsdTransport::Dop(DopContainer::S32LeMsb) => Self::DopS32Le,
+                DsdTransport::Dop(DopContainer::S24LeLsb) => Self::DopS24Le,
+            });
+        }
         if !matches!(f.endian(), Endian::Little) {
             return Err(FormatRejection::BigEndian);
         }
         match f.encoding() {
             SampleEncoding::Float32 => return Ok(Self::FloatLe),
             SampleEncoding::Float64 => return Ok(Self::Float64Le),
+            // DSD 设备格式总有传输方式（上面已返回）。
+            SampleEncoding::Dsd => return Err(FormatRejection::Other),
             SampleEncoding::Int => {}
         }
         match (f.container_bits(), f.valid_bits(), f.placement()) {
@@ -243,7 +365,7 @@ impl fmt::Display for AlsaFormat {
 /// 候选格式列表（固定容量，不分配）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Candidates {
-    items: [Option<AlsaFormat>; 4],
+    items: [Option<AlsaFormat>; 8],
     len: usize,
 }
 
@@ -266,9 +388,26 @@ impl Candidates {
 /// 只有同一浮点编码的格式（设备接受时）。
 pub fn candidates(src: &SourceFormat, preference: &[AlsaFormat]) -> Candidates {
     let mut out = Candidates {
-        items: [None; 4],
+        items: [None; 8],
         len: 0,
     };
+    // D1：DSD 源先试设备支持的原生 DSD 格式，再试 DoP（承载它的 PCM 格式设备支持时）。
+    if src.encoding().is_dsd() {
+        let mut i = 0;
+        while i < AlsaFormat::DSD.len() + AlsaFormat::DOP.len() {
+            let f = if i < AlsaFormat::DSD.len() {
+                AlsaFormat::DSD[i]
+            } else {
+                AlsaFormat::DOP[i - AlsaFormat::DSD.len()]
+            };
+            if preference.contains(&f.wire()) {
+                out.items[out.len] = Some(f);
+                out.len += 1;
+            }
+            i += 1;
+        }
+        return out;
+    }
     if src.encoding().is_float() {
         if let Some(&f) = preference.iter().find(|f| f.encoding() == src.encoding()) {
             out.items[0] = Some(f);
@@ -279,7 +418,7 @@ pub fn candidates(src: &SourceFormat, preference: &[AlsaFormat]) -> Candidates {
     for v in [16u8, 24, 32] {
         for &f in preference {
             let dup = out.items[..out.len].contains(&Some(f));
-            if !f.encoding().is_float()
+            if f.encoding() == SampleEncoding::Int
                 && f.valid_bits() == v
                 && v >= src.bits()
                 && !dup

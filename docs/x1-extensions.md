@@ -109,6 +109,7 @@ fn main() -> std::process::ExitCode {
 | 错误之后 | 出错后在 `reset` 之前不再产出样本；`reset` 后能解码下一个源，结果与新解码器相同。 |
 | 定位 | 核心只在文件头解析完成、首次产出样本之后调用 `seek`；之后只输出目标帧及之后的样本；目标等于或超过长度返回 `PastEnd`；不支持返回 `Unsupported`（核心改为顺序解码并丢弃）。核心在每次 `decode` 之后、看状态之前取一次 `seek_request`。定位预滚（E5，2026-10-19）：只能落在目标之前时（有损格式定位到包），`take_preroll()` 返回目标之前还会输出的帧数，核心解码并丢弃，送出的第一帧仍是目标帧；最迟在落点之后第一次产出样本时给出，不得超过目标帧号，未定位时为 0（默认）。 |
 | 停止后迟到的回报 | 由核心按代次拒绝（§3.7），解码器不需要处理。 |
+| DSD（D1，2026-10-19） | DSD 解码器（DSF / DFF 等）用 `SourceFormat::dsd(位率, 布局)` 给出格式，每帧每声道输出一个 32 位 DSD 字（`i32` 按位存放，时间上最早的位在 bit 31；DSF 每字节最低位在前，读取时反转位序）；曲目末尾不足一个字的位用 `0x69` 补齐并在明细中写明。核心按设备的传输方式（原生 DSD 或 DoP）原样送出，设备不支持时明确拒绝，不转 PCM（[docs/d1-dsd.md](d1-dsd.md)）。 |
 | 文件头识别（E3，2026-10-19，可选） | 格式可以另提供 `identify(head, eof) -> qy_core::Identify<明细>`：不消耗输入、不需要工作区，回答 `Foreign`（不是本格式）、`NeedMore { total, container }`（至少共 `total` 字节才能回答，`eof` 为真时不给出）、`Supported { format, data_start }`、`Rejected { error, detail }`。必须与完整解码一致，用 `qy_testkit::check_identify` 检查（[docs/e3-identify.md](e3-identify.md)）。官方解码器各自有 `identify`，组合识别为 `AutoDecoder::identify`。 |
 
 ### 3.2 `FrameSink` / `FrameSource`（`qy-pcm-format::queue`）

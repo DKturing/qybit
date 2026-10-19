@@ -535,6 +535,7 @@ version = "0.0.0"
 dependencies = [
  "alsa",
  "libc",
+ "qy-codec-auto",
  "qy-core",
  "qy-host-alsa",
  "qy-pcm-format",

@@ -8,11 +8,17 @@
 //!
 //! N > V 拒绝；样本超出 N 位有符号范围视为溢出并拒绝，不截断、不饱和。
 //! 浮点源（F3）只放入同一浮点编码的设备格式：按位复制，只做字节序与声道位置的排列，不做数值运算。
+//! DSD（D1，tasks/D1.md）只放入 DSD 设备格式：每个 32 位 DSD 字按传输方式拆成 e 个设备帧——原生
+//! `DSD_U8` / `DSD_U16_*` / `DSD_U32_*` 按字节序原样写出；DoP 每个设备帧写标记（`0x05` / `0xFA`）
+//! 与 16 位 DSD。不改变任何一位 DSD 数据，不转 PCM。
 //! pack 在生产端运行；渲染线程只搬运其结果，不做任何位移或字节序转换。
 
 use core::marker::PhantomData;
 
-use crate::{DeviceFormat, Endian, MAX_LAYOUT_CHANNELS, Placement, SampleEncoding, SourceFormat};
+use crate::{
+    DOP_MARKERS, DeviceFormat, DsdTransport, DsdWord, Endian, MAX_LAYOUT_CHANNELS, Placement,
+    SampleEncoding, SourceFormat, dop_bytes,
+};
 
 mod sealed {
     pub trait Sealed {}
@@ -106,10 +112,11 @@ pub fn check(src: &SourceFormat, dev: &DeviceFormat) -> Result<(), PackError> {
     if src.sample_rate() != dev.sample_rate() || !src.layout().same_positions(&dev.layout()) {
         return Err(PackError::FormatMismatch);
     }
-    if src.encoding() != dev.encoding() {
+    if src.encoding() != dev.encoding() || src.encoding().is_dsd() != dev.dsd_transport().is_some()
+    {
         return Err(PackError::Encoding);
     }
-    if src.encoding().is_float() {
+    if src.encoding().is_float() || src.encoding().is_dsd() {
         return Ok(());
     }
     if src.bits() > dev.valid_bits() {
@@ -157,6 +164,10 @@ pub fn check_mode(
     match mode {
         ChannelMode::Exact => check(src, dev),
         ChannelMode::DuplicateMono => {
+            // 单声道复制（O1）只批准用于 PCM。
+            if src.encoding().is_dsd() {
+                return Err(PackError::Encoding);
+            }
             if src.sample_rate() != dev.sample_rate()
                 || src.layout() != crate::ChannelLayout::MONO
                 || dev.layout() != crate::ChannelLayout::STEREO
@@ -241,6 +252,9 @@ pub fn pack_with<M: Fidelity>(
     if src.format.encoding().is_float() {
         return Ok(pack_float(src, dev, &map, out));
     }
+    if let Some(t) = dev.dsd_transport() {
+        return Ok(pack_dsd(src, dev, t, &map, out));
+    }
     let src_channels = usize::from(src.format.channels());
     let n = u32::from(src.format.bits());
     let v = u32::from(dev.valid_bits());
@@ -319,6 +333,59 @@ fn pack_float<M: Fidelity>(
         }
     }
     frames
+}
+
+/// DSD 按位展开（D1）：每个源帧（每声道一个 32 位 DSD 字）写成 e 个设备帧，设备第 j 个声道取
+/// `map[j]`。编码与传输由 [`check_mode`] 保证。
+fn pack_dsd<M: Fidelity>(
+    src: &Pcm<'_, M>,
+    dev: &DeviceFormat,
+    t: DsdTransport,
+    map: &[u8; MAX_LAYOUT_CHANNELS],
+    out: &mut [u8],
+) -> usize {
+    let src_channels = usize::from(src.format.channels());
+    let align = usize::from(dev.block_align());
+    let channels = usize::from(dev.channels());
+    let sample = usize::from(t.sample_bytes());
+    let dev_frame = channels * sample;
+    let frames = src.frames().min(out.len() / align);
+    for (frame, dst_word) in src
+        .samples
+        .chunks_exact(src_channels)
+        .zip(out[..frames * align].chunks_exact_mut(align))
+    {
+        for (k, dst_frame) in dst_word.chunks_exact_mut(dev_frame).enumerate() {
+            for (&from, dst) in map[..channels]
+                .iter()
+                .zip(dst_frame.chunks_exact_mut(sample))
+            {
+                dsd_sample(frame[usize::from(from)] as u32, k, t, dst);
+            }
+        }
+    }
+    frames
+}
+
+/// DSD 字 `w`（最早的位在 bit 31）的第 `k` 个设备帧中一个声道的样本（D1 的唯一位运算；Kani 证明
+/// 对象）。原生格式的值总是“最早的字节在最高位”，`_BE` / `_LE` 是这个值的字节序；DoP 为
+/// 标记 + 16 位（最早的位在 bit 15），按容器放置。
+fn dsd_sample(w: u32, k: usize, t: DsdTransport, dst: &mut [u8]) {
+    // 第 k 个 16 位半字（k = 0 为高半字，时间上在前）；第 k 个字节同理。
+    let half = (w >> (16 * (1 - (k & 1)))) as u16;
+    match t {
+        DsdTransport::Native(DsdWord::U32Be) => dst.copy_from_slice(&w.to_be_bytes()),
+        DsdTransport::Native(DsdWord::U32Le) => dst.copy_from_slice(&w.to_le_bytes()),
+        DsdTransport::Native(DsdWord::U16Be) => dst.copy_from_slice(&half.to_be_bytes()),
+        DsdTransport::Native(DsdWord::U16Le) => dst.copy_from_slice(&half.to_le_bytes()),
+        DsdTransport::Native(DsdWord::U8) => dst[0] = (w >> (8 * (3 - (k & 3)))) as u8,
+        DsdTransport::Dop(c) => {
+            let v = (u32::from(DOP_MARKERS[k & 1]) << 16) | u32::from(half);
+            let le = dop_bytes(v, c);
+            let n = dst.len();
+            dst.copy_from_slice(&le[..n]);
+        }
+    }
 }
 
 /// M2 T5：Kani 有界证明（`cargo kani -p qy-pcm-format`）。
@@ -436,6 +503,79 @@ mod proofs {
             p,
         );
         assert!(r.is_err());
+    }
+
+    /// D1：任意 DSD 字、任意设备帧序号 k（0..e）：`dsd_sample` 写出的字节按位取回后，正好是该字
+    /// 时间顺序上第 k 段（原生 U32 / U16 / U8 为第 k 个 4 / 2 / 1 字节段，DoP 为第 k 个 16 位段），
+    /// 字节序与 DoP 标记符合规范；参考按位逐个比较，不用被测的移位。
+    fn dsd_roundtrip(t: DsdTransport) {
+        let w: u32 = kani::any();
+        let k: usize = kani::any();
+        let e = t.expansion() as usize;
+        kani::assume(k < e);
+        let n = usize::from(t.sample_bytes());
+        let mut out = [0u8; 4];
+        dsd_sample(w, k, t, &mut out[..n]);
+        // 时间顺序的第 i 位（i = 0 最早）。
+        let bit = |i: usize| (w >> (31 - i)) & 1;
+        let payload = 32 / e; // 每设备帧每声道的 DSD 位数
+        // 取出设备样本中按时间顺序排列的 DSD 字节（最早的在前）。
+        let mut bytes = [0u8; 4];
+        let count = payload / 8;
+        match t {
+            DsdTransport::Native(DsdWord::U32Be | DsdWord::U16Be | DsdWord::U8) => {
+                bytes[..count].copy_from_slice(&out[..count]);
+            }
+            DsdTransport::Native(DsdWord::U32Le | DsdWord::U16Le) => {
+                for j in 0..count {
+                    bytes[j] = out[count - 1 - j];
+                }
+            }
+            DsdTransport::Dop(c) => {
+                // 小端容器中 24 位值的三个字节：低（较晚）、中（较早）、标记。
+                let base = if matches!(c, crate::DopContainer::S32LeMsb) {
+                    1
+                } else {
+                    0
+                };
+                bytes[0] = out[base + 1];
+                bytes[1] = out[base];
+                assert!(out[base + 2] == DOP_MARKERS[k]);
+                match c {
+                    crate::DopContainer::S32LeMsb => assert!(out[0] == 0),
+                    crate::DopContainer::S24LeLsb => {
+                        assert!(out[3] == if DOP_MARKERS[k] & 0x80 != 0 { 0xFF } else { 0 });
+                    }
+                    crate::DopContainer::S24_3Le => {}
+                }
+            }
+        }
+        for j in 0..payload {
+            let got = (bytes[j / 8] >> (7 - j % 8)) & 1;
+            assert!(u32::from(got) == bit(k * payload + j));
+        }
+    }
+
+    macro_rules! dsd_proofs {
+        ($($name:ident: $t:expr;)*) => {
+            $(
+                #[kani::proof]
+                fn $name() {
+                    dsd_roundtrip($t);
+                }
+            )*
+        };
+    }
+
+    dsd_proofs! {
+        dsd_u8: DsdTransport::Native(DsdWord::U8);
+        dsd_u16_le: DsdTransport::Native(DsdWord::U16Le);
+        dsd_u16_be: DsdTransport::Native(DsdWord::U16Be);
+        dsd_u32_le: DsdTransport::Native(DsdWord::U32Le);
+        dsd_u32_be: DsdTransport::Native(DsdWord::U32Be);
+        dop_s24_3le: DsdTransport::Dop(crate::DopContainer::S24_3Le);
+        dop_s32le: DsdTransport::Dop(crate::DopContainer::S32LeMsb);
+        dop_s24le: DsdTransport::Dop(crate::DopContainer::S24LeLsb);
     }
 }
 

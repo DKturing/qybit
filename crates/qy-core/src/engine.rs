@@ -170,8 +170,12 @@ impl fmt::Display for CapabilityError {
     }
 }
 
-/// 承载源样本的最小设备容器字节数：整数为 [`min_container_bytes`]，浮点为浮点位宽（4 / 8，F3）。
+/// 承载源样本的最小设备容器字节数：整数为 [`min_container_bytes`]，浮点为浮点位宽（4 / 8，F3）；
+/// DSD 每帧每声道一个 32 位字，无论哪种传输至少 4 字节（D1）。
 pub const fn min_container_bytes_for(src: &SourceFormat) -> usize {
+    if src.encoding().is_dsd() {
+        return 4;
+    }
     match src.encoding().float_bits() {
         Some(bits) => bits as usize / 8,
         None => min_container_bytes(src.bits()),
@@ -361,14 +365,33 @@ pub struct PlaybackPlan {
 impl fmt::Display for PlaybackPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = &self.source;
-        write!(
-            f,
-            "源 {} Hz / {} 声道 / {} 位",
-            s.sample_rate(),
-            s.channels(),
-            s.bits()
-        )?;
+        match s.dsd_bit_rate() {
+            // D1：DSD 的“帧”是每声道一个 32 位字，帧率为字率。
+            Some(b) => write!(
+                f,
+                "源 DSD {b} 位/秒（字率 {}）/ {} 声道",
+                s.sample_rate(),
+                s.channels()
+            )?,
+            None => write!(
+                f,
+                "源 {} Hz / {} 声道 / {} 位",
+                s.sample_rate(),
+                s.channels(),
+                s.bits()
+            )?,
+        }
         match &self.device {
+            Some(d) if d.dsd_transport().is_some() => write!(
+                f,
+                "，设备 DSD 字率 {}（设备帧率 {} Hz，每字 {} 帧）/ {} 声道 / {}-{} 位",
+                d.sample_rate(),
+                d.device_rate(),
+                d.expansion(),
+                d.channels(),
+                d.container_bits(),
+                d.valid_bits()
+            )?,
             Some(d) => write!(
                 f,
                 "，设备 {} Hz / {} 声道 / {}-{} 位",

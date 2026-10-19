@@ -224,7 +224,7 @@ impl FakePcm {
 
 impl Pcm for FakePcm {
     fn supported_formats(&mut self) -> Result<Vec<AlsaFormat>, PcmError> {
-        Ok(AlsaFormat::ALL
+        Ok(AlsaFormat::QUERY
             .into_iter()
             .filter(|f| self.cfg.supported.contains(f))
             .collect())
@@ -235,7 +235,8 @@ impl Pcm for FakePcm {
         if self.state != State::Open {
             return Err(err("snd_pcm_hw_params", errno::EBADFD));
         }
-        if !self.cfg.supported.contains(&plan.format) {
+        // DoP（D1）以承载它的整数格式打开。
+        if !self.cfg.supported.contains(&plan.format.wire()) {
             return Err(err("snd_pcm_hw_params_set_format", errno::EINVAL));
         }
         if self.cfg.reject_rate_for == Some(plan.format)

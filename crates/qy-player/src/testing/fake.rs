@@ -758,6 +758,7 @@ impl<A: AttemptRecord> PendingStream for FakePending<A> {
                         block_align,
                         drain_packets: 2,
                         event_timeout_ms: 2000,
+                        silence: format.silence_frame(),
                     };
                     let mode = if device == FakeDevice::Clock {
                         WaitMode::Clock {
@@ -778,6 +779,7 @@ impl<A: AttemptRecord> PendingStream for FakePending<A> {
                         period_frames: format.sample_rate() / 50,
                         event_timeout_ms: 2000,
                         idle_sleep: Duration::from_micros(100),
+                        silence: format.silence_frame(),
                     };
                     let mut api = FakeWriteApi::new(
                         format.sample_rate() / 50,

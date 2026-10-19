@@ -95,6 +95,10 @@ pub fn failure_message(n: &Negotiation) -> String {
                 format!("端点在独占模式下不接受单声道 [FC]，也不支持 {rate} Hz（本程序不重采样）")
             }
         }
+        _ if n.source.encoding().is_dsd() => format!(
+            "端点在独占模式下不接受 DoP 所需的 PCM {} Hz（32/24、24/24）；WASAPI 没有原生 DSD，本程序不把 DSD 转为 PCM",
+            n.source.sample_rate() * 2
+        ),
         _ if n.source.encoding().is_float() => format!(
             "端点在独占模式下不接受 {} 位浮点（IEEE_FLOAT）；严格路径不转换（可明确开启浮点转整数，样本会改变）",
             n.source.bits()
@@ -109,6 +113,22 @@ pub fn device_format(
     src: &SourceFormat,
     (c, v): (u8, u8),
 ) -> Result<DeviceFormat, qy_pcm_format::FormatError> {
+    // D1：WASAPI 没有原生 DSD，DSD 源只用 DoP：C32/V24（高位对齐）或 C24/V24。
+    if src.encoding().is_dsd() {
+        let container = match (c, v) {
+            (32, 24) => qy_core::DopContainer::S32LeMsb,
+            (24, 24) => qy_core::DopContainer::S24_3Le,
+            _ => return Err(qy_pcm_format::FormatError::ContainerBits),
+        };
+        if !src.layout().is_wave_order() {
+            return Err(qy_pcm_format::FormatError::LayoutOrder);
+        }
+        return DeviceFormat::dsd(
+            src.sample_rate(),
+            src.layout(),
+            qy_core::DsdTransport::Dop(container),
+        );
+    }
     if src.encoding().is_float() {
         DeviceFormat::wasapi_float(src.sample_rate(), src.layout(), src.encoding())
     } else {
@@ -120,6 +140,10 @@ pub fn device_format(
 /// 只列出不改变样本值的表示（pack 只做 N ≤ V 的放置）。浮点源（F3）只有同一浮点编码一项
 /// （C = V = 浮点位宽）。
 pub fn candidates(src: &SourceFormat) -> Vec<(u8, u8)> {
+    // D1：DSD 只用 DoP 的两种容器（候选的 (C, V) 指 DoP 的 PCM 容器）。
+    if src.encoding().is_dsd() {
+        return vec![(32, 24), (24, 24)];
+    }
     if src.encoding().is_float() {
         return vec![(src.bits(), src.bits())];
     }
@@ -644,5 +668,29 @@ mod tests {
         assert!(s.contains("结论：播放未完整完成。"));
         assert!(!s.contains("无欠载、无错误"));
         assert_eq!(r.exit_code(), 1);
+    }
+
+    /// D1：DSD 源在 WASAPI 上只有 DoP：候选为 32/24 与 24/24 两种容器，只用 EXTENSIBLE，设备格式
+    /// 为 DoP（字率不变，设备帧率为 2 倍）；没有 DoP 可用时的说明写明不转 PCM。
+    #[test]
+    fn dsd_uses_dop_only() {
+        let Ok(src) = SourceFormat::dsd(2_822_400, qy_core::ChannelLayout::STEREO) else {
+            panic!("dsd");
+        };
+        assert_eq!(candidates(&src), vec![(32, 24), (24, 24)]);
+        let a = attempts(&src, None);
+        assert!(a.iter().all(|(_, d)| *d == Descriptor::Extensible));
+        let Ok(f) = device_format(&src, (32, 24)) else {
+            panic!("dop");
+        };
+        assert_eq!(
+            f.dsd_transport(),
+            Some(qy_core::DsdTransport::Dop(qy_core::DopContainer::S32LeMsb))
+        );
+        assert_eq!((f.sample_rate(), f.device_rate()), (88_200, 176_400));
+        assert!(f.accepts(&src));
+        assert!(device_format(&src, (16, 16)).is_err());
+        let n = Negotiation::new(src);
+        assert!(failure_message(&n).contains("不把 DSD 转为 PCM"));
     }
 }

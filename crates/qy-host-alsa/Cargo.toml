@@ -28,6 +28,8 @@ libc.workspace = true
 [dev-dependencies]
 qy-player = { workspace = true, features = ["test-support"] }
 qy-host-alsa = { path = ".", features = ["test-support"] }
+# D1：DSD 测试用的配置档（`HostResources::with_decoder`）。
+qy-codec-auto.workspace = true
 
 [lints]
 workspace = true
