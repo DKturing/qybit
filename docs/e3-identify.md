@@ -56,7 +56,7 @@ AutoDecoder::identify(&self, head, eof) -> (Codec, Identify<AutoDetail>)   // �
 | `qy-codec-auto/tests/identify.rs` 夹具 | WAV、AIFF、FLAC 三个解码器的全部 289 个夹具（含被拒绝的、其他格式的文件）经三个格式各自的识别与组合识别，与完整解码比较（`check_identify`）；组合识别与认领格式自己的结论相同、只有一个格式认领。结论：Supported 183、Rejected 88、Foreign 18 | 通过 |
 | 同上，本地 fuzz 语料 | 本地 `fuzz/corpus`（不入库）的解码语料 1959 个 | 通过 |
 | 同上，边界情形 | 空输入与标记前缀、AVI、IFF ILBM、RIFX、大块之前的 `container: true`、ID3v2 标签、未启用 FLAC 的组合解码器；AVI 解码时按无法识别拒绝 | 通过 |
-| fuzz 目标 `identify` | 四种识别在随机输入上与完整解码比较；本地 5 分钟 259 466 次无违约（之前依次发现并修正：标记前缀的下界、16 位双声道码流检查期间提前报 `Supported`、跳过块的下界多算 1 字节、AIFF FVER 的下界、ID3 标签超出文件时的结论、FLAC 宿主容量先于截断）；CI 冒烟 60 秒 | 通过 |
+| fuzz 目标 `identify` | 四种识别在随机输入上与完整解码比较；本地 5 分钟 259 466 次无违约（之前依次发现并修正：标记前缀的下界、16 位双声道码流检查期间提前报 `Supported`、跳过块的下界多算 1 字节、AIFF FVER 的下界、ID3 标签超出文件时的结论、FLAC 宿主容量先于截断）；CI 冒烟 60 秒。E5、D1 提交的 CI 冒烟又发现两处 WAV 下界（RIFF 余下不足一个块头时、要跳过的块超出 RIFF 时，下界应为 RIFF 余下的字节而不是整个块），已修正并加入回归用例，之后本地 4 进程 10 分钟无违约 | 通过 |
 | 示例 `tests/contract.rs` | `qyt1::identify` 的一致性；组合解码器带 ID3v2 标签的 QYT1 与 WAV：样本与不带标签相同（一次性、逐字节、随机分块），跳过字节数等于标签长度，定位正确 | 通过 |
 | 全部既有测试、no_std（thumbv7em）Clippy | 官方解码器的输出不变 | 通过 |
 | QEMU 演示（Embedded Full / Lite） | 照常通过；`.text` 分别 +1 368 / −48 字节（相对 E2；识别函数本身没有链接进演示，增加的是解码器中的识别模式判断与 RIFF 形式类型检查），`.bss` 不变 | 通过 |

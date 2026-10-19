@@ -282,6 +282,55 @@ fn identify_edge_cases() {
         id(b"ID3\x04\0\0\0\0\x01\x00", false).1,
         Identify::Skip { bytes: 10 + 128 }
     );
+    // fuzz 发现（CI identify 冒烟）：data 长度为 0，其后是 RIFF 内的零长度块，RIFF 最后余下不足
+    // 一个块头（6 字节）。余下的字节到齐即可下结论，NeedMore 的下界不得说成整个块头。
+    let mut riff_tail = Vec::new();
+    riff_tail.extend_from_slice(b"RIFFB\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x44\xac\0\0\x88\x58\x01\0\x02\0\x10\0data\0\0\0\0");
+    riff_tail.resize(134, 0);
+    riff_tail[100] = 0x14;
+    let (codec, result) = check_all(&mut d, "riff-tail", &riff_tail);
+    assert_eq!(codec, Codec::Wav);
+    assert!(
+        matches!(
+            result,
+            Identify::Rejected {
+                error: DecodeError::Malformed,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    let probe = &d.probe;
+    let id = |h: &[u8], eof: bool| probe.identify(h, eof);
+    assert_eq!(
+        id(&riff_tail[..68], false).1,
+        Identify::NeedMore {
+            total: 74,
+            container: true
+        }
+    );
+    // fuzz 发现：RF64 的 ds64 块（136 字节）超出 ds64 给出的 RIFF 长度（RIFF 在第 104 字节结束）。
+    // 跳过时读到 RIFF 之外的第一个字节即拒绝，下界不得说成整个块。
+    let rf64_over: &[u8] = b"\x52\x46\x36\x34\xff\xff\xff\xff\x57\x41\x56\x45\x64\x73\x36\x34\x88\x00\x00\x00\x60\x00\x00\x00\x00\x00\x00\x00\x20\x00\x00\x00\x00\x00\x00\x00\x08\x00\x00\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x2e\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\x00\x00\x00\x00";
+    let (codec, result) = check_all(&mut d, "rf64-skip-over-riff", rf64_over);
+    assert_eq!(codec, Codec::Wav);
+    assert!(
+        matches!(
+            result,
+            Identify::Rejected {
+                error: DecodeError::Malformed,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        d.probe.identify(&rf64_over[..48], false).1,
+        Identify::NeedMore {
+            total: 105,
+            container: true
+        }
+    );
     // 未启用 FLAC 的组合解码器：认出名字，按不支持拒绝。
     let Ok(wav_only) = AutoDecoder::empty().with_wav(leak(qy_core::PCM_WORK_SAMPLES)) else {
         panic!("工作区");

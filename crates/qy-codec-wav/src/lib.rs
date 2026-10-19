@@ -625,13 +625,21 @@ impl WavDecoder {
     fn wanted(&self) -> u64 {
         match self.state {
             State::RiffHeader => 12,
-            State::ChunkHeader => 8,
+            // RIFF 余下不足一个块头时，余下的字节到齐即可下结论（见 decode 的 ChunkHeader）。
+            State::ChunkHeader => match self.riff {
+                Riff::Bounded(r) => r.min(8),
+                Riff::Open => 8,
+            },
             State::Fmt { size, .. } => size.min(u64::from(FMT_EXT_LEN)),
             State::Fact { .. } => 4,
             State::Ds64 { .. } => DS64_FIXED,
             State::Ds64Table { .. } => DS64_ENTRY,
-            // 跳过之后可能就是 RIFF 末尾（结论随即确定）。
-            State::Skip { remaining } => remaining,
+            // 跳过之后可能就是 RIFF 末尾（结论随即确定）。要跳过的超出 RIFF 余下的字节时，多读到
+            // RIFF 之外的第一个字节即可拒绝（`take_riff`）。
+            State::Skip { remaining } => match self.riff {
+                Riff::Bounded(r) => remaining.min(r.saturating_add(1)),
+                Riff::Open => remaining,
+            },
             State::Data {
                 remaining, to_eof, ..
             } => {
