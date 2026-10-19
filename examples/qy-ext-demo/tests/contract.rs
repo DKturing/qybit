@@ -226,3 +226,38 @@ fn router_skips_id3_tags_without_caching_headers() {
         );
     }
 }
+
+/// E5：包模式（定位需要预滚）满足定位契约：全部目标（含包边界两侧、第一包内、最后一帧、越界）
+/// 定位后的样本与从头解码的对应部分逐个相同；组合解码器转交预滚。
+#[test]
+fn packet_mode_seek_with_preroll() {
+    let s = samples(5_000, 2, 16, 13);
+    let src = encode(44_100, 2, 16, &s);
+    let mut targets: Vec<u64> = vec![0, 1, 63, 64, 65, 127, 128, 129, 4_999, 5_000, 6_000];
+    // 伪随机目标（固定种子）。
+    let mut x = 0x9E37_79B9u64;
+    for _ in 0..40 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        targets.push(x % 5_000);
+    }
+    let packets = || {
+        let Ok(d) = Qyt1Decoder::with_packets(leak(512), 64) else {
+            panic!("工作区");
+        };
+        d
+    };
+    assert_eq!(
+        check_seek(packets, &src, &targets),
+        Ok(SeekSupport::Supported)
+    );
+    assert_eq!(
+        check_seek(|| ExtDecoder::desktop_packets(64), &src, &targets),
+        Ok(SeekSupport::Supported)
+    );
+    let srcs: Vec<&[u8]> = vec![&src];
+    if let Err(v) = check(packets, &srcs) {
+        panic!("{v}");
+    }
+}

@@ -60,6 +60,8 @@ pub enum Notice {
     ChannelsDuplicated { track: u32 },
     /// 曲目的定位改为顺序解码到目标位置（S1：存储不支持定位或位置越界；结果相同，只是更慢）。
     SeekSequential { track: u32 },
+    /// 曲目的定位按解码器的预滚（E5）解码并丢弃了目标之前的 `frames` 帧（样本精确）。
+    SeekPreroll { track: u32, frames: u64 },
     /// 曲目的浮点样本按明确开启的选项转换为 `bits` 位整数（F3：样本已改变）。
     FloatConverted { track: u32, bits: u8 },
     /// 浮点曲目的统计（F3）。
@@ -431,6 +433,9 @@ where
                 self.handle(event);
             }
             HostAction::SeekSequential { track } => self.notice(Notice::SeekSequential { track }),
+            HostAction::SeekPreroll { track, frames } => {
+                self.notice(Notice::SeekPreroll { track, frames });
+            }
             HostAction::Close { .. } => {
                 self.storage.close();
                 self.open_track = None;
@@ -829,6 +834,12 @@ pub fn write_notice(w: &mut impl fmt::Write, n: &Notice) -> fmt::Result {
         ),
         Notice::SeekSequential { track } => {
             writeln!(w, "EVENT seek-sequential track={track} decoded-to-target")
+        }
+        Notice::SeekPreroll { track, frames } => {
+            writeln!(
+                w,
+                "EVENT seek-preroll track={track} frames={frames} discarded"
+            )
         }
         Notice::FloatConverted { track, bits } => writeln!(
             w,

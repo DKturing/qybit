@@ -246,6 +246,49 @@ fn seek_direct_and_sequential() {
     }
 }
 
+/// E5：嵌入式宿主上的预滚定位（包模式 QYT1）：引擎解码并丢弃目标之前的帧，串口报告
+/// `seek-preroll`，定位后播出的字节从目标帧起与参考逐字节一致。
+#[test]
+fn seek_with_preroll() {
+    let s = samples(26_460, 2, 16, 79);
+    let target = 13_230usize;
+    let packet = 1_000u64;
+    let want = place(&s[target * 2..], 16, 16);
+    let tracks = vec![named("s.qyt1", encode(44_100, 2, 16, &s))];
+    let decoder = qy_ext_demo::embedded::decoder_with(Some(packet));
+    let (mut p, w) = match qy_ext_demo::embedded::build_with(
+        Tracks::new(tracks, true),
+        decoder,
+        ErrorPolicy::Stop,
+    ) {
+        Ok(x) => x,
+        Err(e) => panic!("预算：{e:?}"),
+    };
+    assert!(p.play(0));
+    let mut sent = false;
+    let mut reply = String::new();
+    let r = run(&mut p, &w, 30_000_000, |p, w| {
+        if !sent && w.played_bytes >= 4_410 * 4 {
+            sent = true;
+            let _ = p.command(qy_host_embedded::Command::Seek(300), &mut reply);
+        }
+    });
+    let notices = r.unwrap_or_else(|n| panic!("超时 {n:?}"));
+    assert!(reply.starts_with("OK seek"), "{reply}");
+    let land = (target as u64 / packet - 1) * packet;
+    assert!(
+        notices.contains(&Notice::SeekPreroll {
+            track: 0,
+            frames: target as u64 - land
+        }),
+        "{notices:?}"
+    );
+    assert!(!notices.contains(&Notice::SeekSequential { track: 0 }));
+    no_underrun(&p);
+    let out = played(&w.borrow());
+    assert!(out.len() > want.len() && out.ends_with(&want));
+}
+
 /// E1：嵌入式串口的播放计划行对有损曲目写 `lossy=1`；有损标记不影响设备，两首共用一个设备流，
 /// 播出的字节等于两份参考依次相接。
 #[test]

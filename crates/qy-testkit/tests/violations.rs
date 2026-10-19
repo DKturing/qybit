@@ -1,4 +1,5 @@
-//! 契约测试本身的测试：一个正确的极简解码器通过全部检查；故意违反某条约定的变体各自被发现。
+//! 契约测试本身的测试：一个正确的极简解码器（直接定位与预滚定位两种）通过全部检查；故意违反
+//! 某条约定的变体各自被发现。
 
 use qy_core::{DecodeError, Decoder, Progress, SeekError, SourceFormat, Status};
 use qy_testkit::{SeekSupport, check, check_seek};
@@ -21,7 +22,18 @@ enum Fault {
     ResetKeepsFormat,
     /// 定位后多输出目标前一帧。
     SeekOneEarly,
+    /// 正确的预滚（E5）：落在目标之前至多 10 帧，如实给出预滚帧数。
+    Preroll,
+    /// 预滚帧数少报 1 帧（多输出目标前一帧）。
+    PrerollMiscounted,
+    /// 目标不足 10 帧时仍报 10 帧（超过目标帧号）。
+    PrerollTooMuch,
+    /// 未定位时给出预滚帧数。
+    PrerollWithoutSeek,
 }
+
+/// 预滚变体落点距目标的最大帧数。
+const PREROLL: u64 = 10;
 
 struct Raw {
     fault: Fault,
@@ -30,6 +42,8 @@ struct Raw {
     pending: usize,
     failed: bool,
     seekable: bool,
+    /// 尚未交给核心的预滚帧数（E5）。
+    preroll: u64,
 }
 
 impl Raw {
@@ -41,6 +55,7 @@ impl Raw {
             pending: 0,
             failed: false,
             seekable,
+            preroll: 0,
         }
     }
 
@@ -57,6 +72,7 @@ impl Decoder for Raw {
         self.pcm.clear();
         self.pending = 0;
         self.failed = false;
+        self.preroll = 0;
     }
 
     fn format(&self) -> Option<SourceFormat> {
@@ -106,6 +122,9 @@ impl Decoder for Raw {
             let f = SourceFormat::new(rate, ch, 16).map_err(|_| DecodeError::Unsupported)?;
             self.format = Some(f);
             consumed = HEADER;
+            if self.fault == Fault::PrerollWithoutSeek {
+                self.preroll = 1;
+            }
         }
         let rest = &input[consumed..];
         if self.fault == Fault::DropsOddBytes && rest.len() == 1 && !eof {
@@ -167,12 +186,24 @@ impl Decoder for Raw {
         self.pcm.clear();
         self.pending = 0;
         let ch = self.channels() as u64;
-        let frame = if self.fault == Fault::SeekOneEarly {
-            frame.saturating_sub(1)
-        } else {
-            frame
+        let frame = match self.fault {
+            Fault::SeekOneEarly => frame.saturating_sub(1),
+            Fault::Preroll | Fault::PrerollMiscounted | Fault::PrerollTooMuch => {
+                let land = frame.saturating_sub(PREROLL);
+                self.preroll = match self.fault {
+                    Fault::PrerollMiscounted => (frame - land).saturating_sub(1),
+                    Fault::PrerollTooMuch => PREROLL,
+                    _ => frame - land,
+                };
+                land
+            }
+            _ => frame,
         };
         Ok(HEADER as u64 + frame * ch * 2)
+    }
+
+    fn take_preroll(&mut self) -> u64 {
+        core::mem::take(&mut self.preroll)
     }
 }
 
@@ -214,6 +245,8 @@ fn run(fault: Fault) -> Result<(), String> {
 #[test]
 fn correct_decoder_passes() {
     assert_eq!(run(Fault::None), Ok(()));
+    // E5：落在目标之前、如实给出预滚帧数，结果与直接定位相同。
+    assert_eq!(run(Fault::Preroll), Ok(()));
     // 不支持定位：核心顺序解码，结果相同。
     let src = raw_file(300, 2);
     assert_eq!(
@@ -231,6 +264,9 @@ fn each_violation_is_found() {
         (Fault::FramesAfterError, "出错之后再次调用仍产出样本"),
         (Fault::ResetKeepsFormat, "reset 之后 format() 不是 None"),
         (Fault::SeekOneEarly, "定位到"),
+        (Fault::PrerollMiscounted, "定位到"),
+        (Fault::PrerollTooMuch, "超过目标帧号"),
+        (Fault::PrerollWithoutSeek, "未定位时 take_preroll"),
     ];
     for (fault, msg) in expect {
         let Err(e) = run(fault) else {

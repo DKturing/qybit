@@ -63,6 +63,11 @@ pub struct Qyt1Decoder {
     failed: Option<Qyt1Detail>,
     /// 坏样本之前的完整帧已输出，下一次调用报告的错误（结果与分块无关）。
     deferred: Option<Qyt1Detail>,
+    /// 包模式（E5 示例）：定位只能落在包的开头，并且要从目标所在包的前一包开始解码（模拟有损
+    /// 格式的帧间依赖）；0 为按帧直接定位。
+    packet: u64,
+    /// 尚未交给核心的预滚帧数（E5）。
+    preroll: u64,
 }
 
 impl Qyt1Decoder {
@@ -84,7 +89,21 @@ impl Qyt1Decoder {
             pending: 0,
             failed: None,
             deferred: None,
+            packet: 0,
+            preroll: 0,
         })
+    }
+
+    /// 包模式（E5 示例）：每 `packet` 帧一包，定位落在目标所在包的前一包开头，目标之前的帧由
+    /// 核心解码并丢弃（[`Decoder::take_preroll`]）。代表 MP3、AAC 一类定位到包、需要预滚的格式；
+    /// QYT1 本身没有这种依赖，样本仍与直接定位相同。`packet` 为 0 时返回容量错误。
+    pub fn with_packets(pcm: &'static mut [i32], packet: u64) -> Result<Self, DecodeError> {
+        if packet == 0 {
+            return Err(DecodeError::CapacityExceeded);
+        }
+        let mut d = Self::new(pcm)?;
+        d.packet = packet;
+        Ok(d)
     }
 
     /// 不支持定位的解码器（核心改为顺序解码）。
@@ -208,6 +227,7 @@ impl Decoder for Qyt1Decoder {
         self.pending = 0;
         self.failed = None;
         self.deferred = None;
+        self.preroll = 0;
     }
 
     fn format(&self) -> Option<SourceFormat> {
@@ -311,6 +331,12 @@ impl Decoder for Qyt1Decoder {
         if frame >= self.total {
             return Err(SeekError::PastEnd);
         }
+        // E5：包模式落在目标所在包的前一包开头，差值作为预滚交给核心丢弃。
+        let land = frame
+            .checked_div(self.packet)
+            .map_or(frame, |p| p.saturating_sub(1) * self.packet);
+        self.preroll = frame - land;
+        let frame = land;
         let offset = frame
             .checked_mul(self.frame_bytes() as u64)
             .and_then(|b| b.checked_add(HEADER as u64))
@@ -319,6 +345,10 @@ impl Decoder for Qyt1Decoder {
         self.pending = 0;
         self.done = frame;
         Ok(offset)
+    }
+
+    fn take_preroll(&mut self) -> u64 {
+        core::mem::take(&mut self.preroll)
     }
 }
 

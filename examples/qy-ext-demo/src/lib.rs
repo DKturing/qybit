@@ -81,6 +81,16 @@ impl ExtDecoder {
 
     /// 桌面组装用：WAV、AIFF、FLAC（桌面多声道容量）与 QYT1，工作区一次性分配。
     pub fn desktop(seekable: bool) -> Self {
+        Self::desktop_with(if seekable { Some(0) } else { None })
+    }
+
+    /// 同 [`ExtDecoder::desktop`]，QYT1 用包模式（E5：每 `packet` 帧一包，定位需要预滚）。
+    pub fn desktop_packets(packet: u64) -> Self {
+        Self::desktop_with(Some(packet.max(1)))
+    }
+
+    /// `qyt1`：`None` 不可定位，`Some(0)` 按帧直接定位，`Some(n)` 包模式。
+    fn desktop_with(qyt1: Option<u64>) -> Self {
         let cap = Capacity::DESKTOP_MULTICHANNEL;
         let auto = match AutoDecoder::new(
             leak(qy_core::PCM_WORK_SAMPLES),
@@ -92,10 +102,10 @@ impl ExtDecoder {
             Err(e) => panic!("AutoDecoder 工作区：{e:?}"),
         };
         let pcm = leak(qy_core::PCM_WORK_SAMPLES);
-        let qyt1 = if seekable {
-            Qyt1Decoder::new(pcm)
-        } else {
-            Qyt1Decoder::without_seek(pcm)
+        let qyt1 = match qyt1 {
+            None => Qyt1Decoder::without_seek(pcm),
+            Some(0) => Qyt1Decoder::new(pcm),
+            Some(n) => Qyt1Decoder::with_packets(pcm, n),
         };
         match qyt1 {
             Ok(q) => Self::new(q, auto),
@@ -238,6 +248,14 @@ impl qy_core::Decoder for ExtDecoder {
             None => None,
         };
         r.and_then(|o| o.checked_add(tag))
+    }
+
+    fn take_preroll(&mut self) -> u64 {
+        match self.active {
+            Some(Active::Qyt1) => self.qyt1.take_preroll(),
+            Some(Active::Auto) => self.auto.take_preroll(),
+            None => 0,
+        }
     }
 }
 

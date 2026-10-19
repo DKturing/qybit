@@ -22,7 +22,8 @@
 //! 定位（[`Core::play_at`]）：从目标帧重新开始一首曲目。打开音源、解析文件头后，核心向解码器
 //! 要目标帧的字节位置（[`Decoder::seek`]）并发出 `Seek`，宿主移动读取位置后继续读取；解码器
 //! 只输出目标帧及之后的样本。解码器不支持定位或宿主回报 `SeekFailed` 时，核心重新打开该曲目，
-//! 顺序解码并丢弃目标帧之前的样本——结果同样精确，只是更慢。
+//! 顺序解码并丢弃目标帧之前的样本——结果同样精确，只是更慢。解码器只能落在目标之前（有损格式
+//! 定位到包）时，用 [`Decoder::take_preroll`] 说明目标之前还会输出几帧，核心解码并丢弃（E5）。
 //!
 //! 浮点源（F3）：解码输出按位存放（binary64 每样本两个 `i32`），帧数一律按
 //! [`SourceFormat::words_per_frame`] 计算。
@@ -186,6 +187,18 @@ pub trait Decoder {
     /// 核心在每次 `decode` 之后取一次。默认没有。
     fn seek_request(&mut self) -> Option<u64> {
         None
+    }
+
+    /// 定位预滚（E5）：[`Decoder::seek`]（及之后 [`Decoder::seek_request`] 的跳转）落在目标之前
+    /// 的某一帧时，返回目标帧之前还会输出的帧数 k。有损格式常需要这样：MP3 的比特储备、AAC 的
+    /// 重叠相加要先解码并丢弃落点之后的若干帧，才能得到正确的样本。核心解码并丢弃这 k 帧，定位后
+    /// 送出的第一帧仍是目标帧（精确性不变）。
+    ///
+    /// 核心在每次 `decode` 之后取一次，取走即清零；解码器最迟在落点之后第一次产出样本的那次
+    /// `decode` 中给出（可以分几次给出，合计为 k），k 不得超过目标帧号。未定位时返回 0。默认 0：
+    /// 解码器自己只输出目标帧及之后的样本（S1 的约定，官方解码器都是这样）。
+    fn take_preroll(&mut self) -> u64 {
+        0
     }
 }
 
@@ -360,6 +373,8 @@ pub struct Core<D: Decoder> {
     discard: u64,
     /// 本曲目改为顺序解码到目标帧（宿主据此报告），取走后清除。
     sequential: bool,
+    /// 定位预滚（E5）丢弃的累计帧数（宿主据此报告），取走后清除。
+    prerolled: u64,
 }
 
 impl<D: Decoder> Core<D> {
@@ -388,6 +403,7 @@ impl<D: Decoder> Core<D> {
             seek_target: None,
             discard: 0,
             sequential: false,
+            prerolled: 0,
         })
     }
 
@@ -460,6 +476,11 @@ impl<D: Decoder> Core<D> {
     /// 每次定位至多一次；取走后清除。
     pub fn take_sequential_seek(&mut self) -> bool {
         core::mem::take(&mut self.sequential)
+    }
+
+    /// 定位预滚（E5，[`Decoder::take_preroll`]）丢弃的累计帧数；取走后清零。
+    pub fn take_prerolled(&mut self) -> u64 {
+        core::mem::take(&mut self.prerolled)
     }
 
     fn clear_seek(&mut self) {
@@ -613,6 +634,12 @@ impl<D: Decoder> Core<D> {
         let consumed = progress.consumed.min(self.filled);
         self.input.copy_within(consumed..self.filled, 0);
         self.filled -= consumed;
+        // E5：定位落在目标之前时，解码器给出的预滚帧数一并丢弃。
+        let preroll = self.decoder.take_preroll();
+        if preroll > 0 {
+            self.discard = self.discard.saturating_add(preroll);
+            self.prerolled = self.prerolled.saturating_add(preroll);
+        }
         // 解码器在定位过程中要求再跳一次（FLAC 二分）。
         if let Some(offset) = self.decoder.seek_request() {
             self.jump(offset);

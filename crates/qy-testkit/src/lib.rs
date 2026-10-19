@@ -14,7 +14,9 @@
 //!   完全相同。
 //! - **复位复用**：同一个解码器依次解码多个源（中间 `reset`），结果与各用新解码器相同。
 //! - **定位**（[`check_seek`]）：支持时只输出目标帧及之后的样本，与完整解码的对应部分相同；
-//!   目标等于或超过长度时返回 `PastEnd`；不支持时返回 `Unsupported`，核心改为顺序解码。
+//!   目标等于或超过长度时返回 `PastEnd`；不支持时返回 `Unsupported`，核心改为顺序解码。落在
+//!   目标之前时以 `take_preroll` 给出预滚帧数（E5），按核心的做法丢弃后结果相同；预滚不得超过目标
+//!   帧号，未定位时不得给出。
 //!
 //! 停止后迟到的 I/O 回报由核心按代次拒绝，解码器不需要处理（见 `qy-core` 的测试与
 //! `examples/qy-ext-demo/tests/late_events.rs`）。
@@ -152,6 +154,7 @@ fn step<D: Decoder>(
     format: &mut Option<SourceFormat>,
     words: &mut Vec<i32>,
     discard: &mut u64,
+    prerolled: &mut u64,
     hold: bool,
 ) -> Result<Step, Violation> {
     let input = feed.input();
@@ -169,6 +172,12 @@ fn step<D: Decoder>(
         ));
     }
     feed.pos += p.consumed;
+    // E5：与核心相同，每次 decode 之后取一次预滚帧数，并入要丢弃的帧数。
+    let k = d.take_preroll();
+    if k > 0 {
+        *discard = discard.saturating_add(k);
+        *prerolled = prerolled.saturating_add(k);
+    }
     // 与核心相同：每次 decode 之后先查看跳转请求（定位中的二分查找），再看状态。
     if let Some(to) = d.seek_request() {
         return Ok(Step::Jump(to));
@@ -273,9 +282,21 @@ pub fn decode<D: Decoder>(
         return violation("reset 之后 format() 不是 None");
     }
     let mut feed = Feed::new(bytes, chunking);
-    let (mut format, mut words, mut discard) = (None, Vec::new(), 0u64);
+    let (mut format, mut words, mut discard, mut prerolled) = (None, Vec::new(), 0u64, 0u64);
     for _ in 0..budget(bytes) {
-        match step(d, &mut feed, &mut format, &mut words, &mut discard, false)? {
+        let r = step(
+            d,
+            &mut feed,
+            &mut format,
+            &mut words,
+            &mut discard,
+            &mut prerolled,
+            false,
+        )?;
+        if prerolled > 0 {
+            return violation("未定位时 take_preroll 返回了预滚帧数");
+        }
+        match r {
             Step::Jump(_) => return violation("未定位时 seek_request 要求跳转"),
             Step::Error(e) => {
                 let ending = Ending::Error(e);
@@ -385,7 +406,8 @@ pub fn check_seek<D: Decoder>(
         for chunking in [Chunking::Whole, Chunking::Random { seed: 5, max: 1024 }] {
             d.reset();
             let mut feed = Feed::new(source, chunking);
-            let (mut format, mut words, mut discard) = (None, Vec::new(), 0u64);
+            let (mut format, mut words, mut discard, mut prerolled) =
+                (None, Vec::new(), 0u64, 0u64);
             let (mut asked, mut sequential, mut ended) = (false, false, false);
             for _ in 0..budget(source) {
                 let r = step(
@@ -394,8 +416,12 @@ pub fn check_seek<D: Decoder>(
                     &mut format,
                     &mut words,
                     &mut discard,
+                    &mut prerolled,
                     !asked,
                 )?;
+                if prerolled > target {
+                    return violation(format!("定位到 {target}：预滚 {prerolled} 帧超过目标帧号"));
+                }
                 let p = match r {
                     Step::Progress(p) => p,
                     Step::Jump(at) => {
@@ -459,7 +485,13 @@ pub fn check_seek<D: Decoder>(
             if words != want {
                 return violation(format!(
                     "定位到 {target}（{}{chunking:?}）：输出 {} 字，应为完整解码第 {target} 帧起的 {} 字",
-                    if sequential { "顺序解码，" } else { "" },
+                    if sequential {
+                        "顺序解码，"
+                    } else if prerolled > 0 {
+                        "预滚，"
+                    } else {
+                        ""
+                    },
                     words.len(),
                     want.len()
                 ));

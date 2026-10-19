@@ -250,6 +250,50 @@ fn seek_direct_and_sequential() {
     }
 }
 
+/// E5：包模式的 QYT1 定位落在目标所在包的前一包开头，核心解码并丢弃目标之前的帧（预滚）。
+/// 定位后的新流从目标帧起与参考逐字节一致；报告写明丢弃的帧数，不算顺序解码。
+#[test]
+fn seek_with_preroll() {
+    let s = samples(44_100, 2, 16, 78);
+    let packet = 1_152u64;
+    for target in [13_000u64, 600, 1_152, 2_303, 40_000] {
+        let want = place(&s[target as usize * 2..], 16, 16);
+        let decoder = ExtDecoder::desktop_packets(packet);
+        let window = decoder.required_window();
+        let mut res = match HostResources::with_decoder(decoder, window, DESKTOP) {
+            Ok(r) => r,
+            Err(e) => panic!("{e:?}"),
+        };
+        let mut sent = false;
+        let (r, outs, log) = run(
+            &mut res,
+            vec![named("s.qyt1", encode(44_100, 2, 16, &s))],
+            true,
+            |st, tx| {
+                if !sent && st.position_frames >= 4_410 {
+                    sent = tx.send(Command::Seek(target)).is_ok();
+                }
+            },
+        );
+        let land = (target / packet).saturating_sub(1) * packet;
+        assert!(r.finished && r.user_seeks == 1, "{target}：{}", r.summary());
+        assert_eq!(outs.len(), 2, "{target}");
+        assert!(
+            outs[1].bytes == want,
+            "{target}：定位后应从目标帧起逐字节一致"
+        );
+        assert!(r.sequential_seeks.is_empty(), "{target}");
+        let expect = if target > land {
+            vec![(0, target - land)]
+        } else {
+            vec![]
+        };
+        assert_eq!(r.seek_prerolls, expect, "{target}");
+        assert_eq!(log.contains("预滚"), target > land, "{target}：{log}");
+        assert_eq!(r.summary().contains("预滚"), target > land, "{target}");
+    }
+}
+
 /// 解码错误：桌面配置出错即停止（`ErrorPolicy::Stop`），坏样本之前的有效音频照常排空播放，
 /// 报告写明 QYT1 的错误明细（组合解码器经 `Diagnostics` 提供）。
 #[test]

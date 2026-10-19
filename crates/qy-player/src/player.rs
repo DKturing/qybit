@@ -619,6 +619,13 @@ impl<B: Backend, S: TrackSource, D: Decoder + Resources + Diagnostics> Player<'_
                 ));
                 self.report.sequential_seeks.push(track);
             }
+            HostAction::SeekPreroll { track, frames } => {
+                self.line(&format!(
+                    "  曲目 {} 定位：解码并丢弃目标之前的 {frames} 帧（预滚，送出的第一帧仍是目标帧）",
+                    u64::from(track) + 1
+                ));
+                self.report.seek_prerolls.push((track, frames));
+            }
             HostAction::Close { .. } => {
                 self.file = None;
                 let tag = self.res.engine.decoder().skipped_tag_bytes();

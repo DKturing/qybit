@@ -489,6 +489,9 @@ pub enum HostAction {
     /// 第 `track` 首的定位改为顺序解码到目标帧（解码器不支持定位或音源不可定位；结果同样
     /// 精确，只是更慢）。宿主据此在报告中写明。
     SeekSequential { track: u32 },
+    /// 第 `track` 首的定位落在目标之前，按解码器给出的预滚（E5，[`crate::Decoder::take_preroll`]）
+    /// 解码并丢弃了目标帧之前的 `frames` 帧（送出的第一帧仍是目标帧）。宿主据此在报告中写明。
+    SeekPreroll { track: u32, frames: u64 },
     /// 第 `track` 首按 [`ChannelPolicy::DuplicateMono`] 把单声道复制到左右两路（声道布局已改变，
     /// 样本值未改变）。在设备按该曲目配置成功（新打开或续用）后给出；配置失败的曲目不给出。
     /// 宿主据此在报告中标为“已改变”。
@@ -1154,6 +1157,13 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
             if self.core.take_sequential_seek() {
                 self.push(HostAction::SeekSequential {
                     track: self.core.track(),
+                });
+            }
+            let frames = self.core.take_prerolled();
+            if frames > 0 {
+                self.push(HostAction::SeekPreroll {
+                    track: self.core.track(),
+                    frames,
                 });
             }
             let Some(action) = polled else {

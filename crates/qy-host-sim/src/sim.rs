@@ -197,6 +197,8 @@ pub struct Report {
     pub duplicated: Vec<u32>,
     /// 定位改为顺序解码的曲目（S1：解码器不支持定位或音源不可定位）。
     pub sequential_seeks: Vec<u32>,
+    /// 定位预滚（E5）：曲目与丢弃的帧数。
+    pub seek_prerolls: Vec<(u32, u64)>,
     /// 浮点按明确开启的选项转为整数的曲目与位数（F3：样本已改变）。
     pub float_converted: Vec<(u32, u8)>,
     /// 浮点曲目的统计（F3）。
@@ -712,6 +714,9 @@ impl Sim<'_> {
                 self.report.float_stats.push((track, report));
             }
             HostAction::SeekSequential { track } => self.report.sequential_seeks.push(track),
+            HostAction::SeekPreroll { track, frames } => {
+                self.report.seek_prerolls.push((track, frames));
+            }
             HostAction::Finished => {
                 self.report.finished = true;
                 self.phase = Phase::Done;

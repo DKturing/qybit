@@ -260,6 +260,8 @@ pub struct PlaybackReport<A> {
     pub user_seeks: u32,
     /// 定位改为顺序解码的曲目（解码器不支持定位或音源不可定位；结果同样精确）。
     pub sequential_seeks: Vec<u32>,
+    /// 定位预滚（E5）：曲目与解码并丢弃的帧数（样本精确，见 `Decoder::take_preroll`）。
+    pub seek_prerolls: Vec<(u32, u64)>,
     pub protocol_errors: u32,
     /// 生产端休眠后被唤醒的次数（L1：渲染线程、命令或到期唤醒；含操作系统的虚假唤醒）。
     pub producer_wakeups: u64,
@@ -284,6 +286,7 @@ impl<A> Default for PlaybackReport<A> {
             user_skips: 0,
             user_seeks: 0,
             sequential_seeks: Vec::new(),
+            seek_prerolls: Vec::new(),
             protocol_errors: 0,
             producer_wakeups: 0,
         }
@@ -702,6 +705,13 @@ impl<A: AttemptRecord> PlaybackReport<A> {
             let _ = writeln!(
                 o,
                 "曲目 {} 的音源不支持定位，已按顺序解码到目标位置（结果相同，只是更慢）。",
+                track + 1
+            );
+        }
+        for (track, frames) in &self.seek_prerolls {
+            let _ = writeln!(
+                o,
+                "曲目 {} 定位时解码并丢弃了目标之前的 {frames} 帧（预滚；送出的第一帧仍是目标帧）。",
                 track + 1
             );
         }

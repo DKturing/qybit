@@ -285,6 +285,12 @@ pub type EmbeddedPlayer = Player<ExtDecoder, Tracks, VirtualI2s, SharedFeeder, Q
 
 /// 嵌入式组合解码器：WAV、AIFF、FLAC（MCU 容量）与 QYT1，工作区按配置档一次性取得。
 pub fn decoder(qyt1_seekable: bool) -> ExtDecoder {
+    decoder_with(if qyt1_seekable { Some(0) } else { None })
+}
+
+/// 同 [`decoder`]；`qyt1`：`None` 不可定位，`Some(0)` 按帧直接定位，`Some(n)` 包模式（E5，每 `n`
+/// 帧一包，定位需要预滚）。
+pub fn decoder_with(qyt1: Option<u64>) -> ExtDecoder {
     let budget = PROFILE.budget();
     let Some(flac) = PROFILE.flac_capacity() else {
         panic!("Embedded Full 应启用 FLAC");
@@ -305,10 +311,10 @@ pub fn decoder(qyt1_seekable: bool) -> ExtDecoder {
     };
     // QYT1 与 WAV 共用同样大小的 PCM 工作区。
     let pcm = leak(PCM_WORK_SAMPLES);
-    let qyt1 = if qyt1_seekable {
-        Qyt1Decoder::new(pcm)
-    } else {
-        Qyt1Decoder::without_seek(pcm)
+    let qyt1 = match qyt1 {
+        None => Qyt1Decoder::without_seek(pcm),
+        Some(0) => Qyt1Decoder::new(pcm),
+        Some(n) => Qyt1Decoder::with_packets(pcm, n),
     };
     match qyt1 {
         Ok(q) => ExtDecoder::new(q, auto),
@@ -365,6 +371,15 @@ pub fn build(
     qyt1_seekable: bool,
     policy: ErrorPolicy,
 ) -> Result<(EmbeddedPlayer, Shared), BudgetError> {
+    build_with(tracks, decoder(qyt1_seekable), policy)
+}
+
+/// 同 [`build`]，解码器由调用方给出（如 [`decoder_with`] 的包模式）。
+pub fn build_with(
+    tracks: Tracks,
+    decoder: ExtDecoder,
+    policy: ErrorPolicy,
+) -> Result<(EmbeddedPlayer, Shared), BudgetError> {
     let world = Rc::new(RefCell::new(World {
         now_us: 0,
         dma: None,
@@ -377,7 +392,6 @@ pub fn build(
         panic!("静态队列只能拆分一次");
     };
     world.borrow_mut().feeder = Some(Feeder::new(consumer, CAPS.in_flight));
-    let decoder = decoder(qyt1_seekable);
     let window = decoder.required_window();
     let core = match Core::with_window(leak(PROFILE.budget().input_window), window, decoder) {
         Ok(c) => c,

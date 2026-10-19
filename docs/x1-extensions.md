@@ -107,7 +107,7 @@ fn main() -> std::process::ExitCode {
 | 有损标记（E1，2026-10-18） | 有损格式（MP3、AAC、Vorbis、Opus 等）的解码器必须用 `SourceFormat::lossy()` 标记格式：样本是解码重建的信号，`bits()` 是解码输出的精度，不是音源位深。报告、命令行、图形界面与嵌入式串口据 `is_lossy()` 写明“有损”。标记只影响报告，不改变设备选择与送出的数据；无损格式不调用。 |
 | 分块无关 | 一次性、逐字节与任意分块输入，格式、样本与结束方式（正常结束或哪一种错误）完全相同。 |
 | 错误之后 | 出错后在 `reset` 之前不再产出样本；`reset` 后能解码下一个源，结果与新解码器相同。 |
-| 定位 | 核心只在文件头解析完成、首次产出样本之后调用 `seek`；之后只输出目标帧及之后的样本；目标等于或超过长度返回 `PastEnd`；不支持返回 `Unsupported`（核心改为顺序解码并丢弃）。核心在每次 `decode` 之后、看状态之前取一次 `seek_request`。 |
+| 定位 | 核心只在文件头解析完成、首次产出样本之后调用 `seek`；之后只输出目标帧及之后的样本；目标等于或超过长度返回 `PastEnd`；不支持返回 `Unsupported`（核心改为顺序解码并丢弃）。核心在每次 `decode` 之后、看状态之前取一次 `seek_request`。定位预滚（E5，2026-10-19）：只能落在目标之前时（有损格式定位到包），`take_preroll()` 返回目标之前还会输出的帧数，核心解码并丢弃，送出的第一帧仍是目标帧；最迟在落点之后第一次产出样本时给出，不得超过目标帧号，未定位时为 0（默认）。 |
 | 停止后迟到的回报 | 由核心按代次拒绝（§3.7），解码器不需要处理。 |
 | 文件头识别（E3，2026-10-19，可选） | 格式可以另提供 `identify(head, eof) -> qy_core::Identify<明细>`：不消耗输入、不需要工作区，回答 `Foreign`（不是本格式）、`NeedMore { total, container }`（至少共 `total` 字节才能回答，`eof` 为真时不给出）、`Supported { format, data_start }`、`Rejected { error, detail }`。必须与完整解码一致，用 `qy_testkit::check_identify` 检查（[docs/e3-identify.md](e3-identify.md)）。官方解码器各自有 `identify`，组合识别为 `AutoDecoder::identify`。 |
 

@@ -162,10 +162,12 @@ fn structs_hold_no_block_sized_storage() {
     // F4：WavDecoder 读 RF64 / BW64，块长度与 RIFF 余量改为 64 位，加入 ds64 的三个 64 位长度与
     // 固定 8 项的块大小表（每项 16 字节，共 128 字节，见 `qy_codec_wav::DS64_TABLE`），都是固定的
     // 标量状态；Core<WavDecoder> 由 352 增至 608 字节，上限由 384 调为 640（仍远小于 73 728）。
+    // E3 / E5：WavDecoder 加入识别模式标志（bool），Core 加入定位预滚的累计帧数（u64），都是标量；
+    // Core<WavDecoder> 由 608 增至 648 字节，上限由 640 调为 704（仍远小于 73 728）。
     let d = std::mem::size_of::<FlacDecoder>();
     let c = std::mem::size_of::<Core<WavDecoder>>();
     assert!(d <= 448, "FlacDecoder {d} 字节");
-    assert!(c <= 640, "Core {c} 字节");
+    assert!(c <= 704, "Core {c} 字节");
 }
 
 #[test]
