@@ -468,3 +468,177 @@ pub fn check_seek<D: Decoder>(
     }
     Ok(support.unwrap_or(SeekSupport::Unsupported))
 }
+
+/// 文件头识别（E3）与完整解码的一致性检查：`identify` 为解码器的识别函数，`detail` 取解码器
+/// 出错后的明细（与识别的明细同一类型）。检查：
+/// - `eof` 为真时不返回 `NeedMore`；`NeedMore { total }` 的 `total` 大于给出的字节数，且少于
+///   `total` 的任何前缀都还是 `NeedMore`（下界成立）；
+/// - 任一前缀（`eof` 为假）一旦给出结论，就与整个文件的结论相同（结论与分块无关）；
+/// - `Supported`：完整解码的源格式相同；只送到样本数据开始处（`eof` 为假）时解码器不出错
+///   （宿主容量不足 `CapacityExceeded` 除外，容量不在识别范围内）；
+/// - `Rejected`：完整解码在任何样本之前以同一错误失败，明细相同（或先因宿主容量不足失败）；
+/// - `Foreign`：完整解码在任何样本之前失败；
+/// - `Skip { bytes }`：之后的字节再识别（解码器仍从文件开头解码，自行跳过）；文件结束时跳过的
+///   长度超出文件则结论为 `Rejected`（`Truncated`），前缀上的 `Skip` 与之相容。
+///
+/// 返回整个文件的识别结论（`Skip` 之后的那一个）与跳过的总字节数。
+pub fn check_identify<D: Decoder, X: PartialEq + core::fmt::Debug + Copy>(
+    identify: impl Fn(&[u8], bool) -> qy_core::Identify<X>,
+    d: &mut D,
+    detail: impl Fn(&D) -> Option<X>,
+    bytes: &[u8],
+) -> Result<(qy_core::Identify<X>, u64), Violation> {
+    use qy_core::Identify;
+    let mut skipped = 0u64;
+    let full = loop {
+        let Some(rest) = usize::try_from(skipped).ok().and_then(|s| bytes.get(s..)) else {
+            return violation(format!("Skip 越过文件末尾（共跳过 {skipped} 字节）"));
+        };
+        let r = identify(rest, true);
+        check_prefixes(&identify, rest, &r)?;
+        match r {
+            Identify::Skip { bytes: n } => {
+                if n == 0 {
+                    return violation("Skip { bytes: 0 }");
+                }
+                skipped += n;
+            }
+            Identify::NeedMore { .. } => return violation("eof 为真时返回 NeedMore"),
+            r => break r,
+        }
+    };
+    let decoded = decode(d, bytes, Chunking::Whole)?;
+    let format = decoded.format.or(d.format());
+    match full {
+        Identify::Supported {
+            format: f,
+            data_start,
+        } => {
+            if format != Some(f) && decoded.ending != Ending::Error(DecodeError::CapacityExceeded) {
+                return violation(format!(
+                    "识别为 Supported（{f:?}），完整解码的格式为 {format:?}"
+                ));
+            }
+            let end = skipped.saturating_add(data_start);
+            let Some(head) = usize::try_from(end).ok().and_then(|e| bytes.get(..e)) else {
+                return violation(format!("样本数据起点 {end} 越过文件末尾"));
+            };
+            if let Err(e) = decode_prefix(d, head)
+                && e != DecodeError::CapacityExceeded
+            {
+                return violation(format!(
+                    "识别为 Supported，但只送到样本数据起点（{end} 字节）时解码出错：{e:?}"
+                ));
+            }
+        }
+        Identify::Rejected { error, detail: x } => {
+            // 宿主容量不足可能先于文件头的问题被发现（容量不在识别范围内）。
+            if decoded.words.is_empty()
+                && decoded.ending == Ending::Error(DecodeError::CapacityExceeded)
+            {
+                return Ok((full, skipped));
+            }
+            if !decoded.words.is_empty() || decoded.ending != Ending::Error(error) {
+                return violation(format!(
+                    "识别为 Rejected({error:?})，完整解码输出 {} 个字后以 {:?} 结束",
+                    decoded.words.len(),
+                    decoded.ending
+                ));
+            }
+            // 完整解码时 `decode` 已在出错后再调用过一次，明细保持到 reset。
+            let got = detail(d);
+            if got != x {
+                return violation(format!("识别的明细 {x:?}，完整解码的明细 {got:?}"));
+            }
+        }
+        Identify::Foreign => {
+            if !decoded.words.is_empty() || decoded.ending == Ending::End {
+                return violation(format!(
+                    "识别为 Foreign，完整解码输出 {} 个字后以 {:?} 结束",
+                    decoded.words.len(),
+                    decoded.ending
+                ));
+            }
+        }
+        Identify::NeedMore { .. } | Identify::Skip { .. } => unreachable!(),
+    }
+    Ok((full, skipped))
+}
+
+/// 前缀检查：前缀长度取 0..=512 全部，之后按 1/8 递增，另加各 `NeedMore` 的 `total − 1`。
+fn check_prefixes<X: PartialEq + core::fmt::Debug + Copy>(
+    identify: &impl Fn(&[u8], bool) -> qy_core::Identify<X>,
+    bytes: &[u8],
+    full: &qy_core::Identify<X>,
+) -> Result<(), Violation> {
+    use qy_core::Identify;
+    let mut lens = Vec::new();
+    let mut p = 0usize;
+    while p < bytes.len() {
+        lens.push(p);
+        p = if p < 512 { p + 1 } else { p + p / 8 };
+    }
+    let mut extra = Vec::new();
+    for &p in &lens {
+        let r = identify(&bytes[..p], false);
+        match r {
+            Identify::NeedMore { total, .. } => {
+                if total <= p as u64 {
+                    return violation(format!(
+                        "前缀 {p} 字节：NeedMore {{ total: {total} }} 不大于已给出的字节数"
+                    ));
+                }
+                if let Ok(t) = usize::try_from(total - 1)
+                    && t > p
+                    && t < bytes.len()
+                {
+                    extra.push(t);
+                }
+            }
+            // 跳过的元数据超出文件：文件结束时的结论是不完整（与完整解码相同）。
+            Identify::Skip { bytes: n }
+                if n > bytes.len() as u64
+                    && matches!(
+                        full,
+                        Identify::Rejected {
+                            error: DecodeError::Truncated,
+                            ..
+                        }
+                    ) => {}
+            r if r != *full => {
+                return violation(format!(
+                    "前缀 {p} 字节的结论 {r:?} 与整个文件的结论 {full:?} 不同"
+                ));
+            }
+            _ => {}
+        }
+    }
+    for t in extra {
+        if !matches!(identify(&bytes[..t], false), Identify::NeedMore { .. }) {
+            return violation(format!(
+                "较短前缀的 NeedMore 说至少要 {} 字节，但 {t} 字节时已给出结论",
+                t + 1
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 只送 `head`（`eof` 为假），解码到缺输入为止；返回出现的错误。
+fn decode_prefix<D: Decoder>(d: &mut D, head: &[u8]) -> Result<(), DecodeError> {
+    d.reset();
+    let mut pos = 0usize;
+    for _ in 0..budget(head) {
+        let p = d.decode(&head[pos..], false)?;
+        pos += p.consumed.min(head.len() - pos);
+        match p.status {
+            Status::Frames(n) => d.release(n),
+            Status::NeedOutput => {
+                let words = d.format().map_or(1, |f| f.words_per_frame().max(1));
+                d.release(d.pcm().len() / words);
+            }
+            Status::NeedInput | Status::End => return Ok(()),
+        }
+    }
+    Ok(())
+}

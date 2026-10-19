@@ -84,6 +84,81 @@ pub enum SeekError {
     PastEnd,
 }
 
+/// 文件头识别的结论（E3）：官方解码器的 `identify(head, eof)` 不消耗输入、不需要工作区，按与
+/// 完整解码相同的规则回答“这个文件是不是我的、我支不支持”。`head` 总是从文件（或容器）开头
+/// 算起的前若干字节；`eof` 表示文件就到 `head` 末尾为止。`D` 为该格式的拒绝明细。
+///
+/// 与完整解码的关系（由各解码器的一致性测试核对）：
+/// - [`Identify::Supported`]：完整解码给出同一个源格式；若出错，错误出现在样本数据开始之后；
+/// - [`Identify::Rejected`]：完整解码在输出任何样本之前以同一错误、同一明细失败；
+/// - [`Identify::Foreign`]：文件头标记不是本格式，完整解码在输出任何样本之前失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Identify<D> {
+    /// 不是本格式（文件头标记不符）。
+    Foreign,
+    /// 文件开头是 `bytes` 字节的元数据（如 ID3v2 标签），不属于任何容器：跳过之后从其后的字节
+    /// 重新识别。只有组合识别（`qy-codec-auto`）给出。
+    Skip { bytes: u64 },
+    /// 还不能回答：至少要有共 `total` 字节（从开头算，大于 `head.len()`）。只在 `eof` 为假时
+    /// 给出。`container` 为真时文件头标记已经符合本格式，只是子类型还没读到（例如 WAV 的
+    /// `fmt ` 前有很大的块）；路由层在自己的输入窗口装不下 `total` 时可以据此交给本解码器。
+    NeedMore { total: u64, container: bool },
+    /// 本格式，文件头到样本数据开始处都被本解码器接受。`data_start` 为样本数据第一个字节距开头
+    /// 的位置。宿主资源（工作区容量）不在识别范围内，由 [`engine::Resources`] 另行报告。
+    Supported {
+        format: SourceFormat,
+        data_start: u64,
+    },
+    /// 本格式，但解码器拒绝：不支持的子类型、不合规或不完整的文件头。
+    Rejected {
+        error: DecodeError,
+        detail: Option<D>,
+    },
+}
+
+impl<D> Identify<D> {
+    /// 是不是本格式的文件（`Supported` / `Rejected`，或文件头标记已符合的 `NeedMore`）。
+    pub fn is_mine(&self) -> bool {
+        match self {
+            Identify::Supported { .. } | Identify::Rejected { .. } => true,
+            Identify::NeedMore { container, .. } => *container,
+            Identify::Foreign | Identify::Skip { .. } => false,
+        }
+    }
+
+    /// 换掉明细类型（组合识别把各格式的明细包进自己的枚举）。
+    pub fn map_detail<E>(self, f: impl FnOnce(D) -> E) -> Identify<E> {
+        match self {
+            Identify::Foreign => Identify::Foreign,
+            Identify::Skip { bytes } => Identify::Skip { bytes },
+            Identify::NeedMore { total, container } => Identify::NeedMore { total, container },
+            Identify::Supported { format, data_start } => {
+                Identify::Supported { format, data_start }
+            }
+            Identify::Rejected { error, detail } => Identify::Rejected {
+                error,
+                detail: detail.map(f),
+            },
+        }
+    }
+}
+
+/// 文件头标记的比较（E3 识别的第一步）：`head` 是否以 `magic` 之一开头。`head` 比标记短且是某个
+/// 标记的前缀时，`eof` 为假返回 `None`（还要更多字节），为真返回 `Some(false)`；否则返回结论。
+pub fn magic_matches(head: &[u8], magics: &[&[u8]], eof: bool) -> Option<bool> {
+    let mut partial = false;
+    for m in magics {
+        if head.len() >= m.len() {
+            if &head[..m.len()] == *m {
+                return Some(true);
+            }
+        } else if m.starts_with(head) {
+            partial = true;
+        }
+    }
+    if partial && !eof { None } else { Some(false) }
+}
+
 /// 推送式解码器接口（静态分发）。
 ///
 /// 实现必须 `no_std`、无 alloc，不调用 `Read/Seek`，不等待输入。

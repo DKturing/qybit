@@ -28,6 +28,8 @@ embedded-sdmmc = { version = "=0.10.0", default-features = false }
 qy-fat-image = { path = "../tools/qy-fat-image" }
 # M2 T5：场景 fuzz（真实核心、解码、pack 与队列的模拟宿主）。
 qy-host-sim = { path = "../crates/qy-host-sim" }
+# E3：识别与完整解码的一致性检查。
+qy-testkit = { path = "../crates/qy-testkit" }
 
 [[bin]]
 name = "wav_decode"
@@ -74,6 +76,13 @@ bench = false
 [[bin]]
 name = "float_convert"
 path = "fuzz_targets/float_convert.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "identify"
+path = "fuzz_targets/identify.rs"
 test = false
 doc = false
 bench = false

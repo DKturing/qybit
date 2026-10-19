@@ -64,8 +64,8 @@
 
 use qy_core::engine::{MAX_REPAIRS, Repair};
 use qy_core::{
-    ChannelLayout, DecodeError, Decoder, PCM_WORK_SAMPLES, Progress, SampleEncoding, SeekError,
-    SourceFormat, Status,
+    ChannelLayout, DecodeError, Decoder, Identify, PCM_WORK_SAMPLES, Progress, SampleEncoding,
+    SeekError, SourceFormat, Status, magic_matches,
 };
 
 /// 流式写入程序的长度占位值（ffmpeg 输出到不可定位的管道时，RIFF 与 data 都写 0xFFFFFFFF；
@@ -505,6 +505,67 @@ pub struct WavDecoder {
     /// 已解码未取走样本：`pcm[start..end]`。
     start: usize,
     end: usize,
+    /// 识别模式（E3，[`identify`]）：没有工作区，到样本数据开始处（含压缩码流检查）即停。
+    probe: bool,
+}
+
+/// 识别 WAV 文件头（E3，[`qy_core::Identify`]）：不消耗输入、不需要工作区，与完整解码按同一个
+/// 状态机判断，读到样本数据开始处为止（16 位双声道还要读 data 开头的 [`BITSTREAM_SCAN`] 字节，
+/// 确认不是伪装成 PCM 的压缩码流）。需要的字节数由文件决定（`fmt ` 之前可以有任意大的块），
+/// 不够时以 [`Identify::NeedMore`] 说明至少还要多少。
+///
+/// `RIFF` 但形式类型不是 `WAVE`（如 AVI）为 [`Identify::Foreign`]；`RIFX`（大端）为本格式但不支持。
+pub fn identify(head: &[u8], eof: bool) -> Identify<WavDetail> {
+    match magic_matches(head, &[b"RIFF", b"RIFX", b"RF64", b"BW64"], eof) {
+        // 标记的前缀：下一个字节就可能排除本格式。
+        None => {
+            return Identify::NeedMore {
+                total: head.len() as u64 + 1,
+                container: false,
+            };
+        }
+        Some(false) => return Identify::Foreign,
+        Some(true) => {}
+    }
+    if head.len() < 12 {
+        if !eof {
+            return Identify::NeedMore {
+                total: 12,
+                container: false,
+            };
+        }
+        return Identify::Rejected {
+            error: DecodeError::Truncated,
+            detail: None,
+        };
+    }
+    if &head[8..12] != b"WAVE" {
+        return Identify::Foreign;
+    }
+    let mut d = WavDecoder::with_pcm(<&mut [i32]>::default());
+    d.probe = true;
+    let result = d.decode(head, eof);
+    match (result, d.state, d.format()) {
+        (Err(error), _, _) => Identify::Rejected {
+            error,
+            detail: d.detail,
+        },
+        (Ok(p), State::Data { .. } | State::End, Some(format))
+            if d.data_start != NONE && matches!(p.status, Status::NeedOutput | Status::End) =>
+        {
+            Identify::Supported {
+                format,
+                data_start: d.data_start,
+            }
+        }
+        (Ok(_), _, _) => Identify::NeedMore {
+            total: d
+                .offset
+                .saturating_add(d.wanted())
+                .max(head.len() as u64 + 1),
+            container: true,
+        },
+    }
 }
 
 fn u16_at(b: &[u8], i: usize) -> u16 {
@@ -521,7 +582,11 @@ impl WavDecoder {
         if pcm.len() < PCM_WORK_SAMPLES {
             return Err(DecodeError::CapacityExceeded);
         }
-        Ok(Self {
+        Ok(Self::with_pcm(pcm))
+    }
+
+    fn with_pcm(pcm: &'static mut [i32]) -> Self {
+        Self {
             pcm,
             state: State::RiffHeader,
             riff: Riff::Bounded(0),
@@ -551,7 +616,33 @@ impl WavDecoder {
             data_start: NONE,
             start: 0,
             end: 0,
-        })
+            probe: false,
+        }
+    }
+
+    /// 识别模式下，当前状态还要读的字节数（从当前结构开头算；只用于 [`Identify::NeedMore`] 的
+    /// 下界，不影响解码）。
+    fn wanted(&self) -> u64 {
+        match self.state {
+            State::RiffHeader => 12,
+            State::ChunkHeader => 8,
+            State::Fmt { size, .. } => size.min(u64::from(FMT_EXT_LEN)),
+            State::Fact { .. } => 4,
+            State::Ds64 { .. } => DS64_FIXED,
+            State::Ds64Table { .. } => DS64_ENTRY,
+            // 跳过之后可能就是 RIFF 末尾（结论随即确定）。
+            State::Skip { remaining } => remaining,
+            State::Data {
+                remaining, to_eof, ..
+            } => {
+                if to_eof {
+                    BITSTREAM_SCAN as u64
+                } else {
+                    remaining.min(BITSTREAM_SCAN as u64)
+                }
+            }
+            State::End | State::Failed(_) => 0,
+        }
     }
 
     /// 工作区容量（样本数）。
@@ -1330,6 +1421,13 @@ impl WavDecoder {
                             }
                         }
                         self.scanned = true;
+                    }
+                    if self.probe {
+                        // E3：文件头到样本数据开始处都已接受。
+                        return Ok(Progress {
+                            consumed: pos,
+                            status: Status::NeedOutput,
+                        });
                     }
                     let ba = layout.block_align;
                     let limit = if to_eof {

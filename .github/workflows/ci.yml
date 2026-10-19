@@ -644,6 +644,10 @@ jobs:
           - target: auto_decode
             fixtures: crates/qy-codec-wav/tests/fixtures/*.wav crates/qy-codec-wav/tests/fixtures/float/*.wav crates/qy-codec-flac/tests/fixtures/*.flac crates/qy-codec-aiff/tests/fixtures/*.aiff
             max_len: 1048576
+          # E3：文件头识别与完整解码一致（各前缀与整个文件）。
+          - target: identify
+            fixtures: crates/qy-codec-wav/tests/fixtures/*.wav crates/qy-codec-flac/tests/fixtures/*.flac crates/qy-codec-aiff/tests/fixtures/*.aiff
+            max_len: 65536
           - target: fat_storage
             fixtures: ""
             max_len: 4096

@@ -1,9 +1,9 @@
 //! 示例解码器与组合解码器满足扩展契约（`qy-testkit`），并与独立生成的样本逐个相同。
 
-use qy_core::DecodeError;
+use qy_core::{DecodeError, Identify};
 use qy_ext_demo::qyt1::{HEADER, encode};
 use qy_ext_demo::{ExtDecoder, Qyt1Decoder, leak};
-use qy_testkit::{Ending, SeekSupport, check, check_seek};
+use qy_testkit::{Ending, SeekSupport, check, check_identify, check_seek};
 
 /// 确定性的 N 位样本（覆盖正负极值）。
 fn samples(frames: usize, channels: usize, bits: u32, salt: u32) -> Vec<i32> {
@@ -143,4 +143,86 @@ fn qyl1_is_marked_lossy_and_satisfies_the_contract() {
         check_seek(qyt1, &lossy, &[0, 1, 250, 499]),
         Ok(SeekSupport::Supported)
     );
+}
+
+/// E3：QYT1 自己的识别函数与完整解码一致（`qy_testkit::check_identify`，含每个前缀）。
+#[test]
+fn qyt1_identify_matches_full_decode() {
+    let good = encode(48_000, 2, 16, &samples(40, 2, 16, 5));
+    let mut magic = good.clone();
+    magic[3] = b'X';
+    let mut header = good.clone();
+    header[10] = 40;
+    let lossy = qy_ext_demo::qyt1::encode_lossy(8_000, 1, 8, &samples(9, 1, 8, 1));
+    let cases: [(&[u8], &str); 6] = [
+        (&good, "Supported"),
+        (&lossy, "Supported"),
+        (&good[..HEADER - 1], "Rejected"),
+        (&header, "Rejected"),
+        (&magic, "Foreign"),
+        (b"RIFF", "Foreign"),
+    ];
+    let mut d = qyt1();
+    for (bytes, want) in cases {
+        let r = check_identify(
+            qy_ext_demo::qyt1::identify,
+            &mut d,
+            Qyt1Decoder::last_detail,
+            bytes,
+        );
+        let Ok((got, 0)) = r else {
+            panic!("{want}：{r:?}");
+        };
+        let name = match got {
+            Identify::Supported { .. } => "Supported",
+            Identify::Rejected { .. } => "Rejected",
+            Identify::Foreign => "Foreign",
+            _ => "其他",
+        };
+        assert_eq!(name, want);
+    }
+}
+
+/// 合规的 ID3v2.4 标签（ID3v2.4.0 结构规范 §3.1），`body` 字节的 0 填充。
+fn id3(body: u32) -> Vec<u8> {
+    let size = [21, 14, 7, 0].map(|s| (body >> s) as u8 & 0x7F);
+    let mut t = vec![b'I', b'D', b'3', 4, 0, 0];
+    t.extend_from_slice(&size);
+    t.resize(10 + body as usize, 0);
+    t
+}
+
+/// E3：组合解码器按识别结果路由，不缓存文件头。文件开头的 ID3v2 标签由路由层跳过（QYT1 与 WAV
+/// 都可以带标签），样本与不带标签时相同，报告的跳过字节数为标签长度；定位位置加回标签长度。
+#[test]
+fn router_skips_id3_tags_without_caching_headers() {
+    let s = samples(300, 2, 16, 11);
+    let q = encode(44_100, 2, 16, &s);
+    let wav = fixture("qy-codec-wav", "pcm16_stereo_44k.wav");
+    let tag = id3(5_000);
+    let tagged_q = [tag.as_slice(), &q].concat();
+    let tagged_wav = [tag.as_slice(), &wav].concat();
+    let srcs: Vec<&[u8]> = vec![&q, &tagged_q, &wav, &tagged_wav];
+    let r = match check(|| ExtDecoder::desktop(true), &srcs) {
+        Ok(r) => r,
+        Err(v) => panic!("{v}"),
+    };
+    assert_eq!(r[0], r[1], "带标签的 QYT1 与不带时相同");
+    assert_eq!(r[2], r[3], "带标签的 WAV 与不带时相同");
+    assert_eq!(r[1].words, s);
+    for (src, is_qyt1) in [(&tagged_q, true), (&tagged_wav, false)] {
+        let mut d = ExtDecoder::desktop(true);
+        if let Err(v) = qy_testkit::decode(&mut d, src, qy_testkit::Chunking::Bytewise) {
+            panic!("{v}");
+        }
+        assert_eq!(d.is_qyt1(), is_qyt1);
+        assert_eq!(
+            qy_player::Diagnostics::skipped_tag_bytes(&d),
+            tag.len() as u64
+        );
+        assert_eq!(
+            check_seek(|| ExtDecoder::desktop(true), src, &[0, 7, 299]),
+            Ok(SeekSupport::Supported)
+        );
+    }
 }

@@ -31,8 +31,8 @@
 #![no_std]
 
 use qy_core::{
-    ChannelLayout, DecodeError, Decoder, PCM_WORK_SAMPLES, Progress, SampleEncoding, SeekError,
-    SourceFormat, Status,
+    ChannelLayout, DecodeError, Decoder, Identify, PCM_WORK_SAMPLES, Progress, SampleEncoding,
+    SeekError, SourceFormat, Status, magic_matches,
 };
 
 /// AIFF-C FVER 的 `timestamp`：AIFCVersion1（AIFF-C §Format Version Chunk）。
@@ -360,6 +360,68 @@ pub struct AiffDecoder {
     data_start: Option<u64>,
     start: usize,
     end: usize,
+    /// 识别模式（E3，[`identify`]）：没有工作区，到样本数据开始处即停。
+    probe: bool,
+}
+
+/// 识别 AIFF / AIFF-C 文件头（E3，[`qy_core::Identify`]）：不消耗输入、不需要工作区，与完整解码
+/// 按同一个状态机判断，读到样本数据开始处为止（COMM 与 SSND 可以在任意大的 chunk 之后，需要的
+/// 字节数由文件决定，不够时以 [`Identify::NeedMore`] 说明至少还要多少）。
+///
+/// `FORM` 但形式类型不是 `AIFF` / `AIFC` 的其他 IFF 文件为 [`Identify::Foreign`]。没有样本帧、
+/// 也没有 SSND 的文件读完 FORM 才能确定（`data_start` 为 FORM 末尾）。FVER 缺失等只在 FORM
+/// 结束时才能发现的问题，完整解码在样本之后报告，识别结果为 `Supported`。
+pub fn identify(head: &[u8], eof: bool) -> Identify<AiffDetail> {
+    match magic_matches(head, &[b"FORM"], eof) {
+        // 标记的前缀：下一个字节就可能排除本格式。
+        None => {
+            return Identify::NeedMore {
+                total: head.len() as u64 + 1,
+                container: false,
+            };
+        }
+        Some(false) => return Identify::Foreign,
+        Some(true) => {}
+    }
+    if head.len() < 12 {
+        if !eof {
+            return Identify::NeedMore {
+                total: 12,
+                container: false,
+            };
+        }
+        return Identify::Rejected {
+            error: DecodeError::Truncated,
+            detail: None,
+        };
+    }
+    if &head[8..12] != b"AIFF" && &head[8..12] != b"AIFC" {
+        return Identify::Foreign;
+    }
+    let mut d = AiffDecoder::with_pcm(<&mut [i32]>::default());
+    d.probe = true;
+    let result = d.decode(head, eof);
+    match (result, d.state, d.format()) {
+        (Err(error), _, _) => Identify::Rejected {
+            error,
+            detail: d.detail,
+        },
+        (Ok(p), State::Data { .. } | State::End, Some(format))
+            if matches!(p.status, Status::NeedOutput | Status::End) =>
+        {
+            Identify::Supported {
+                format,
+                data_start: d.data_start.unwrap_or(d.offset),
+            }
+        }
+        (Ok(_), _, _) => Identify::NeedMore {
+            total: d
+                .offset
+                .saturating_add(d.wanted())
+                .max(head.len() as u64 + 1),
+            container: true,
+        },
+    }
 }
 
 fn be16(b: &[u8], i: usize) -> u16 {
@@ -380,7 +442,11 @@ impl AiffDecoder {
         if pcm.len() < PCM_WORK_SAMPLES {
             return Err(DecodeError::CapacityExceeded);
         }
-        Ok(Self {
+        Ok(Self::with_pcm(pcm))
+    }
+
+    fn with_pcm(pcm: &'static mut [i32]) -> Self {
+        Self {
             pcm,
             state: State::FormHeader,
             form: Form::Aiff,
@@ -395,7 +461,23 @@ impl AiffDecoder {
             data_start: None,
             start: 0,
             end: 0,
-        })
+            probe: false,
+        }
+    }
+
+    /// 识别模式下，当前状态还要读的字节数（从当前结构开头算；只用于 [`Identify::NeedMore`] 的
+    /// 下界）。
+    fn wanted(&self) -> u64 {
+        match self.state {
+            State::FormHeader => 12,
+            State::ChunkHeader => 8,
+            State::Comm { size, .. } => u64::from(size),
+            State::Fver { .. } => 4,
+            State::SsndHeader { .. } => 8,
+            // 跳过之后可能就是样本数据或 FORM 末尾（结论随即确定）。
+            State::Skip { remaining, .. } => remaining,
+            State::Data { .. } | State::End | State::Failed(_) => 0,
+        }
     }
 
     /// 工作区容量（样本数）。
@@ -835,6 +917,13 @@ impl AiffDecoder {
                         remaining: remaining - n,
                         data,
                     };
+                }
+                State::Data { .. } if self.probe => {
+                    // E3：文件头到样本数据开始处都已接受。
+                    return Ok(Progress {
+                        consumed: pos,
+                        status: Status::NeedOutput,
+                    });
                 }
                 State::Data { frames, after } => {
                     if frames == 0 {

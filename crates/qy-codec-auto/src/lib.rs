@@ -29,9 +29,11 @@ use qy_codec_aiff::{AiffDecoder, AiffDetail};
 use qy_codec_flac::{Capacity, FlacDecoder, FlacError, InitError};
 #[cfg(feature = "wav")]
 use qy_codec_wav::WavDecoder;
+#[cfg(feature = "wav")]
+use qy_codec_wav::WavDetail;
 use qy_core::{
-    DecodeError, Decoder, INPUT_WINDOW_BYTES, PCM_WORK_SAMPLES, Progress, SeekError, SourceFormat,
-    Status,
+    DecodeError, Decoder, INPUT_WINDOW_BYTES, Identify, PCM_WORK_SAMPLES, Progress, SeekError,
+    SourceFormat, Status, magic_matches,
 };
 
 /// 当前曲目使用的解码器。
@@ -152,6 +154,23 @@ fn id3v2_len(h: &[u8; ID3_HEADER]) -> Option<u32> {
     Some(size + ID3_HEADER as u32 + footer)
 }
 
+/// 组合识别（E3，[`AutoDecoder::identify`]）的拒绝明细。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoDetail {
+    #[cfg(feature = "wav")]
+    Wav(WavDetail),
+    #[cfg(feature = "aiff")]
+    Aiff(AiffDetail),
+    #[cfg(feature = "flac")]
+    Flac(FlacError),
+    /// 可识别的容器（`"WAV"`、`"AIFF"`、`"FLAC"`），但本构建未链接或宿主未启用其解码器。
+    Disabled(&'static str),
+}
+
+/// 各容器的文件头标记（与 [`AutoDecoder`] 解码时的选择相同；未链接的格式也要能说出名字）。
+const WAV_MAGICS: [&[u8]; 4] = [b"RIFF", b"RIFX", b"RF64", b"BW64"];
+const FLAC_MAGIC: [&[u8]; 1] = [b"fLaC"];
+
 /// 无法识别的文件头（报告用）：前 4 字节与按常见格式标记推断的类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnrecognizedHeader {
@@ -159,7 +178,7 @@ pub struct UnrecognizedHeader {
     pub magic: [u8; 4],
     /// 之前跳过的 ID3v2 标签字节数。
     pub skipped_tag: u64,
-    /// `FORM` 文件头的形式类型（不是 `AIFF`/`AIFC` 的其他 IFF 格式）。
+    /// `FORM` / `RIFF` 文件头的形式类型（不是 `AIFF`/`AIFC`、`WAVE` 的其他 IFF / RIFF 格式）。
     pub form_type: Option<[u8; 4]>,
 }
 
@@ -170,6 +189,7 @@ impl core::fmt::Display for UnrecognizedHeader {
             [b'I', b'D', b'3', _] => "ID3v2 标签头不合规则（版本或 syncsafe 长度字节无效）",
             b"OggS" => "Ogg 容器（Ogg FLAC、Vorbis、Opus 等），不支持",
             b"FORM" => "IFF 容器，但形式类型不是 AIFF / AIFF-C",
+            b"RIFF" | b"RIFX" | b"RF64" | b"BW64" => "RIFF 容器，但形式类型不是 WAVE",
             b"wvpk" => "WavPack，在格式路线 F5 中，尚未实现",
             b"MAC " => "Monkey's Audio（APE），在格式路线 F6 中，尚未实现",
             b"DSD " | b"FRM8" => "DSD（DSF/DFF），尚未实现",
@@ -194,6 +214,29 @@ impl core::fmt::Display for UnrecognizedHeader {
             )?;
         }
         Ok(())
+    }
+}
+
+/// 未启用 AIFF 解码器时按 `FORM` + 形式类型认出名字。
+fn aiff_by_magic(head: &[u8], eof: bool, disabled: Identify<AutoDetail>) -> Identify<AutoDetail> {
+    match magic_matches(head, &[b"FORM"], eof) {
+        None => Identify::NeedMore {
+            total: head.len() as u64 + 1,
+            container: false,
+        },
+        Some(false) => Identify::Foreign,
+        Some(true) if head.len() < 12 && !eof => Identify::NeedMore {
+            total: 12,
+            container: false,
+        },
+        Some(true) if head.len() < 12 => Identify::Rejected {
+            error: DecodeError::Truncated,
+            detail: None,
+        },
+        Some(true) if head.len() >= 12 && (&head[8..12] == b"AIFF" || &head[8..12] == b"AIFC") => {
+            disabled
+        }
+        Some(true) => Identify::Foreign,
     }
 }
 
@@ -385,11 +428,7 @@ impl AutoDecoder {
 
     /// 识别前的处理：跳过 ID3v2 标签并读取容器标记。`Ok(pos)` 表示已识别，容器从 `input[pos..]`
     /// 开始；`Err` 为本次调用的结果（缺输入或错误）。
-    fn identify(
-        &mut self,
-        input: &[u8],
-        eof: bool,
-    ) -> Result<usize, Result<Progress, DecodeError>> {
+    fn locate(&mut self, input: &[u8], eof: bool) -> Result<usize, Result<Progress, DecodeError>> {
         let mut pos = 0usize;
         loop {
             if self.tag_left > 0 {
@@ -413,9 +452,11 @@ impl AutoDecoder {
             let rest = &input[pos..];
             let tag = rest.starts_with(b"ID3") || (rest.len() < 3 && b"ID3".starts_with(rest));
             // IFF：形式类型在第 8–11 字节，读到 12 字节才能区分 AIFF / AIFF-C 与其他 IFF 格式。
+            // RIFF 家族的形式类型同样在第 8–11 字节（`WAVE` 之外的 RIFF 格式如 AVI 不是 WAV）；
+            // 与 [`AutoDecoder::identify`] 的判断相同。
             let need = if tag {
                 ID3_HEADER
-            } else if rest.starts_with(b"FORM") {
+            } else if rest.starts_with(b"FORM") || WAV_MAGICS.iter().any(|m| rest.starts_with(m)) {
                 12
             } else {
                 4
@@ -448,6 +489,10 @@ impl AutoDecoder {
     fn sniff(&mut self, head: &[u8]) -> Codec {
         match &head[..4] {
             b"RIFF" | b"RIFX" | b"RF64" | b"BW64" => {
+                if &head[8..12] != b"WAVE" {
+                    self.form_type = Some([head[8], head[9], head[10], head[11]]);
+                    return Codec::Unrecognized;
+                }
                 if cfg!(feature = "wav") && self.wav_on {
                     return Codec::Wav;
                 }
@@ -469,6 +514,175 @@ impl AutoDecoder {
                 Codec::Disabled
             }
             _ => Codec::Unrecognized,
+        }
+    }
+
+    /// 识别文件头（E3）：不消耗输入、不改变解码器状态，回答哪个官方解码器会接手、它是否支持。
+    /// 与 [`Decoder::decode`] 的选择规则相同（不依据扩展名）；各格式的判断就是各解码器自己的
+    /// `identify`（与完整解码同一个状态机）。
+    ///
+    /// 文件开头的 ID3v2 标签给出 [`Identify::Skip`]：插件的路由层跳过标签后，用其后的字节再识别
+    /// （交给本解码器时，本解码器从标签之后开始也能解码；从文件开头开始则自己跳过标签）。
+    /// 不是任何已知容器时为 [`Identify::Foreign`]，`Codec::Unrecognized`；识别出容器但本构建未
+    /// 启用其解码器时为 `Rejected`（`Unsupported`，[`AutoDetail::Disabled`]），`Codec::Disabled`。
+    pub fn identify(&self, head: &[u8], eof: bool) -> (Codec, Identify<AutoDetail>) {
+        // ID3v2 标签（ID3v2.4.0 结构规范 §3.1），与 `decode` 中的跳过规则相同。
+        if head.starts_with(b"ID3") {
+            if head.len() < ID3_HEADER {
+                if !eof {
+                    return (
+                        Codec::Unknown,
+                        Identify::NeedMore {
+                            total: ID3_HEADER as u64,
+                            container: false,
+                        },
+                    );
+                }
+                return (
+                    Codec::Unknown,
+                    Identify::Rejected {
+                        error: DecodeError::Truncated,
+                        detail: None,
+                    },
+                );
+            }
+            let mut h = [0u8; ID3_HEADER];
+            h.copy_from_slice(&head[..ID3_HEADER]);
+            if let Some(len) = id3v2_len(&h) {
+                if eof && len as usize > head.len() {
+                    // 标签声明的长度超出文件（与 `decode` 相同：不是完整的文件）。
+                    return (
+                        Codec::Unknown,
+                        Identify::Rejected {
+                            error: DecodeError::Truncated,
+                            detail: None,
+                        },
+                    );
+                }
+                return (
+                    Codec::Unknown,
+                    Identify::Skip {
+                        bytes: u64::from(len),
+                    },
+                );
+            }
+            // 标签头不合规则：按普通文件头继续（与 `decode` 相同，结果为无法识别）。
+        }
+        let mut need: Option<u64> = None;
+        let mut take =
+            |codec: Codec, r: Identify<AutoDetail>| -> Option<(Codec, Identify<AutoDetail>)> {
+                match r {
+                    Identify::Foreign => None,
+                    Identify::NeedMore {
+                        total,
+                        container: false,
+                    } => {
+                        need = Some(need.map_or(total, |n| n.min(total)));
+                        None
+                    }
+                    r => Some((codec, r)),
+                }
+            };
+        let disabled = |name: &'static str| Identify::Rejected {
+            error: DecodeError::Unsupported,
+            detail: Some(AutoDetail::Disabled(name)),
+        };
+        // 未启用的格式只按标记认出名字。
+        let by_magic = |magics: &[&[u8]], name: &'static str| match magic_matches(head, magics, eof)
+        {
+            None => Identify::NeedMore {
+                total: 4,
+                container: false,
+            },
+            Some(true) => disabled(name),
+            Some(false) => Identify::Foreign,
+        };
+        let wav = {
+            #[cfg(feature = "wav")]
+            if self.wav_on {
+                qy_codec_wav::identify(head, eof).map_detail(AutoDetail::Wav)
+            } else {
+                by_magic(&WAV_MAGICS, "WAV")
+            }
+            #[cfg(not(feature = "wav"))]
+            by_magic(&WAV_MAGICS, "WAV")
+        };
+        let wav_codec = if matches!(
+            wav,
+            Identify::Rejected {
+                detail: Some(AutoDetail::Disabled(_)),
+                ..
+            }
+        ) {
+            Codec::Disabled
+        } else {
+            Codec::Wav
+        };
+        if let Some(r) = take(wav_codec, wav) {
+            return r;
+        }
+        let aiff = {
+            #[cfg(feature = "aiff")]
+            if self.aiff_on {
+                qy_codec_aiff::identify(head, eof).map_detail(AutoDetail::Aiff)
+            } else {
+                aiff_by_magic(head, eof, disabled("AIFF"))
+            }
+            #[cfg(not(feature = "aiff"))]
+            aiff_by_magic(head, eof, disabled("AIFF"))
+        };
+        let aiff_codec = if matches!(
+            aiff,
+            Identify::Rejected {
+                detail: Some(AutoDetail::Disabled(_)),
+                ..
+            }
+        ) {
+            Codec::Disabled
+        } else {
+            Codec::Aiff
+        };
+        if let Some(r) = take(aiff_codec, aiff) {
+            return r;
+        }
+        let flac = {
+            #[cfg(feature = "flac")]
+            if self.flac.is_some() {
+                qy_codec_flac::identify(head, eof).map_detail(AutoDetail::Flac)
+            } else {
+                by_magic(&FLAC_MAGIC, "FLAC")
+            }
+            #[cfg(not(feature = "flac"))]
+            by_magic(&FLAC_MAGIC, "FLAC")
+        };
+        let flac_codec = if matches!(
+            flac,
+            Identify::Rejected {
+                detail: Some(AutoDetail::Disabled(_)),
+                ..
+            }
+        ) {
+            Codec::Disabled
+        } else {
+            Codec::Flac
+        };
+        if let Some(r) = take(flac_codec, flac) {
+            return r;
+        }
+        // `ID3` 标签头的前缀也要等。
+        if !eof && head.len() < 3 && b"ID3".starts_with(head) {
+            let t = head.len() as u64 + 1;
+            need = Some(need.map_or(t, |n| n.min(t)));
+        }
+        match need {
+            Some(total) => (
+                Codec::Unknown,
+                Identify::NeedMore {
+                    total,
+                    container: false,
+                },
+            ),
+            None => (Codec::Unrecognized, Identify::Foreign),
         }
     }
 
@@ -585,7 +799,7 @@ impl Decoder for AutoDecoder {
     fn decode(&mut self, input: &[u8], eof: bool) -> Result<Progress, DecodeError> {
         let mut skip = 0;
         if self.codec == Codec::Unknown {
-            match self.identify(input, eof) {
+            match self.locate(input, eof) {
                 Ok(pos) => skip = pos,
                 Err(r) => return r,
             }

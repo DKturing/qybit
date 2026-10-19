@@ -50,7 +50,7 @@
 
 核心只持有一个解码器类型（静态分发），所以新格式与已有格式在组装层组成一个枚举式的组合解码器：按文件头选择，之后把每个方法转给选中的那个。见 [`examples/qy-ext-demo/src/lib.rs`](../examples/qy-ext-demo/src/lib.rs) 的 `ExtDecoder`：
 
-- `decode` 第一次被调用时看前 4 字节：是 `QYT1` 用示例解码器，否则交给 `AutoDecoder`（WAV / FLAC / AIFF）；不足 4 字节且源未结束时返回 `NeedInput`，不提前选择；
+- `decode` 第一次被调用时按文件头识别（E3）选择：先问 `AutoDecoder::identify`（不消耗输入），是官方格式（含已认出容器、子类型还没读到的）交给 `AutoDecoder`；不是时再问 QYT1 自己的 `qyt1::identify`；还不能回答时返回 `NeedInput`、不消耗输入，由核心的输入窗口攒够字节（路由层不缓存文件头）。文件开头的 ID3v2 标签（识别给出 `Skip`）由路由层按长度跳过，只记一个计数，选中的解码器从标签之后开始，定位位置加回标签长度；
 - `reset` 把两个解码器都复位，并清除选择；
 - `format` / `pcm` / `release` / `seek` / `seek_request` / `Resources` / `Diagnostics` 转给选中的解码器。
 
@@ -109,6 +109,7 @@ fn main() -> std::process::ExitCode {
 | 错误之后 | 出错后在 `reset` 之前不再产出样本；`reset` 后能解码下一个源，结果与新解码器相同。 |
 | 定位 | 核心只在文件头解析完成、首次产出样本之后调用 `seek`；之后只输出目标帧及之后的样本；目标等于或超过长度返回 `PastEnd`；不支持返回 `Unsupported`（核心改为顺序解码并丢弃）。核心在每次 `decode` 之后、看状态之前取一次 `seek_request`。 |
 | 停止后迟到的回报 | 由核心按代次拒绝（§3.7），解码器不需要处理。 |
+| 文件头识别（E3，2026-10-19，可选） | 格式可以另提供 `identify(head, eof) -> qy_core::Identify<明细>`：不消耗输入、不需要工作区，回答 `Foreign`（不是本格式）、`NeedMore { total, container }`（至少共 `total` 字节才能回答，`eof` 为真时不给出）、`Supported { format, data_start }`、`Rejected { error, detail }`。必须与完整解码一致，用 `qy_testkit::check_identify` 检查（[docs/e3-identify.md](e3-identify.md)）。官方解码器各自有 `identify`，组合识别为 `AutoDecoder::identify`。 |
 
 ### 3.2 `FrameSink` / `FrameSource`（`qy-pcm-format::queue`）
 

@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use qy_codec_auto::AutoDecoder;
 use qy_codec_flac::Capacity;
 use qy_core::engine::{CapabilityError, DecoderDemand, Repair, Resources};
-use qy_core::{DecodeError, DeviceFormat, Progress, SeekError, SourceFormat, Status};
+use qy_core::{DecodeError, DeviceFormat, Identify, Progress, SeekError, SourceFormat, Status};
 use qy_pcm_format::ring::FrameConsumer;
 use qy_player::render::packet::{PacketApi, PacketConfig, render};
 use qy_player::render::{
@@ -46,12 +46,21 @@ enum Active {
     Auto,
 }
 
-/// 组合解码器：按文件头前 4 字节选择 QYT1 或 `AutoDecoder`。两者的工作区都由宿主提供，换曲时
+/// 组合解码器：按文件头识别（E3）选择 QYT1 或 `AutoDecoder`。两者的工作区都由宿主提供，换曲时
 /// 复用。
+///
+/// 路由不缓存文件头：先问官方解码器（`AutoDecoder::identify`，不消耗输入），不是官方格式时再问
+/// QYT1 自己的识别函数；还不能回答时返回 `NeedInput`、不消耗输入，由核心的输入窗口攒够字节。
+/// 文件开头的 ID3v2 标签（识别给出 `Skip`）由路由层按长度跳过，只记一个计数：选中的解码器从
+/// 标签之后开始，定位位置加回标签长度。
 pub struct ExtDecoder {
     qyt1: Qyt1Decoder,
     auto: AutoDecoder,
     active: Option<Active>,
+    /// 当前标签尚未跳过的字节数。
+    tag_left: u64,
+    /// 路由层跳过的标签总字节数。
+    tag_bytes: u64,
 }
 
 impl ExtDecoder {
@@ -60,6 +69,8 @@ impl ExtDecoder {
             qyt1,
             auto,
             active: None,
+            tag_left: 0,
+            tag_bytes: 0,
         }
     }
 
@@ -116,6 +127,8 @@ impl qy_core::Decoder for ExtDecoder {
         self.qyt1.reset();
         self.auto.reset();
         self.active = None;
+        self.tag_left = 0;
+        self.tag_bytes = 0;
     }
 
     fn format(&self) -> Option<SourceFormat> {
@@ -126,29 +139,68 @@ impl qy_core::Decoder for ExtDecoder {
     }
 
     fn decode(&mut self, input: &[u8], eof: bool) -> Result<Progress, DecodeError> {
-        let active = match self.active {
-            Some(a) => a,
-            None => {
-                let a = match input.get(..4) {
-                    Some(m) if m == qyt1::MAGIC || m == qyt1::MAGIC_LOSSY => Active::Qyt1,
-                    Some(_) => Active::Auto,
-                    // 不足 4 字节且源未结束：先不选。
-                    None if !eof => {
+        let mut pos = 0usize;
+        let active = loop {
+            if let Some(a) = self.active {
+                break a;
+            }
+            if self.tag_left > 0 {
+                let n = usize::try_from(self.tag_left)
+                    .unwrap_or(usize::MAX)
+                    .min(input.len() - pos);
+                pos += n;
+                self.tag_left -= n as u64;
+                self.tag_bytes += n as u64;
+                if self.tag_left > 0 {
+                    // 标签声明的长度超出文件：不是完整的文件。
+                    return if eof {
+                        Err(DecodeError::Truncated)
+                    } else {
+                        Ok(Progress {
+                            consumed: pos,
+                            status: Status::NeedInput,
+                        })
+                    };
+                }
+            }
+            let head = &input[pos..];
+            let a = match self.auto.identify(head, eof).1 {
+                Identify::Skip { bytes } => {
+                    self.tag_left = bytes;
+                    continue;
+                }
+                // 官方格式（含识别出容器而子类型尚未读到的）交给 `AutoDecoder`。
+                r if r.is_mine() => Active::Auto,
+                Identify::NeedMore { .. } => {
+                    return Ok(Progress {
+                        consumed: pos,
+                        status: Status::NeedInput,
+                    });
+                }
+                _ => match qyt1::identify(head, eof) {
+                    r if r.is_mine() => Active::Qyt1,
+                    Identify::NeedMore { .. } => {
                         return Ok(Progress {
-                            consumed: 0,
+                            consumed: pos,
                             status: Status::NeedInput,
                         });
                     }
-                    None => Active::Auto,
-                };
-                self.active = Some(a);
-                a
-            }
+                    // 都不是：交给 `AutoDecoder`，由它说明无法识别的原因。
+                    _ => Active::Auto,
+                },
+            };
+            self.active = Some(a);
+            break a;
         };
-        match active {
+        let input = &input[pos..];
+        let r = match active {
             Active::Qyt1 => self.qyt1.decode(input, eof),
             Active::Auto => self.auto.decode(input, eof),
-        }
+        };
+        r.map(|p| Progress {
+            consumed: p.consumed + pos,
+            ..p
+        })
     }
 
     fn pcm(&self) -> &[i32] {
@@ -167,20 +219,25 @@ impl qy_core::Decoder for ExtDecoder {
         }
     }
 
+    /// 选中的解码器从标签之后开始，它给出的位置加回路由层跳过的标签长度。
     fn seek(&mut self, frame: u64) -> Result<u64, SeekError> {
-        match self.active {
+        let tag = self.tag_bytes;
+        let r = match self.active {
             Some(Active::Qyt1) => self.qyt1.seek(frame),
             Some(Active::Auto) => self.auto.seek(frame),
             None => Err(SeekError::Unsupported),
-        }
+        };
+        r.and_then(|o| o.checked_add(tag).ok_or(SeekError::PastEnd))
     }
 
     fn seek_request(&mut self) -> Option<u64> {
-        match self.active {
+        let tag = self.tag_bytes;
+        let r = match self.active {
             Some(Active::Qyt1) => self.qyt1.seek_request(),
             Some(Active::Auto) => self.auto.seek_request(),
             None => None,
-        }
+        };
+        r.and_then(|o| o.checked_add(tag))
     }
 }
 
@@ -228,10 +285,11 @@ impl Diagnostics for ExtDecoder {
     }
 
     fn skipped_tag_bytes(&self) -> u64 {
-        match self.active {
-            Some(Active::Auto) => Diagnostics::skipped_tag_bytes(&self.auto),
-            _ => 0,
-        }
+        self.tag_bytes
+            + match self.active {
+                Some(Active::Auto) => Diagnostics::skipped_tag_bytes(&self.auto),
+                _ => 0,
+            }
     }
 
     fn source_notes(&self, out: &mut Vec<String>) {

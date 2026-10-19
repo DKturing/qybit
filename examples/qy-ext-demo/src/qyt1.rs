@@ -23,7 +23,9 @@
 //!   由核心改为顺序解码（结果同样精确）。
 
 use qy_core::engine::Resources;
-use qy_core::{DecodeError, Decoder, Progress, SeekError, SourceFormat, Status};
+use qy_core::{
+    DecodeError, Decoder, Identify, Progress, SeekError, SourceFormat, Status, magic_matches,
+};
 
 /// 魔数。
 pub const MAGIC: &[u8; 4] = b"QYT1";
@@ -108,24 +110,11 @@ impl Qyt1Decoder {
     }
 
     fn header(&mut self, h: &[u8]) -> Result<(), (Qyt1Detail, DecodeError)> {
-        let lossy = &h[..4] == MAGIC_LOSSY;
-        if &h[..4] != MAGIC && !lossy {
-            return Err((Qyt1Detail::Magic, DecodeError::Malformed));
-        }
-        let rate = u32::from_le_bytes([h[4], h[5], h[6], h[7]]);
-        let channels = u16::from_le_bytes([h[8], h[9]]);
-        let bits = u16::from_le_bytes([h[10], h[11]]);
-        let total = u64::from_le_bytes([h[12], h[13], h[14], h[15], h[16], h[17], h[18], h[19]]);
-        if !(1..=32).contains(&bits) || !(1..=2).contains(&channels) {
-            return Err((Qyt1Detail::Header, DecodeError::Unsupported));
-        }
-        let format = SourceFormat::new(rate, channels, bits as u8)
-            .map_err(|_| (Qyt1Detail::Header, DecodeError::Malformed))?;
-        let format = if lossy { format.lossy() } else { format };
+        let (format, total) = parse_header(h)?;
         self.format = Some(format);
-        self.channels = usize::from(channels);
-        self.bits = u32::from(bits);
-        self.bytes = usize::from(bits).div_ceil(8);
+        self.channels = usize::from(format.channels());
+        self.bits = u32::from(format.bits());
+        self.bytes = usize::from(format.bits()).div_ceil(8);
         self.total = total;
         Ok(())
     }
@@ -150,6 +139,60 @@ impl Qyt1Decoder {
         let lo = -(1i64 << (self.bits - 1));
         let hi = (1i64 << (self.bits - 1)) - 1;
         (lo..=hi).contains(&i64::from(v)).then_some(v)
+    }
+}
+
+/// 解析 20 字节文件头：源格式与帧数（识别与解码共用，结论相同）。
+fn parse_header(h: &[u8]) -> Result<(SourceFormat, u64), (Qyt1Detail, DecodeError)> {
+    let lossy = &h[..4] == MAGIC_LOSSY;
+    if &h[..4] != MAGIC && !lossy {
+        return Err((Qyt1Detail::Magic, DecodeError::Malformed));
+    }
+    let rate = u32::from_le_bytes([h[4], h[5], h[6], h[7]]);
+    let channels = u16::from_le_bytes([h[8], h[9]]);
+    let bits = u16::from_le_bytes([h[10], h[11]]);
+    let total = u64::from_le_bytes([h[12], h[13], h[14], h[15], h[16], h[17], h[18], h[19]]);
+    if !(1..=32).contains(&bits) || !(1..=2).contains(&channels) {
+        return Err((Qyt1Detail::Header, DecodeError::Unsupported));
+    }
+    let format = SourceFormat::new(rate, channels, bits as u8)
+        .map_err(|_| (Qyt1Detail::Header, DecodeError::Malformed))?;
+    Ok((if lossy { format.lossy() } else { format }, total))
+}
+
+/// 识别 QYT1 / QYL1 文件头（E3）：插件也可以给自己的格式提供识别函数，规则与解码相同。
+pub fn identify(head: &[u8], eof: bool) -> Identify<Qyt1Detail> {
+    match magic_matches(head, &[MAGIC, MAGIC_LOSSY], eof) {
+        None => {
+            return Identify::NeedMore {
+                total: head.len() as u64 + 1,
+                container: false,
+            };
+        }
+        Some(false) => return Identify::Foreign,
+        Some(true) => {}
+    }
+    let Some(h) = head.get(..HEADER) else {
+        if eof {
+            return Identify::Rejected {
+                error: DecodeError::Truncated,
+                detail: Some(Qyt1Detail::Truncated { frames: 0 }),
+            };
+        }
+        return Identify::NeedMore {
+            total: HEADER as u64,
+            container: true,
+        };
+    };
+    match parse_header(h) {
+        Ok((format, _)) => Identify::Supported {
+            format,
+            data_start: HEADER as u64,
+        },
+        Err((detail, error)) => Identify::Rejected {
+            error,
+            detail: Some(detail),
+        },
     }
 }
 

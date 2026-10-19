@@ -22,7 +22,10 @@ mod crc;
 mod frame;
 
 use qy_core::engine::{CapabilityError, DecoderDemand, Resources, Unit};
-use qy_core::{ChannelLayout, DecodeError, Decoder, Progress, SeekError, SourceFormat, Status};
+use qy_core::{
+    ChannelLayout, DecodeError, Decoder, Identify, Progress, SeekError, SourceFormat, Status,
+    magic_matches,
+};
 
 /// 解码器容量配置（宿主声明）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,6 +366,55 @@ pub struct FlacDecoder {
     request: Option<u64>,
     #[cfg(any(test, feature = "test-metrics"))]
     metrics: Metrics,
+    /// 识别模式（E3，[`identify`]）：没有工作区、容量不设限，元数据读完即停。
+    probe: bool,
+}
+
+/// 识别 FLAC 文件头（E3，[`qy_core::Identify`]）：不消耗输入、不需要工作区，与完整解码按同一个
+/// 状态机判断，读到元数据结束、第一帧开始处为止（元数据块可以任意大，如嵌入的图片，需要的字节数
+/// 由文件决定，不够时以 [`Identify::NeedMore`] 说明至少还要多少）。
+///
+/// 本机容量（块大小、声道数、帧长度超出宿主配置）不在识别范围内：识别按不设限判断，完整解码时
+/// 仍按宿主容量报告（[`Resources::capacity_rejection`]）。拒绝明细为 [`FlacError`]。
+pub fn identify(head: &[u8], eof: bool) -> Identify<FlacError> {
+    match magic_matches(head, &[b"fLaC"], eof) {
+        // 标记的前缀：下一个字节就可能排除本格式。
+        None => {
+            return Identify::NeedMore {
+                total: head.len() as u64 + 1,
+                container: false,
+            };
+        }
+        Some(false) => return Identify::Foreign,
+        Some(true) => {}
+    }
+    let unlimited = Capacity {
+        max_block: usize::MAX,
+        max_channels: usize::MAX,
+        input_window: usize::MAX,
+    };
+    let mut d =
+        FlacDecoder::with_buffers(unlimited, <&mut [i64]>::default(), <&mut [i32]>::default());
+    d.probe = true;
+    let result = d.decode(head, eof);
+    match (result, d.state, d.format(), d.first_frame) {
+        (Err(error), ..) => Identify::Rejected {
+            error,
+            detail: d.last_error(),
+        },
+        (Ok(p), State::Frames, Some(format), Some(data_start))
+            if p.status == Status::NeedOutput =>
+        {
+            Identify::Supported { format, data_start }
+        }
+        (Ok(_), ..) => Identify::NeedMore {
+            total: d
+                .offset
+                .saturating_add(d.wanted())
+                .max(head.len() as u64 + 1),
+            container: true,
+        },
+    }
 }
 
 impl FlacDecoder {
@@ -374,7 +426,11 @@ impl FlacDecoder {
     ) -> Result<Self, InitError> {
         check(Buffer::Workspace, cap.workspace_len(), workspace.len())?;
         check(Buffer::Pcm, cap.pcm_len(), pcm.len())?;
-        Ok(Self {
+        Ok(Self::with_buffers(cap, workspace, pcm))
+    }
+
+    fn with_buffers(cap: Capacity, workspace: &'static mut [i64], pcm: &'static mut [i32]) -> Self {
+        Self {
             cap,
             workspace,
             pcm,
@@ -397,7 +453,20 @@ impl FlacDecoder {
             request: None,
             #[cfg(any(test, feature = "test-metrics"))]
             metrics: Metrics::default(),
-        })
+            probe: false,
+        }
+    }
+
+    /// 识别模式下，当前状态还要读的字节数（从当前结构开头算；只用于 [`Identify::NeedMore`] 的
+    /// 下界）。
+    fn wanted(&self) -> u64 {
+        match self.state {
+            State::Marker | State::BlockHeader => 4,
+            State::StreamInfo { .. } => 34,
+            // 最后一个元数据块跳过之后就是第一帧（结论随即确定）。
+            State::Skip { remaining, .. } => u64::from(remaining),
+            State::Comment { .. } | State::Frames | State::End | State::Failed(_) => 1,
+        }
     }
 
     pub fn capacity(&self) -> Capacity {
@@ -773,6 +842,14 @@ impl FlacDecoder {
                         remaining: remaining - n,
                         last,
                     };
+                }
+                State::Frames if self.probe => {
+                    // E3：元数据都已接受，第一帧从这里开始。
+                    self.first_frame = Some(self.offset + pos as u64);
+                    return Ok(Progress {
+                        consumed: pos,
+                        status: Status::NeedOutput,
+                    });
                 }
                 State::Frames => return self.frame(pos, avail, eof),
             }
