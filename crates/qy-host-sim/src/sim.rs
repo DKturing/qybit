@@ -199,6 +199,8 @@ pub struct Report {
     pub sequential_seeks: Vec<u32>,
     /// 定位预滚（E5）：曲目与丢弃的帧数。
     pub seek_prerolls: Vec<(u32, u64)>,
+    /// 解码需要的读取跳转（E6）：曲目、跳到的位置、是否在首次产出样本之前。
+    pub parse_jumps: Vec<(u32, u64, bool)>,
     /// 浮点按明确开启的选项转为整数的曲目与位数（F3：样本已改变）。
     pub float_converted: Vec<(u32, u8)>,
     /// 浮点曲目的统计（F3）。
@@ -717,6 +719,11 @@ impl Sim<'_> {
             HostAction::SeekPreroll { track, frames } => {
                 self.report.seek_prerolls.push((track, frames));
             }
+            HostAction::ParseJumped {
+                track,
+                offset,
+                header,
+            } => self.report.parse_jumps.push((track, offset, header)),
             HostAction::Finished => {
                 self.report.finished = true;
                 self.phase = Phase::Done;

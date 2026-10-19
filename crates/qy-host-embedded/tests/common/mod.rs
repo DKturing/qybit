@@ -388,6 +388,10 @@ pub fn loads(t: Timing) -> [Load; 2] {
             unit_read_us: t.wav_read_us,
             decode_us: t.wav_decode_us,
             open_us: t.open_us,
+            // 官方格式没有解码需要的跳转（E6）。
+            header_jumps: 0,
+            unit_jumps: 0,
+            jump_us: 0,
         },
         Load {
             demand: Demand::flac(
@@ -399,6 +403,10 @@ pub fn loads(t: Timing) -> [Load; 2] {
             unit_read_us: t.flac_read_us,
             decode_us: t.flac_decode_us,
             open_us: t.open_us,
+            // 官方格式没有解码需要的跳转（E6）。
+            header_jumps: 0,
+            unit_jumps: 0,
+            jump_us: 0,
         },
     ]
 }

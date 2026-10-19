@@ -20,7 +20,7 @@ use qy_core::engine::{
     ChannelPolicy, Engine, EngineFault, EngineStats, ErrorPolicy, FloatPolicy, FloatReport,
     HostAction, HostEvent, PlaybackPlan, Poll, Repair, Resources, Wait,
 };
-use qy_core::{Decoder, DeviceFormat, Fault};
+use qy_core::{Decoder, DeviceFormat, Fault, JumpFault};
 use qy_pcm_format::frames_for_millis;
 use qy_pcm_format::queue::Watermark;
 use qy_pcm_format::static_queue::{StaticProducer, reconfigure};
@@ -62,6 +62,9 @@ pub enum Notice {
     SeekSequential { track: u32 },
     /// 曲目的定位按解码器的预滚（E5）解码并丢弃了目标之前的 `frames` 帧（样本精确）。
     SeekPreroll { track: u32, frames: u64 },
+    /// 曲目首次输出之前的解码需要的跳转（E6）超过了时序预算声明的 `budget` 次（`budget::Load`
+    /// 的 `header_jumps`）：换曲时可能欠载（欠载照常计数）。每首曲目每次打开至多一次。
+    JumpBudgetExceeded { track: u32, budget: u32 },
     /// 曲目的浮点样本按明确开启的选项转换为 `bits` 位整数（F3：样本已改变）。
     FloatConverted { track: u32, bits: u8 },
     /// 浮点曲目的统计（F3）。
@@ -95,6 +98,10 @@ pub struct Counters {
     pub duplicated: u32,
     /// 浮点转为整数的曲目数（F3：明确开启，样本已改变）。
     pub converted: u32,
+    /// 解码需要的读取跳转次数（E6，文件头与数据阶段合计）。
+    pub parse_jumps: u32,
+    /// 首次输出之前的跳转超过时序预算的曲目数（E6）。
+    pub jump_budget_exceeded: u32,
 }
 
 /// 状态快照。
@@ -142,6 +149,8 @@ where
     notice_len: usize,
     /// 串口 `seek` 收到时曲目格式还不知道（刚开始播放）：毫秒数待格式确定后换算并定位（S1）。
     pending_seek: Option<u32>,
+    /// 当前打开的曲目首次输出之前的解析跳转次数（E6），与 `margins.header_jumps` 比较。
+    header_jumps: u32,
 }
 
 impl<D, S, O, F, const N: usize> Player<D, S, O, F, N>
@@ -179,6 +188,7 @@ where
             notices: [None; NOTICES],
             notice_len: 0,
             pending_seek: None,
+            header_jumps: 0,
         })
     }
 
@@ -386,11 +396,15 @@ where
     fn count_fault(&mut self, fault: EngineFault) {
         let c = &mut self.counters;
         match fault {
-            EngineFault::Core(Fault::Decode(_) | Fault::InputWindow)
+            EngineFault::Core(
+                Fault::Decode(_)
+                | Fault::InputWindow
+                | Fault::Jump(JumpFault::NoProgress | JumpFault::Protocol),
+            )
             | EngineFault::NonFinite { .. } => c.decode_errors = c.decode_errors.saturating_add(1),
-            EngineFault::Core(Fault::Configure) | EngineFault::Capability(_) => {
-                c.unsupported = c.unsupported.saturating_add(1)
-            }
+            // 存储不能定位而文件需要随机读取：本机能力不足。
+            EngineFault::Core(Fault::Configure | Fault::Jump(JumpFault::Unseekable))
+            | EngineFault::Capability(_) => c.unsupported = c.unsupported.saturating_add(1),
             // 打开与读取错误在发生时已计数。
             EngineFault::Core(Fault::Open | Fault::Read) | EngineFault::Output => {}
         }
@@ -401,6 +415,7 @@ where
             HostAction::Open { generation, track } => match self.storage.open(track) {
                 Ok(()) => {
                     self.open_track = Some(track);
+                    self.header_jumps = 0;
                     self.notice(Notice::Opened { track });
                     self.handle(HostEvent::Opened { generation });
                 }
@@ -435,6 +450,18 @@ where
             HostAction::SeekSequential { track } => self.notice(Notice::SeekSequential { track }),
             HostAction::SeekPreroll { track, frames } => {
                 self.notice(Notice::SeekPreroll { track, frames });
+            }
+            HostAction::ParseJumped { track, header, .. } => {
+                let c = &mut self.counters;
+                c.parse_jumps = c.parse_jumps.saturating_add(1);
+                if header {
+                    self.header_jumps = self.header_jumps.saturating_add(1);
+                    let budget = self.margins.header_jumps;
+                    if self.header_jumps == budget.saturating_add(1) {
+                        c.jump_budget_exceeded = c.jump_budget_exceeded.saturating_add(1);
+                        self.notice(Notice::JumpBudgetExceeded { track, budget });
+                    }
+                }
             }
             HostAction::Close { .. } => {
                 self.storage.close();
@@ -778,7 +805,8 @@ pub fn write_status(w: &mut impl fmt::Write, s: &Status) -> fmt::Result {
         "queued={} underruns={} underrun_frames={} paused_fills={} data_frames={} \
          open_errors={} read_errors={} decode_errors={} unsupported={} skipped={} \
          output_errors={} feeder_errors={} protocol_errors={} stale={} notices_dropped={} \
-         repairs={} duplicated={} mono_to_stereo={} converted={} float_to_int={}",
+         repairs={} duplicated={} mono_to_stereo={} converted={} float_to_int={} \
+         parse_jumps={} jump_over={}",
         s.queued_frames,
         o.underruns,
         o.underrun_frames,
@@ -798,7 +826,9 @@ pub fn write_status(w: &mut impl fmt::Write, s: &Status) -> fmt::Result {
         c.duplicated,
         if s.mono_to_stereo { "on" } else { "off" },
         c.converted,
-        if s.float_to_int { "on" } else { "off" }
+        if s.float_to_int { "on" } else { "off" },
+        c.parse_jumps,
+        c.jump_budget_exceeded
     )?;
     // R1 水位：当前设备流的最低队列帧数（及毫秒）、低水位与临界次数。
     let m = &o.watermark;
@@ -841,6 +871,10 @@ pub fn write_notice(w: &mut impl fmt::Write, n: &Notice) -> fmt::Result {
                 "EVENT seek-preroll track={track} frames={frames} discarded"
             )
         }
+        Notice::JumpBudgetExceeded { track, budget } => writeln!(
+            w,
+            "EVENT jump-budget-exceeded track={track} header_jumps>{budget} underrun-possible"
+        ),
         Notice::FloatConverted { track, bits } => writeln!(
             w,
             "EVENT samples-altered track={track} float->int{bits} explicit"

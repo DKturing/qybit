@@ -258,6 +258,11 @@ impl ChainCursor {
         })
     }
 
+    /// 文件长度（目录项）。
+    pub(crate) fn size(&self) -> u32 {
+        self.size
+    }
+
     /// 核对覆盖文件前 `end` 字节（超出文件长度的部分按文件长度）所需的簇；`false` 为簇链损坏。
     pub(crate) fn cover<D: BlockDevice>(&mut self, d: &D, end: u64) -> Result<bool, D::Error> {
         let end = end.min(u64::from(self.size));

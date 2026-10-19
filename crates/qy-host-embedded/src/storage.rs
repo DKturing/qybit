@@ -43,9 +43,10 @@ pub trait Storage {
     fn open(&mut self, track: u32) -> Result<(), Self::Error>;
     /// 从当前曲目读取至多 `buf.len()` 字节；返回 0 表示文件结束。
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
-    /// 把读取位置移到距当前曲目开头 `offset` 字节处（S1 定位）；成功返回 `true`。不支持定位或
-    /// 位置越过文件末尾时返回 `false`，引擎改为顺序解码到目标位置（结果相同，只是更慢）。
-    /// 默认不支持。
+    /// 把读取位置移到距当前曲目开头 `offset` 字节处（S1 定位、E6 解码需要的跳转）；成功返回
+    /// `true`。位置在文件末尾或之后时也成功，之后的读取返回 0（文件结束，与 `std::fs::File` 相同，
+    /// 解码器据此得到 EOF）。不支持定位时返回 `false`：用户定位改为顺序解码到目标位置，解码需要的
+    /// 跳转则使曲目明确失败。默认不支持。
     fn seek(&mut self, offset: u64) -> bool {
         let _ = offset;
         false
@@ -313,13 +314,17 @@ impl<D: BlockDevice, T: TimeSource, const M: usize> Storage for FatStorage<D, T,
     }
 
     /// 只移动读取位置；`embedded-sdmmc` 在下一次读取时按簇链走到目标位置，此前先逐跳核对到该处
-    /// （见 `fatcheck::ChainCursor`）。定位的耗时随距离增长，但引擎定位时会停止设备并重新预填，
-    /// 只增加延迟，不造成欠载。文件大小以 32 位表示，越过文件末尾时失败。
+    /// （见 `fatcheck::ChainCursor`）。定位的耗时随距离增长，计入板级实测的定位耗时 `S`（见
+    /// [`crate::budget`]）。位置在文件末尾或之后时移到末尾，之后读取返回 0。
     fn seek(&mut self, offset: u64) -> bool {
-        let (Some(vm), Some(file), Ok(at)) = (self.vm.as_ref(), self.file, u32::try_from(offset))
+        let (Some(vm), Some(file), Some(cursor)) =
+            (self.vm.as_ref(), self.file, self.cursor.as_ref())
         else {
             return false;
         };
+        let size = cursor.size();
+        // 不超过文件长度（32 位），转换不会失败。
+        let at = u32::try_from(offset.min(u64::from(size))).unwrap_or(size);
         if vm.file_seek_from_start(file, at).is_err() {
             return false;
         }

@@ -201,6 +201,110 @@ pub trait Decoder {
     fn take_preroll(&mut self) -> u64 {
         0
     }
+
+    /// 解码需要的读取跳转（E6，tasks/E6.md）：下一批需要的字节不在当前读取位置之后时（容器的索引
+    /// 在文件末尾、要跳过很大的块、按索引回到数据或在交错的块之间移动），返回新的字节位置（距音源
+    /// 开头）。取走即清空；[`Decoder::reset`] 清除未取走的跳转。默认没有。
+    ///
+    /// 核心在每次成功的 `decode` 之后取一次（与 [`Decoder::seek_request`] 不能同时给出，返回
+    /// [`Status::End`] 时不得给出）。跳转完成后，输入窗口中旧位置的字节全部废弃、EOF 状态清除，
+    /// 解码器下一次看到的输入从该位置开始；跳到文件末尾或之后时，下一次得到 `eof = true` 与空输入。
+    /// 已产出、尚未取走的样本不受影响。音源不可定位时曲目以 [`JumpFault::Unseekable`] 失败，不重新
+    /// 打开；自上一次跳转完成（或打开音源）以来没有读到任何字节就再次请求跳转，为
+    /// [`JumpFault::NoProgress`]。有尚未交给解码器的定位目标且本次产出了样本时，核心先调用
+    /// [`Decoder::seek`]，本次的跳转随之作废（解码器从 `seek` 返回的位置继续）。
+    fn take_jump(&mut self) -> Option<u64> {
+        None
+    }
+}
+
+/// 解码需要的读取跳转（[`Decoder::take_jump`]）失败的原因（E6）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpFault {
+    /// 解码需要跳转到文件中的其他位置，但音源不可定位（如管道）。
+    Unseekable,
+    /// 自上一次跳转完成（或打开音源）以来没有读到任何字节就再次请求跳转（解码器错误）。
+    NoProgress,
+    /// 违反约定：同一次 `decode` 同时给出 `take_jump` 与 `seek_request`，或返回 `End` 时给出跳转。
+    Protocol,
+}
+
+impl core::fmt::Display for JumpFault {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Unseekable => {
+                "此文件需要随机读取（解码器要求跳转到文件中的其他位置），但音源不可定位"
+            }
+            Self::NoProgress => "解码器连续请求跳转而没有读取任何数据（解码器错误）",
+            Self::Protocol => {
+                "解码器的跳转请求违反接口约定（同一次调用同时请求两种跳转，或结束时仍请求跳转）"
+            }
+        })
+    }
+}
+
+/// 一次 `decode` 之后取到的跳转（[`JumpGuard::take`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Jump {
+    None,
+    /// 解码需要的跳转（[`Decoder::take_jump`]）。
+    Parse(u64),
+    /// 用户定位过程中的再次跳转（[`Decoder::seek_request`]）。
+    Seek(u64),
+}
+
+/// 跳转的协议检查（E6）：取跳转请求并核对 [`JumpFault::Protocol`] 与 [`JumpFault::NoProgress`]。
+/// 核心与各同步驱动（`qy_player::read_header`、`qybit decode`、`qy-testkit`）共用这一份规则。
+///
+/// 只检测“没有读到任何字节就再次跳转”；读到了字节却在几个位置之间来回跳的循环属于解码器的错误，
+/// 由契约测试（`qy-testkit` 的步数上限）发现，生产环境不检测。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JumpGuard {
+    /// 自上一次跳转完成（或打开音源）以来读到的字节数。
+    read: u64,
+}
+
+impl JumpGuard {
+    pub const fn new() -> Self {
+        Self { read: 0 }
+    }
+
+    /// 打开音源或一次跳转完成（任一种）：从新位置重新计数。
+    pub fn restart(&mut self) {
+        self.read = 0;
+    }
+
+    /// 从音源读到 `n` 字节。
+    pub fn on_read(&mut self, n: usize) {
+        self.read = self.read.saturating_add(n as u64);
+    }
+
+    /// 一次成功的 `decode`（状态为 `status`）之后，取走解码器的跳转请求并核对约定。
+    pub fn take<D: Decoder + ?Sized>(
+        &mut self,
+        decoder: &mut D,
+        status: Status,
+    ) -> Result<Jump, JumpFault> {
+        let parse = decoder.take_jump();
+        let seek = decoder.seek_request();
+        match (parse, seek) {
+            (Some(_), Some(_)) => Err(JumpFault::Protocol),
+            (Some(_), None) if status == Status::End => Err(JumpFault::Protocol),
+            (Some(_), None) if self.read == 0 => Err(JumpFault::NoProgress),
+            (Some(offset), None) => Ok(Jump::Parse(offset)),
+            (None, Some(offset)) => Ok(Jump::Seek(offset)),
+            (None, None) => Ok(Jump::None),
+        }
+    }
+}
+
+/// 一次解析跳转（[`Core::take_parse_jump`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseJump {
+    /// 跳到的字节位置。
+    pub offset: u64,
+    /// 该曲目（本次打开）首次产出样本之前（文件头阶段）。
+    pub header: bool,
 }
 
 /// 播放代次：每首曲目打开时与停止时递增，旧代次的回报一律拒绝。
@@ -220,6 +324,8 @@ pub enum Fault {
     Configure,
     /// 输入窗口已满仍缺输入（解码器单一结构超出窗口容量）。
     InputWindow,
+    /// 解码需要的读取跳转失败（E6）。
+    Jump(JumpFault),
 }
 
 /// 核心请求宿主执行的操作。
@@ -333,11 +439,14 @@ enum State {
         request: u32,
         max: usize,
     },
+    /// `parse`：解码需要的跳转（E6），否则为用户定位的跳转（S1）。
     Seek {
         offset: u64,
+        parse: bool,
     },
     Seeking {
         request: u32,
+        parse: bool,
     },
     /// 定位失败后重新打开当前曲目（先关闭已打开的音源）。
     Reopen,
@@ -376,6 +485,12 @@ pub struct Core<D: Decoder> {
     sequential: bool,
     /// 定位预滚（E5）丢弃的累计帧数（宿主据此报告），取走后清除。
     prerolled: u64,
+    /// 跳转的协议检查（E6）。
+    jumps: JumpGuard,
+    /// 本次打开以来解码器已产出过样本（E6：此前的跳转属文件头阶段）。
+    produced: bool,
+    /// 最近一次解析跳转（宿主据此计数），取走后清除。
+    parse_jump: Option<ParseJump>,
 }
 
 impl<D: Decoder> Core<D> {
@@ -405,6 +520,9 @@ impl<D: Decoder> Core<D> {
             discard: 0,
             sequential: false,
             prerolled: 0,
+            jumps: JumpGuard::new(),
+            produced: false,
+            parse_jump: None,
         })
     }
 
@@ -484,6 +602,12 @@ impl<D: Decoder> Core<D> {
         core::mem::take(&mut self.prerolled)
     }
 
+    /// 最近一次解析跳转（E6，[`Decoder::take_jump`]）；取走后清除。核心每次跳转都返回
+    /// `Action::Seek`，宿主在每次 `poll` 之后取一次即不会遗漏。
+    pub fn take_parse_jump(&mut self) -> Option<ParseJump> {
+        self.parse_jump.take()
+    }
+
     fn clear_seek(&mut self) {
         self.seek = None;
         self.seek_target = None;
@@ -518,6 +642,9 @@ impl<D: Decoder> Core<D> {
         self.source_eof = false;
         self.source_open = false;
         self.decoder.reset();
+        self.jumps.restart();
+        self.produced = false;
+        self.parse_jump = None;
     }
 
     /// 取得下一个宿主操作；`None` 表示正在等待回报或已空闲。
@@ -535,10 +662,10 @@ impl<D: Decoder> Core<D> {
                 | State::Seeking { .. }
                 | State::Configuring(_)
                 | State::Output { .. } => return None,
-                State::Seek { offset } => {
+                State::Seek { offset, parse } => {
                     let request = self.next_request;
                     self.next_request = self.next_request.wrapping_add(1);
-                    self.state = State::Seeking { request };
+                    self.state = State::Seeking { request, parse };
                     return Some(Action::Seek {
                         generation: self.generation,
                         request,
@@ -641,31 +768,53 @@ impl<D: Decoder> Core<D> {
             self.discard = self.discard.saturating_add(preroll);
             self.prerolled = self.prerolled.saturating_add(preroll);
         }
-        // 解码器在定位过程中要求再跳一次（FLAC 二分）。
-        if let Some(offset) = self.decoder.seek_request() {
-            self.jump(offset);
-            return None;
+        if matches!(progress.status, Status::Frames(_)) {
+            self.produced = true;
         }
-        // 文件头已解析、首次产出 PCM：把定位目标交给解码器。
+        // E6：取跳转请求（顺序见 tasks/E6.md §2.1）。
+        let parse = match self.jumps.take(&mut self.decoder, progress.status) {
+            Ok(Jump::None) => None,
+            Ok(Jump::Parse(offset)) => Some(offset),
+            // 解码器在定位过程中要求再跳一次（FLAC 二分）。
+            Ok(Jump::Seek(offset)) => {
+                self.jump(offset, false);
+                return None;
+            }
+            Err(fault) => {
+                self.state = State::Fail(Fault::Jump(fault));
+                return None;
+            }
+        };
+        // 文件头已解析、首次产出 PCM：把定位目标交给解码器。用户定位优先：`seek` 让解码器从目标处
+        // 重新定位，本次的解析跳转随之作废。
         if let (Some(target), Status::Frames(_) | Status::NeedOutput) = (self.seek, progress.status)
         {
             self.seek = None;
             match self.decoder.seek(target) {
                 Ok(offset) => {
                     self.seek_target = Some(target);
-                    self.jump(offset);
+                    self.jump(offset, false);
                     return None;
                 }
                 Err(SeekError::PastEnd) => {
                     self.state = State::EndOfTrack;
                     return None;
                 }
-                // 已在数据开头：就地顺序解码，丢弃目标帧之前的样本。
+                // 已在数据开头：就地顺序解码，丢弃目标帧之前的样本（解码器状态未变，解析跳转照常）。
                 Err(SeekError::Unsupported) => {
                     self.discard = target;
                     self.sequential = true;
                 }
             }
+        }
+        // 解码需要的跳转（E6）；定位目标若仍待交，等跳转之后首次产出样本时再交。
+        if let Some(offset) = parse {
+            self.parse_jump = Some(ParseJump {
+                offset,
+                header: !self.produced,
+            });
+            self.jump(offset, true);
+            return None;
         }
         match progress.status {
             Status::Frames(_) | Status::NeedOutput => self.output_or_configure(),
@@ -692,11 +841,12 @@ impl<D: Decoder> Core<D> {
         }
     }
 
-    /// 丢弃窗口中旧位置的数据，请宿主把读取位置移到 `offset`。
-    fn jump(&mut self, offset: u64) {
+    /// 丢弃窗口中旧位置的数据与 EOF 状态，请宿主把读取位置移到 `offset`。`parse`：解码需要的跳转
+    /// （E6），失败时曲目失败；否则为用户定位的跳转，失败时改为顺序解码。
+    fn jump(&mut self, offset: u64, parse: bool) {
         self.filled = 0;
         self.source_eof = false;
-        self.state = State::Seek { offset };
+        self.state = State::Seek { offset, parse };
     }
 
     fn output_or_configure(&mut self) -> Option<Action> {
@@ -788,6 +938,7 @@ impl<D: Decoder> Core<D> {
                     return Err(CoreError::Protocol);
                 }
                 self.filled += len;
+                self.jumps.on_read(len);
                 self.state = State::Run;
             }
             Event::ReadEof { request, .. } => {
@@ -800,12 +951,16 @@ impl<D: Decoder> Core<D> {
                 self.state = State::Fail(Fault::Read);
             }
             Event::SeekDone { request, .. } | Event::SeekFailed { request, .. } => {
-                match self.state {
-                    State::Seeking { request: r } if r == request => {}
+                let parse = match self.state {
+                    State::Seeking { request: r, parse } if r == request => parse,
                     _ => return Err(CoreError::Stale),
-                }
+                };
                 if matches!(event, Event::SeekDone { .. }) {
+                    self.jumps.restart();
                     self.state = State::Run;
+                } else if parse {
+                    // E6：解码需要的跳转无法执行，不重新打开（避免反复重开）。
+                    self.state = State::Fail(Fault::Jump(JumpFault::Unseekable));
                 } else {
                     let target = self.seek_target.unwrap_or(0);
                     self.seek_sequentially(target);

@@ -17,11 +17,16 @@
 //!   目标等于或超过长度时返回 `PastEnd`；不支持时返回 `Unsupported`，核心改为顺序解码。落在
 //!   目标之前时以 `take_preroll` 给出预滚帧数（E5），按核心的做法丢弃后结果相同；预滚不得超过目标
 //!   帧号，未定位时不得给出。
+//! - **读取跳转**（E6，`take_jump`）：与核心同一套规则（`qy_core::JumpGuard`）——两种跳转不得同时
+//!   给出、`End` 时不得给出、跳转之后没有读到任何字节不得再跳；`reset` 之后不得残留跳转。跳转后
+//!   与核心一样先送空输入（`eof` 为假），解码器要输入时再从新位置送；跳到文件末尾之后得到 EOF。
+//!   有定位目标且同一次调用产出了样本时先 `seek`（跳转随之作废）。另设跳转次数上限
+//!   （[`jump_limit`]）发现读到了字节却来回循环的解码器——这只是测试保护，生产环境不检测。
 //!
 //! 停止后迟到的 I/O 回报由核心按代次拒绝，解码器不需要处理（见 `qy-core` 的测试与
 //! `examples/qy-ext-demo/tests/late_events.rs`）。
 
-use qy_core::{DecodeError, Decoder, Progress, SeekError, SourceFormat, Status};
+use qy_core::{DecodeError, Decoder, Jump, JumpGuard, Progress, SeekError, SourceFormat, Status};
 
 /// 违反的约定与发生的位置。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +112,11 @@ struct Feed<'a> {
     pos: usize,
     delivered: usize,
     chunks: Chunks,
+    /// 刚跳转、还没有从新位置读取（与核心相同：先送空输入，`eof` 为假）。
+    fresh: bool,
+    guard: JumpGuard,
+    /// 本次解码的跳转次数（两种合计）。
+    jumps: usize,
 }
 
 impl<'a> Feed<'a> {
@@ -116,6 +126,9 @@ impl<'a> Feed<'a> {
             pos: 0,
             delivered: 0,
             chunks: Chunks::new(mode),
+            fresh: false,
+            guard: JumpGuard::new(),
+            jumps: 0,
         };
         f.more();
         f
@@ -126,23 +139,44 @@ impl<'a> Feed<'a> {
     }
 
     fn eof(&self) -> bool {
-        self.delivered == self.bytes.len()
+        !self.fresh && self.delivered == self.bytes.len()
     }
 
     fn more(&mut self) {
+        self.fresh = false;
         let left = self.bytes.len() - self.delivered;
         if left > 0 {
-            self.delivered += self.chunks.next(left);
+            let n = self.chunks.next(left);
+            self.delivered += n;
+            self.guard.on_read(n);
         }
     }
 
-    /// 移到绝对位置 `at`（定位），之后从那里按分块方式继续送达。
-    fn jump(&mut self, at: usize) {
-        let at = at.min(self.bytes.len());
+    /// 移到绝对位置 `at`（定位或读取跳转），旧位置的输入与 EOF 作废；解码器要输入时再从新位置
+    /// 按分块方式送达。越过末尾时停在末尾（之后得到 EOF）。
+    fn jump(&mut self, at: u64, limit: usize) -> Result<(), Violation> {
+        self.jumps += 1;
+        if self.jumps > limit {
+            return violation(format!(
+                "跳转 {} 次，超过上限 {limit}（读到了字节却来回跳转？此上限只是测试保护）",
+                self.jumps
+            ));
+        }
+        let at = usize::try_from(at)
+            .unwrap_or(usize::MAX)
+            .min(self.bytes.len());
         self.pos = at;
         self.delivered = at;
-        self.more();
+        self.fresh = true;
+        self.guard.restart();
+        Ok(())
     }
+}
+
+/// 一次解码中允许的跳转次数（测试保护，不是接口限制）：每次跳转之后必须读到字节，正常的解码器
+/// 跳转次数不会超过文件字节数的两倍。
+pub fn jump_limit(bytes: &[u8]) -> usize {
+    bytes.len().saturating_mul(2).saturating_add(1024)
 }
 
 /// 解码一步并检查通用约定；返回进度。
@@ -178,10 +212,14 @@ fn step<D: Decoder>(
         *discard = discard.saturating_add(k);
         *prerolled = prerolled.saturating_add(k);
     }
-    // 与核心相同：每次 decode 之后先查看跳转请求（定位中的二分查找），再看状态。
-    if let Some(to) = d.seek_request() {
-        return Ok(Step::Jump(to));
-    }
+    // 与核心相同：每次 decode 之后取跳转请求（E6 的规则由 `JumpGuard` 核对），再看状态。
+    let parse = match feed.guard.take(d, p.status) {
+        Ok(Jump::None) => None,
+        Ok(Jump::Parse(to)) => Some(to),
+        // 定位中的再次跳转（如二分查找）。
+        Ok(Jump::Seek(to)) => return Ok(Step::Jump(to)),
+        Err(f) => return violation(format!("位置 {at}：{f}（JumpFault::{f:?}）")),
+    };
     match p.status {
         Status::Frames(n) => {
             if n == 0 {
@@ -211,6 +249,8 @@ fn step<D: Decoder>(
                 return violation(format!("位置 {at}：工作区已取空仍返回 NeedOutput"));
             }
         }
+        // 要求跳转时，输入在别处：不从当前位置继续送（eof 时也可以）。
+        Status::NeedInput if parse.is_some() => {}
         Status::NeedInput => {
             if eof {
                 return violation(format!("位置 {at}：eof 为真时返回 NeedInput"));
@@ -219,12 +259,13 @@ fn step<D: Decoder>(
         }
         Status::End => {}
     }
-    Ok(Step::Progress(p))
+    Ok(Step::Progress(p, parse))
 }
 
 /// 一步的结果。
 enum Step {
-    Progress(Progress),
+    /// 进度与解码需要的读取跳转（E6，[`Decoder::take_jump`]；由调用方按核心的顺序执行）。
+    Progress(Progress, Option<u64>),
     /// 解码器要求跳到该字节位置（[`Decoder::seek_request`]）。
     Jump(u64),
     Error(DecodeError),
@@ -281,7 +322,11 @@ pub fn decode<D: Decoder>(
     if d.format().is_some() {
         return violation("reset 之后 format() 不是 None");
     }
+    if d.take_jump().is_some() {
+        return violation("reset 之后仍有未取走的跳转（take_jump）");
+    }
     let mut feed = Feed::new(bytes, chunking);
+    let limit = jump_limit(bytes);
     let (mut format, mut words, mut discard, mut prerolled) = (None, Vec::new(), 0u64, 0u64);
     for _ in 0..budget(bytes) {
         let r = step(
@@ -307,7 +352,7 @@ pub fn decode<D: Decoder>(
                     ending,
                 });
             }
-            Step::Progress(p) if p.status == Status::End => {
+            Step::Progress(p, _) if p.status == Status::End => {
                 after_end(d, &feed, Ending::End)?;
                 return Ok(Decoded {
                     format: format.or(d.format()),
@@ -315,7 +360,8 @@ pub fn decode<D: Decoder>(
                     ending: Ending::End,
                 });
             }
-            Step::Progress(_) => {}
+            Step::Progress(_, Some(to)) => feed.jump(to, limit)?,
+            Step::Progress(_, None) => {}
         }
     }
     violation("解码不前进（调用次数超过上限）")
@@ -409,6 +455,7 @@ pub fn check_seek<D: Decoder>(
             let (mut format, mut words, mut discard, mut prerolled) =
                 (None, Vec::new(), 0u64, 0u64);
             let (mut asked, mut sequential, mut ended) = (false, false, false);
+            let limit = jump_limit(source);
             for _ in 0..budget(source) {
                 let r = step(
                     &mut d,
@@ -422,10 +469,10 @@ pub fn check_seek<D: Decoder>(
                 if prerolled > target {
                     return violation(format!("定位到 {target}：预滚 {prerolled} 帧超过目标帧号"));
                 }
-                let p = match r {
-                    Step::Progress(p) => p,
+                let (p, parse) = match r {
+                    Step::Progress(p, parse) => (p, parse),
                     Step::Jump(at) => {
-                        feed.jump(usize::try_from(at).unwrap_or(usize::MAX));
+                        feed.jump(at, limit)?;
                         continue;
                     }
                     Step::Error(e) => {
@@ -443,7 +490,9 @@ pub fn check_seek<D: Decoder>(
                             if !d.pcm().is_empty() {
                                 return violation("seek 返回后未丢弃尚未取走的样本");
                             }
-                            feed.jump(usize::try_from(at).unwrap_or(usize::MAX));
+                            // 与核心相同：同一次调用中的读取跳转随之作废。
+                            feed.jump(at, limit)?;
+                            continue;
                         }
                         Err(SeekError::PastEnd) => {
                             if target < total {
@@ -465,6 +514,9 @@ pub fn check_seek<D: Decoder>(
                             take(&mut d, n, wpf, &mut words, &mut discard);
                         }
                     }
+                }
+                if let Some(to) = parse {
+                    feed.jump(to, limit)?;
                     continue;
                 }
                 if p.status == Status::End {
@@ -656,13 +708,23 @@ fn check_prefixes<X: PartialEq + core::fmt::Debug + Copy>(
     Ok(())
 }
 
-/// 只送 `head`（`eof` 为假），解码到缺输入为止；返回出现的错误。
+/// 只送 `head`（`eof` 为假），解码到缺输入为止；返回出现的错误。读取跳转（E6）落在 `head` 之内时
+/// 照做，落在之外时到此为止（前缀里没有更多数据）。
 fn decode_prefix<D: Decoder>(d: &mut D, head: &[u8]) -> Result<(), DecodeError> {
     d.reset();
     let mut pos = 0usize;
     for _ in 0..budget(head) {
         let p = d.decode(&head[pos..], false)?;
         pos += p.consumed.min(head.len() - pos);
+        if let Some(to) = d.take_jump() {
+            match usize::try_from(to) {
+                Ok(at) if at < head.len() => {
+                    pos = at;
+                    continue;
+                }
+                _ => return Ok(()),
+            }
+        }
         match p.status {
             Status::Frames(n) => d.release(n),
             Status::NeedOutput => {

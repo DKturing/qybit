@@ -26,7 +26,7 @@ use qy_host_embedded::{
 use qy_pcm_format::static_queue::StaticFrameQueue;
 use qy_pcm_format::{Endian, Placement};
 
-use crate::{ExtDecoder, Qyt1Decoder, leak};
+use crate::{ExtDecoder, Qyi1Decoder, Qyt1Decoder, leak};
 
 /// 配置档：Embedded Full（≤ 96 kHz、双声道、≤ 24 位）。
 pub const PROFILE: Profile = EMBEDDED_FULL;
@@ -127,14 +127,14 @@ impl Storage for Tracks {
         let Some((t, _)) = self.open else {
             return false;
         };
-        let len = self.items.get(t).map_or(0, |(_, b)| b.len());
-        match usize::try_from(offset) {
-            Ok(o) if self.seekable && o <= len => {
-                self.open = Some((t, o));
-                true
-            }
-            _ => false,
+        if !self.seekable {
+            return false;
         }
+        // 文件末尾或之后：停在末尾，之后读取返回 0（`Storage::seek` 的约定，E6）。
+        let len = self.items.get(t).map_or(0, |(_, b)| b.len());
+        let o = usize::try_from(offset).map_or(len, |o| o.min(len));
+        self.open = Some((t, o));
+        true
     }
 
     fn close(&mut self) {
@@ -283,7 +283,7 @@ pub type EmbeddedPlayer = Player<ExtDecoder, Tracks, VirtualI2s, SharedFeeder, Q
 
 // ---- 组装 ----
 
-/// 嵌入式组合解码器：WAV、AIFF、FLAC（MCU 容量）与 QYT1，工作区按配置档一次性取得。
+/// 嵌入式组合解码器：WAV、AIFF、FLAC（MCU 容量）、QYT1 与 QYI1，工作区按配置档一次性取得。
 pub fn decoder(qyt1_seekable: bool) -> ExtDecoder {
     decoder_with(if qyt1_seekable { Some(0) } else { None })
 }
@@ -316,30 +316,53 @@ pub fn decoder_with(qyt1: Option<u64>) -> ExtDecoder {
         Some(0) => Qyt1Decoder::new(pcm),
         Some(n) => Qyt1Decoder::with_packets(pcm, n),
     };
+    // QYI1（E6）：PCM 工作区 512 个样本，索引表 32 个包。
+    let qyi1 = match Qyi1Decoder::new(leak(512), leak(QYI1_PACKETS)) {
+        Ok(q) => q,
+        Err(e) => panic!("QYI1 工作区：{e:?}"),
+    };
     match qyt1 {
-        Ok(q) => ExtDecoder::new(q, auto),
+        Ok(q) => ExtDecoder::new(q, auto).with_qyi1(qyi1),
         Err(e) => panic!("QYT1 工作区：{e:?}"),
     }
 }
+
+/// 嵌入式 QYI1 索引表的容量（包数）。
+pub const QYI1_PACKETS: usize = 32;
+
+/// QYI1 的读取跳转声明（E6）：首次输出之前至多 2 次（跳到索引、跳回第一个包），数据阶段每个输入
+/// 单元之前至多 1 次（包之间的填充），定位一次至多 [`JUMP_US`]。
+pub const QYI1_HEADER_JUMPS: u32 = 2;
+/// 定位一次的最长耗时 `S`（µs）。读取与定位都不耗虚拟时间，取宽松而仍能通过预算核对的值。
+pub const JUMP_US: u32 = 100;
 
 /// 板级时序声明（µs）：读取与解码一个最大输入单元的最长耗时 `U` / `D`，打开曲目 `O`。这里读取
 /// 不耗虚拟时间，取宽松而仍能通过预算核对的值；真实板子按格式实测（见 `qy_host_embedded::budget`）。
 const OPEN_US: u32 = 1_000;
 
-/// 启用的每种格式的需求与时序。QYT1 没有现成的 `Demand` 构造：按公开字段自己声明——每样本至多
-/// 4 字节，输入单元为一次读取（`READ_CHUNK` 字节）。
-pub fn loads() -> [Load; 3] {
+/// 启用的每种格式的需求与时序。QYT1、QYI1 没有现成的 `Demand` 构造：按公开字段自己声明——每样本
+/// 至多 4 字节，输入单元为一次读取（`READ_CHUNK` 字节）。
+pub fn loads() -> [Load; 4] {
     let caps = PROFILE.caps;
     let Some(flac) = PROFILE.flac_capacity() else {
         panic!("Embedded Full 应启用 FLAC");
     };
     let small = qy_codec_flac::Capacity::for_limits(16, 2, 24).input_window as u32;
     let frame = u64::from(caps.max_channels) * 4;
+    let chunk = Demand {
+        bytes_per_sec: u64::from(caps.max_rate) * frame,
+        unit_bytes: READ_CHUNK,
+        unit_frames: (u64::from(READ_CHUNK) / frame) as u32,
+    };
     let load = |demand, unit_read_us, decode_us| Load {
         demand,
         unit_read_us,
         decode_us,
         open_us: OPEN_US,
+        // WAV、FLAC 与 QYT1 没有解码需要的跳转（E6）；QYI1 在下面单独声明。
+        header_jumps: 0,
+        unit_jumps: 0,
+        jump_us: 0,
     };
     [
         load(Demand::wav(&caps, 16_384), 2_000, 2_000),
@@ -353,15 +376,13 @@ pub fn loads() -> [Load; 3] {
             4_000,
             8_000,
         ),
-        load(
-            Demand {
-                bytes_per_sec: u64::from(caps.max_rate) * frame,
-                unit_bytes: READ_CHUNK,
-                unit_frames: (u64::from(READ_CHUNK) / frame) as u32,
-            },
-            100,
-            100,
-        ),
+        load(chunk, 100, 100),
+        Load {
+            header_jumps: QYI1_HEADER_JUMPS,
+            unit_jumps: 1,
+            jump_us: JUMP_US,
+            ..load(chunk, 100, 100)
+        },
     ]
 }
 
@@ -379,6 +400,16 @@ pub fn build_with(
     tracks: Tracks,
     decoder: ExtDecoder,
     policy: ErrorPolicy,
+) -> Result<(EmbeddedPlayer, Shared), BudgetError> {
+    build_with_loads(tracks, decoder, policy, &loads())
+}
+
+/// 同 [`build_with`]，时序声明由调用方给出（如核对跳转预算，E6）。
+pub fn build_with_loads(
+    tracks: Tracks,
+    decoder: ExtDecoder,
+    policy: ErrorPolicy,
+    loads: &[Load],
 ) -> Result<(EmbeddedPlayer, Shared), BudgetError> {
     let world = Rc::new(RefCell::new(World {
         now_us: 0,
@@ -413,7 +444,7 @@ pub fn build_with(
         VirtualI2s(world.clone()),
         SharedFeeder(world.clone()),
         READ_CHUNK,
-        &loads(),
+        loads,
     )?;
     Ok((player, world))
 }

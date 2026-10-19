@@ -2,6 +2,7 @@
 //! 输出，不修改任何 `qy-*` crate。
 //!
 //! - [`qyt1`]：示例格式 QYT1 的解码器（实现 `Decoder` + `Resources`），写法与自有解码器相同；
+//! - [`qyi1`]：示例格式 QYI1，索引在文件末尾的容器，演示解码需要的读取跳转（E6，`take_jump`）；
 //! - [`ExtDecoder`]：组装层的组合解码器——文件头是 `QYT1` 时用示例解码器，否则交给
 //!   `AutoDecoder`（WAV / FLAC / AIFF）。桌面经 `HostResources::with_decoder` 接入，嵌入式经
 //!   `qy_host_embedded::Player::new` 接入；
@@ -16,6 +17,7 @@
 pub mod embedded;
 mod formats;
 pub mod qyd1;
+pub mod qyi1;
 pub mod qyt1;
 
 use std::io::{self, Cursor, ErrorKind, Read, Seek, SeekFrom};
@@ -37,6 +39,7 @@ use qy_player::report::{AttemptRecord, Negotiation, OpenFailure, Submission};
 use qy_player::{Backend, Diagnostics, PendingStream, RunningStream, TrackSource};
 
 pub use formats::{EXT_EXTENSIONS, ExtFormats};
+pub use qyi1::{Qyi1Decoder, Qyi1Detail};
 pub use qyt1::{Qyt1Decoder, Qyt1Detail};
 
 // ---- 组装：组合解码器 ----
@@ -44,18 +47,22 @@ pub use qyt1::{Qyt1Decoder, Qyt1Detail};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Active {
     Qyt1,
+    Qyi1,
     Auto,
 }
 
-/// 组合解码器：按文件头识别（E3）选择 QYT1 或 `AutoDecoder`。两者的工作区都由宿主提供，换曲时
+/// 组合解码器：按文件头识别（E3）选择 QYT1、QYI1 或 `AutoDecoder`。工作区都由宿主提供，换曲时
 /// 复用。
 ///
 /// 路由不缓存文件头：先问官方解码器（`AutoDecoder::identify`，不消耗输入），不是官方格式时再问
-/// QYT1 自己的识别函数；还不能回答时返回 `NeedInput`、不消耗输入，由核心的输入窗口攒够字节。
+/// QYT1、QYI1 自己的识别函数；还不能回答时返回 `NeedInput`、不消耗输入，由核心的输入窗口攒够字节。
+/// 识别回答 `NeedMore { container: true }`（已认领容器、子类型还没读到）时立即转交，不等字节攒够
+/// （QYI1 的索引在文件末尾，前缀里读不到，E6 §2.5）。
 /// 文件开头的 ID3v2 标签（识别给出 `Skip`）由路由层按长度跳过，只记一个计数：选中的解码器从
-/// 标签之后开始，定位位置加回标签长度。
+/// 标签之后开始，它给出的定位位置与读取跳转位置都加回标签长度。
 pub struct ExtDecoder {
     qyt1: Qyt1Decoder,
+    qyi1: Option<Qyi1Decoder>,
     auto: AutoDecoder,
     active: Option<Active>,
     /// 当前标签尚未跳过的字节数。
@@ -68,11 +75,18 @@ impl ExtDecoder {
     pub fn new(qyt1: Qyt1Decoder, auto: AutoDecoder) -> Self {
         Self {
             qyt1,
+            qyi1: None,
             auto,
             active: None,
             tag_left: 0,
             tag_bytes: 0,
         }
+    }
+
+    /// 同时接入 QYI1（E6）。
+    pub fn with_qyi1(mut self, qyi1: Qyi1Decoder) -> Self {
+        self.qyi1 = Some(qyi1);
+        self
     }
 
     /// 核心输入窗口须满足的最小容量（QYT1 不需要大于一帧的窗口，取 `AutoDecoder` 的要求）。
@@ -108,8 +122,12 @@ impl ExtDecoder {
             Some(0) => Qyt1Decoder::new(pcm),
             Some(n) => Qyt1Decoder::with_packets(pcm, n),
         };
+        let qyi1 = match Qyi1Decoder::new(leak(qy_core::PCM_WORK_SAMPLES), leak(1024)) {
+            Ok(q) => q,
+            Err(e) => panic!("QYI1 工作区：{e:?}"),
+        };
         match qyt1 {
-            Ok(q) => Self::new(q, auto),
+            Ok(q) => Self::new(q, auto).with_qyi1(qyi1),
             Err(e) => panic!("QYT1 工作区：{e:?}"),
         }
     }
@@ -121,6 +139,15 @@ impl ExtDecoder {
 
     pub fn qyt1(&self) -> &Qyt1Decoder {
         &self.qyt1
+    }
+
+    /// 当前曲目选中的解码器是不是 QYI1。
+    pub fn is_qyi1(&self) -> bool {
+        self.active == Some(Active::Qyi1)
+    }
+
+    pub fn qyi1(&self) -> Option<&Qyi1Decoder> {
+        self.qyi1.as_ref()
     }
 
     pub fn auto(&self) -> &AutoDecoder {
@@ -136,6 +163,9 @@ pub fn leak<T: Default + Clone>(n: usize) -> &'static mut [T] {
 impl qy_core::Decoder for ExtDecoder {
     fn reset(&mut self) {
         self.qyt1.reset();
+        if let Some(q) = self.qyi1.as_mut() {
+            q.reset();
+        }
         self.auto.reset();
         self.active = None;
         self.tag_left = 0;
@@ -145,6 +175,7 @@ impl qy_core::Decoder for ExtDecoder {
     fn format(&self) -> Option<SourceFormat> {
         match self.active? {
             Active::Qyt1 => self.qyt1.format(),
+            Active::Qyi1 => self.qyi1.as_ref()?.format(),
             Active::Auto => self.auto.format(),
         }
     }
@@ -188,17 +219,28 @@ impl qy_core::Decoder for ExtDecoder {
                         status: Status::NeedInput,
                     });
                 }
-                _ => match qyt1::identify(head, eof) {
-                    r if r.is_mine() => Active::Qyt1,
-                    Identify::NeedMore { .. } => {
+                _ => {
+                    let t = qyt1::identify(head, eof);
+                    let i = match self.qyi1 {
+                        Some(_) => qyi1::identify(head, eof),
+                        None => Identify::Foreign,
+                    };
+                    if t.is_mine() {
+                        Active::Qyt1
+                    } else if i.is_mine() {
+                        Active::Qyi1
+                    } else if matches!(t, Identify::NeedMore { .. })
+                        || matches!(i, Identify::NeedMore { .. })
+                    {
                         return Ok(Progress {
                             consumed: pos,
                             status: Status::NeedInput,
                         });
+                    } else {
+                        // 都不是：交给 `AutoDecoder`，由它说明无法识别的原因。
+                        Active::Auto
                     }
-                    // 都不是：交给 `AutoDecoder`，由它说明无法识别的原因。
-                    _ => Active::Auto,
-                },
+                }
             };
             self.active = Some(a);
             break a;
@@ -206,6 +248,10 @@ impl qy_core::Decoder for ExtDecoder {
         let input = &input[pos..];
         let r = match active {
             Active::Qyt1 => self.qyt1.decode(input, eof),
+            Active::Qyi1 => match self.qyi1.as_mut() {
+                Some(q) => q.decode(input, eof),
+                None => Err(DecodeError::Unsupported),
+            },
             Active::Auto => self.auto.decode(input, eof),
         };
         r.map(|p| Progress {
@@ -217,6 +263,7 @@ impl qy_core::Decoder for ExtDecoder {
     fn pcm(&self) -> &[i32] {
         match self.active {
             Some(Active::Qyt1) => self.qyt1.pcm(),
+            Some(Active::Qyi1) => self.qyi1.as_ref().map_or(&[], |q| q.pcm()),
             Some(Active::Auto) => self.auto.pcm(),
             None => &[],
         }
@@ -225,6 +272,11 @@ impl qy_core::Decoder for ExtDecoder {
     fn release(&mut self, frames: usize) {
         match self.active {
             Some(Active::Qyt1) => self.qyt1.release(frames),
+            Some(Active::Qyi1) => {
+                if let Some(q) = self.qyi1.as_mut() {
+                    q.release(frames);
+                }
+            }
             Some(Active::Auto) => self.auto.release(frames),
             None => {}
         }
@@ -235,6 +287,10 @@ impl qy_core::Decoder for ExtDecoder {
         let tag = self.tag_bytes;
         let r = match self.active {
             Some(Active::Qyt1) => self.qyt1.seek(frame),
+            Some(Active::Qyi1) => match self.qyi1.as_mut() {
+                Some(q) => q.seek(frame),
+                None => Err(SeekError::Unsupported),
+            },
             Some(Active::Auto) => self.auto.seek(frame),
             None => Err(SeekError::Unsupported),
         };
@@ -245,6 +301,7 @@ impl qy_core::Decoder for ExtDecoder {
         let tag = self.tag_bytes;
         let r = match self.active {
             Some(Active::Qyt1) => self.qyt1.seek_request(),
+            Some(Active::Qyi1) => self.qyi1.as_mut().and_then(|q| q.seek_request()),
             Some(Active::Auto) => self.auto.seek_request(),
             None => None,
         };
@@ -254,9 +311,23 @@ impl qy_core::Decoder for ExtDecoder {
     fn take_preroll(&mut self) -> u64 {
         match self.active {
             Some(Active::Qyt1) => self.qyt1.take_preroll(),
+            Some(Active::Qyi1) => self.qyi1.as_mut().map_or(0, |q| q.take_preroll()),
             Some(Active::Auto) => self.auto.take_preroll(),
             None => 0,
         }
+    }
+
+    /// 读取跳转（E6）原样转出，加回路由层跳过的标签长度（内层解码器的位置从标签之后算起）。
+    fn take_jump(&mut self) -> Option<u64> {
+        let tag = self.tag_bytes;
+        let r = match self.active {
+            Some(Active::Qyt1) => self.qyt1.take_jump(),
+            Some(Active::Qyi1) => self.qyi1.as_mut().and_then(|q| q.take_jump()),
+            Some(Active::Auto) => self.auto.take_jump(),
+            None => None,
+        };
+        // 位置加上标签长度溢出：只能是坏文件，跳到末尾（之后得到 EOF）。
+        r.map(|o| o.saturating_add(tag))
     }
 }
 
@@ -296,6 +367,11 @@ impl Diagnostics for ExtDecoder {
             Some(Active::Qyt1) => {
                 if let Some(d) = self.qyt1.last_detail() {
                     out.push(format!("QYT1 错误明细：{d}"));
+                }
+            }
+            Some(Active::Qyi1) => {
+                if let Some(q) = &self.qyi1 {
+                    q.failure_details(out);
                 }
             }
             Some(Active::Auto) => self.auto.failure_details(out),

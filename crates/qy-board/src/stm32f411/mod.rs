@@ -625,6 +625,10 @@ fn main() -> ! {
         unit_read_us: UNMEASURED_WAV_READ_US,
         decode_us: UNMEASURED_WAV_DECODE_US,
         open_us: UNMEASURED_OPEN_US,
+        // 官方格式没有解码需要的跳转（E6）。
+        header_jumps: 0,
+        unit_jumps: 0,
+        jump_us: 0,
     }];
     let mut player = match Player::new(
         engine,

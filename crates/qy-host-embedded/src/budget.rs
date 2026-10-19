@@ -9,16 +9,26 @@
 //! - `O`：**打开一首曲目的最长耗时**（板级实测：目录查找与读取目录项；不含簇链——FAT 存储打开时
 //!   不沿整条簇链走，读取时逐跳核对，计入 `U`，见 [`crate::storage`]）；
 //! - `T`：最长的 DMA 缓冲周期（最低采样率下一个缓冲的时长）；
-//! - `R`：源的最大字节率（字节/秒，见 [`Demand`]）；`fs`：最高采样率；`P`：配置档的预填时长。
+//! - `R`：源的最大字节率（字节/秒，见 [`Demand`]）；`fs`：最高采样率；`P`：配置档的预填时长；
+//! - `S`：**定位一次的最长耗时**（板级实测：在测试文件中跳到任意位置，含 FAT 簇链查找）；
+//! - `J`、`k`：解码需要的读取跳转（E6，`Decoder::take_jump`）的次数上界——`J` 为一首曲目首次输出
+//!   之前（文件头阶段，如索引在文件末尾的容器）至多几次，`k` 为数据阶段每个输入单元之前至多几次
+//!   （块交错的容器）。由格式（插件）声明，官方格式都是 0。
 //!
 //! 按启用的每种格式分别核对（同一时刻只播放一种格式，各自的 `W`、`U`、`D` 不同），都满足才启动：
-//! 1. **持续负载**：读取与解码占用的时间比例不超过 1：`R · U / W / 10⁶ + D · fs / F / 10⁶ ≤ 1`。
+//! 1. **持续负载**：读取与解码占用的时间比例不超过 1：`R · (U + k·S) / W / 10⁶ + D · fs / F / 10⁶ ≤ 1`。
 //!    读取是阻塞的（SPI/SDIO 传输占用主循环），所以读取时间与解码时间相加；每秒要读 `R / W` 个单元，
-//!    每个至多 `U`。
-//! 2. **预填**：`P ≥ O + U + D + T`。最坏情况下，开始读取一个最大输入单元时队列只剩预填量：读取这个
-//!    单元（至多 `U`）、解码（至多 `D`），数据入队后还要等到下一个 DMA 缓冲边界（至多 `T`）才会被
-//!    取走；这段时间内设备持续取数，队列不得取空。换曲时，在读取下一首的第一个单元之前还要先打开它
-//!    （至多 `O`），期间设备仍在播放上一首排队的音频。条件 1 保证此后队列不会越来越空。
+//!    每个至多 `U`，之前至多跳转 `k` 次。
+//! 2. **预填**：`P ≥ O + J·(S + U) + U + k·S + D + T`。最坏情况下，开始读取一个最大输入单元时队列只剩
+//!    预填量：读取这个单元（至多 `U`，之前至多跳转 `k` 次）、解码（至多 `D`），数据入队后还要等到
+//!    下一个 DMA 缓冲边界（至多 `T`）才会被取走；这段时间内设备持续取数，队列不得取空。换曲时，在读取
+//!    下一首的第一个单元之前还要先打开它（至多 `O`）并完成文件头阶段的跳转（每次定位至多 `S`、
+//!    读取至多 `U`），期间设备仍在播放上一首排队的音频。条件 1 保证此后队列不会越来越空。
+//! 3. **定位响应**（只报告，不作启动条件）：用户定位时引擎停止设备、重新打开曲目并定位，到目标处的
+//!    第一个单元解码完成至多 `O + J·(S + U) + S + U + D`。
+//!
+//! 运行时，一首曲目首次输出之前的解析跳转超过声明的 `J` 时，宿主给出通知（见 `Notice`）；`k` 只按
+//! 声明计入公式，运行时不核对。超出声明的文件仍可能欠载，欠载照常计数与报告。
 //!
 //! 未计入的部分：下一首的文件头阶段若要读过很大的元数据（例如 FLAC 中内嵌的大幅图片），读取量取决于
 //! 文件本身，不能由板级常数给出上界；这类文件在换曲时仍可能欠载，欠载照常计数与报告。
@@ -39,6 +49,12 @@ pub struct Load {
     pub decode_us: u32,
     /// 打开一首曲目的最长耗时 `O`（µs；同一存储对各格式相同）。
     pub open_us: u32,
+    /// 首次输出之前至多几次解码需要的跳转 `J`（E6；格式声明，官方格式为 0）。
+    pub header_jumps: u32,
+    /// 数据阶段每个输入单元之前至多几次跳转 `k`（E6；格式声明，官方格式为 0）。
+    pub unit_jumps: u32,
+    /// 定位一次的最长耗时 `S`（µs；板级实测，同一存储对各格式相同；没有跳转的格式可为 0）。
+    pub jump_us: u32,
 }
 
 /// 源对读取的需求（按配置档的能力上限计算）。
@@ -85,10 +101,14 @@ impl Demand {
 pub struct Margins {
     /// 持续负载（千分比，≤ 1000）。
     pub load_permille: u64,
-    /// 最坏情况所需预填 `O + U + D + T`（µs）。
+    /// 最坏情况所需预填 `O + J·(S + U) + U + k·S + D + T`（µs）。
     pub required_prefill_us: u64,
     /// 配置档的预填 `P`（µs）。
     pub prefill_us: u64,
+    /// 定位响应 `O + J·(S + U) + S + U + D`（µs，只报告）。
+    pub seek_response_us: u64,
+    /// 首次输出之前至多几次解析跳转（各格式 `J` 的最大值）。
+    pub header_jumps: u32,
 }
 
 /// 时序不足。
@@ -103,6 +123,8 @@ pub enum BudgetError {
         required_us: u64,
         prefill_us: u64,
         open_us: u64,
+        /// 解码需要的跳转：`J·(S + U) + k·S`。
+        jumps_us: u64,
         read_us: u64,
         decode_us: u64,
         period_us: u64,
@@ -125,14 +147,23 @@ impl fmt::Display for BudgetError {
                 required_us,
                 prefill_us,
                 open_us,
+                jumps_us,
                 read_us,
                 decode_us,
                 period_us,
-            } => write!(
-                f,
-                "预填 {prefill_us} µs 不足：最坏情况需要 {required_us} µs（换曲时打开曲目 {open_us} \
-                 + 读取最大输入单元 {read_us} + 解码 {decode_us} + DMA 周期 {period_us}）"
-            ),
+            } => {
+                write!(
+                    f,
+                    "预填 {prefill_us} µs 不足：最坏情况需要 {required_us} µs（换曲时打开曲目 {open_us}"
+                )?;
+                if *jumps_us > 0 {
+                    write!(f, " + 解码需要的跳转 {jumps_us}")?;
+                }
+                write!(
+                    f,
+                    " + 读取最大输入单元 {read_us} + 解码 {decode_us} + DMA 周期 {period_us}）"
+                )
+            }
         }
     }
 }
@@ -147,6 +178,8 @@ pub fn check(caps: &Capabilities, loads: &[Load], period_us: u64) -> Result<Marg
                 load_permille: w.load_permille.max(m.load_permille),
                 required_prefill_us: w.required_prefill_us.max(m.required_prefill_us),
                 prefill_us: m.prefill_us,
+                seek_response_us: w.seek_response_us.max(m.seek_response_us),
+                header_jumps: w.header_jumps.max(m.header_jumps),
             },
             None => m,
         });
@@ -162,21 +195,28 @@ pub fn check_one(caps: &Capabilities, load: &Load, period_us: u64) -> Result<Mar
     }
     let u = u64::from(load.unit_read_us);
     let d = u64::from(load.decode_us);
-    // 千分比，各项向上取整：R·U/W/10³ 与 D·fs/F/10³。
-    let read_load = (demand.bytes_per_sec * u).div_ceil(u64::from(demand.unit_bytes) * 1000);
+    let s = u64::from(load.jump_us);
+    let j = u64::from(load.header_jumps);
+    let k = u64::from(load.unit_jumps);
+    // 每个输入单元的读取（含其前至多 k 次跳转）。各量为 32 位输入的积，64 位不会溢出。
+    let unit = u + k * s;
+    // 千分比，各项向上取整：R·(U + k·S)/W/10³ 与 D·fs/F/10³。
+    let read_load = (demand.bytes_per_sec * unit).div_ceil(u64::from(demand.unit_bytes) * 1000);
     let decode_load = (d * u64::from(caps.max_rate)).div_ceil(u64::from(demand.unit_frames) * 1000);
     let load_permille = read_load + decode_load;
     if load_permille > 1000 {
         return Err(BudgetError::Load { load_permille });
     }
     let o = u64::from(load.open_us);
-    let required_us = o + u + d + period_us;
+    let header = j * (s + u);
+    let required_us = o + header + unit + d + period_us;
     let prefill_us = u64::from(caps.prefill_ms) * 1000;
     if prefill_us < required_us {
         return Err(BudgetError::Prefill {
             required_us,
             prefill_us,
             open_us: o,
+            jumps_us: header + k * s,
             read_us: u,
             decode_us: d,
             period_us,
@@ -186,6 +226,8 @@ pub fn check_one(caps: &Capabilities, load: &Load, period_us: u64) -> Result<Mar
         load_permille,
         required_prefill_us: required_us,
         prefill_us,
+        seek_response_us: o + header + s + u + d,
+        header_jumps: load.header_jumps,
     })
 }
 
@@ -207,6 +249,9 @@ mod tests {
             unit_read_us: u,
             decode_us: d,
             open_us: 0,
+            header_jumps: 0,
+            unit_jumps: 0,
+            jump_us: 0,
         }
     }
 
@@ -222,7 +267,9 @@ mod tests {
             Ok(Margins {
                 load_permille: 689,
                 required_prefill_us: 36_334,
-                prefill_us: 250_000
+                prefill_us: 250_000,
+                seek_response_us: 31_000,
+                header_jumps: 0
             })
         );
         // 预填不足（字节率设为 1，只看预填）：230000 + 20000 + 5334 = 255 334 > 250 000。
@@ -234,6 +281,7 @@ mod tests {
                 required_us: 255_334,
                 prefill_us: 250_000,
                 open_us: 0,
+                jumps_us: 0,
                 read_us: 230_000,
                 decode_us: 20_000,
                 period_us: 5_334
@@ -255,6 +303,7 @@ mod tests {
                 required_us: 250_334,
                 prefill_us: 250_000,
                 open_us: 214_000,
+                jumps_us: 0,
                 read_us: 11_000,
                 decode_us: 20_000,
                 period_us: 5_334
@@ -284,6 +333,9 @@ mod tests {
             unit_read_us: 9_000,
             decode_us: 1_000,
             open_us: 0,
+            header_jumps: 0,
+            unit_jumps: 0,
+            jump_us: 0,
         };
         // WAV：768000 × 9000 / 16384 / 1000 = 421.875 → 422；1000 × 96000 / 2048 / 1000 = 46.875 → 47。
         let m = check(&CAPS, &[wav, flac(11_000, 20_000)], 5_334);
@@ -292,7 +344,9 @@ mod tests {
             Ok(Margins {
                 load_permille: 689,
                 required_prefill_us: 36_334,
-                prefill_us: 250_000
+                prefill_us: 250_000,
+                seek_response_us: 31_000,
+                header_jumps: 0
             })
         );
         assert_eq!(
@@ -307,5 +361,57 @@ mod tests {
             check(&CAPS, &[bad_wav, flac(11_000, 20_000)], 5_334),
             Err(BudgetError::Load { .. })
         ));
+    }
+
+    /// E6：解码需要的跳转。独立手算：FLAC 窗口同上，U = 11 ms，D = 20 ms，T = 5.334 ms，O = 15 ms，
+    /// S = 4 ms，J = 3，k = 1。
+    #[test]
+    fn jumps_by_hand() {
+        let l = Load {
+            open_us: 15_000,
+            header_jumps: 3,
+            unit_jumps: 1,
+            jump_us: 4_000,
+            ..flac(11_000, 20_000)
+        };
+        // 读：696000 × (11000 + 4000) / 28244 / 1000 = 369.63… → 370；解码 417；合计 787。
+        // 预填：15000 + 3 × (4000 + 11000) + 11000 + 4000 + 20000 + 5334 = 100 334。
+        // 定位响应：15000 + 45000 + 4000 + 11000 + 20000 = 95 000。
+        assert_eq!(
+            check(&CAPS, &[l], 5_334),
+            Ok(Margins {
+                load_permille: 787,
+                required_prefill_us: 100_334,
+                prefill_us: 250_000,
+                seek_response_us: 95_000,
+                header_jumps: 3
+            })
+        );
+        // J = 13：15000 + 13 × 15000 + 15000 + 20000 + 5334 = 250 334 > 250 000，只差跳转。
+        let many = Load {
+            header_jumps: 13,
+            ..l
+        };
+        assert_eq!(
+            check(&CAPS, &[many], 5_334),
+            Err(BudgetError::Prefill {
+                required_us: 250_334,
+                prefill_us: 250_000,
+                open_us: 15_000,
+                jumps_us: 13 * 15_000 + 4_000,
+                read_us: 11_000,
+                decode_us: 20_000,
+                period_us: 5_334
+            })
+        );
+        // 多种格式：取各自 J 的最大值。
+        let none = Load {
+            open_us: 15_000,
+            ..flac(11_000, 20_000)
+        };
+        assert_eq!(
+            check(&CAPS, &[none, l], 5_334).map(|m| m.header_jumps),
+            Ok(3)
+        );
     }
 }

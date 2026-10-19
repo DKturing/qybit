@@ -87,7 +87,7 @@ fn formats_lists_example_extensions() {
 fn cli_help_lists_example_format() {
     let (ok, out, _) = qybit_ext(&["--help"]);
     assert!(ok);
-    assert!(out.contains("WAV / FLAC / AIFF / QYT1"), "{out}");
+    assert!(out.contains("WAV / FLAC / AIFF / QYT1 / QYI1"), "{out}");
 }
 
 /// `--device` 的值是示例格式的文件名时，与官方格式一样说明设备 ID 没有传进来。
@@ -183,7 +183,7 @@ fn ui_lists_and_plays_example_format() {
         move |_device: Option<&str>| Ok(backend.clone()),
         Arc::new(|| {}),
     );
-    assert_eq!(ui.format_names(), "WAV / FLAC / AIFF / QYT1");
+    assert_eq!(ui.format_names(), "WAV / FLAC / AIFF / QYT1 / QYI1");
     ui.add_paths(vec![dir.clone()]);
     assert!(until(&mut ui, 10, |u| {
         u.model.entries.len() == 3 && u.model.entries.iter().all(|e| e.probe != Probe::Pending)

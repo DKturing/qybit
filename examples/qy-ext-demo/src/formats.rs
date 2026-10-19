@@ -11,9 +11,9 @@ use qy_player::{Diagnostics, Formats, HostResources, Probe, TrackInfo};
 
 use crate::ExtDecoder;
 
-/// 官方解码器的扩展名再加示例格式（`.qyt1` 无损、`.qyl1` 有损）。
-pub const EXT_EXTENSIONS: [&str; BUILTIN_EXTENSIONS.len() + 2] = {
-    let mut all = [""; BUILTIN_EXTENSIONS.len() + 2];
+/// 官方解码器的扩展名再加示例格式（`.qyt1` 无损、`.qyl1` 有损、`.qyi1` 索引在后）。
+pub const EXT_EXTENSIONS: [&str; BUILTIN_EXTENSIONS.len() + 3] = {
+    let mut all = [""; BUILTIN_EXTENSIONS.len() + 3];
     let mut i = 0;
     while i < BUILTIN_EXTENSIONS.len() {
         all[i] = BUILTIN_EXTENSIONS[i];
@@ -21,10 +21,11 @@ pub const EXT_EXTENSIONS: [&str; BUILTIN_EXTENSIONS.len() + 2] = {
     }
     all[i] = "qyt1";
     all[i + 1] = "qyl1";
+    all[i + 2] = "qyi1";
     all
 };
 
-/// 示例格式集合：WAV / FLAC / AIFF（`AutoDecoder`）与 QYT1（[`ExtDecoder`]）。
+/// 示例格式集合：WAV / FLAC / AIFF（`AutoDecoder`）与 QYT1、QYI1（[`ExtDecoder`]）。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExtFormats;
 
@@ -57,7 +58,7 @@ impl Formats for ExtFormats {
     }
 
     fn names(&self) -> &str {
-        "WAV / FLAC / AIFF / QYT1"
+        "WAV / FLAC / AIFF / QYT1 / QYI1"
     }
 }
 
@@ -86,7 +87,10 @@ impl Probe for ExtProbe {
                 });
             }
         };
-        let (label, frames) = if self.decoder.is_qyt1() {
+        let (label, frames) = if self.decoder.is_qyi1() {
+            let frames = self.decoder.qyi1().and_then(|q| q.declared_frames());
+            ("QYI1", frames)
+        } else if self.decoder.is_qyt1() {
             let label = if format.is_lossy() { "QYL1" } else { "QYT1" };
             (label, self.decoder.qyt1().declared_frames())
         } else {

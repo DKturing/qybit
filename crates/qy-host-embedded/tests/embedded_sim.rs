@@ -254,6 +254,7 @@ fn insufficient_timing_is_rejected_at_startup() {
         required_us: 270_334,
         prefill_us: 250_000,
         open_us: 15_000,
+        jumps_us: 0,
         read_us: 230_000,
         decode_us: 20_000,
         period_us: 5_334,

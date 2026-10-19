@@ -10,12 +10,12 @@
 //! `Send + Sync`。
 
 use std::fs::File;
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use qy_codec_auto::{AutoDecoder, Codec};
 use qy_core::engine::Resources;
-use qy_core::{DecodeError, Decoder, SourceFormat, Status};
+use qy_core::{DecodeError, Decoder, Jump, JumpGuard, SourceFormat, Status};
 
 use crate::{Diagnostics, HostError, HostResources};
 
@@ -106,12 +106,15 @@ fn host_error(e: &HostError) -> String {
     format!("播放资源分配失败：{e:?}")
 }
 
-/// 每次读取的字节数；文件头读取的总量上限（元数据过大时放弃显示，不影响播放）。
+/// 每次读取的字节数；文件头读取的总量上限（按实际读取的字节累计，跳转后重复读取的也计入；元数据
+/// 过大时放弃显示，不影响播放）。
 const CHUNK: usize = 64 * 1024;
 const READ_LIMIT: usize = 16 * 1024 * 1024;
 
 /// 用 `decoder` 读取 `path` 的文件头，直到格式确定或出错（插件实现 [`Probe`] 时可直接用）。
-/// `window` 为复用的读取缓冲；`limit` 为解码器需要的最大输入窗口（超过 16 MiB 时按 16 MiB）。
+/// `window` 为复用的读取缓冲；`limit` 为解码器需要的最大输入窗口（超过 16 MiB 时按 16 MiB）；
+/// 读取总量至多 16 MiB。解码需要的读取跳转（E6，`Decoder::take_jump`）按与核心相同的规则执行
+/// （`qy_core::JumpGuard`）：跳转后旧位置的输入与 EOF 作废，从新位置读取。
 /// 出错时给出解码错误，原因的文字由调用方按自己的明细补充。
 pub fn read_header<D: Decoder>(
     decoder: &mut D,
@@ -124,15 +127,31 @@ pub fn read_header<D: Decoder>(
     window.clear();
     let limit = limit.min(READ_LIMIT);
     let mut eof = false;
+    let mut guard = JumpGuard::new();
+    let mut total = 0usize;
     loop {
         let progress = decoder.decode(window, eof).map_err(HeaderError::Decode)?;
         let consumed = progress.consumed.min(window.len());
         window.drain(..consumed);
+        let to = match guard.take(decoder, progress.status) {
+            Ok(Jump::None) => None,
+            Ok(Jump::Parse(o) | Jump::Seek(o)) => Some(o),
+            Err(f) => return Err(HeaderError::Io(f.to_string())),
+        };
+        // 读到第一个样本即可：同一次调用中的跳转不再执行。
+        if let (Some(o), Status::NeedInput) = (to, progress.status) {
+            file.seek(SeekFrom::Start(o))
+                .map_err(|e| HeaderError::Io(format!("{}：{e}", qy_core::JumpFault::Unseekable)))?;
+            window.clear();
+            eof = false;
+            guard.restart();
+            continue;
+        }
         match progress.status {
             Status::Frames(_) | Status::NeedOutput | Status::End => break,
             Status::NeedInput if eof => return Err(HeaderError::Io("文件不完整".into())),
             Status::NeedInput => {
-                if window.len() >= limit {
+                if window.len() >= limit || total >= READ_LIMIT {
                     return Err(HeaderError::Io("文件头过大，无法读取格式".into()));
                 }
                 let old = window.len();
@@ -144,6 +163,8 @@ pub fn read_header<D: Decoder>(
                     }
                 };
                 window.truncate(old + n);
+                total = total.saturating_add(n);
+                guard.on_read(n);
                 eof = n == 0;
             }
         }

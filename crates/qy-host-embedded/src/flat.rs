@@ -129,16 +129,13 @@ where
         let Some(t) = self.tracks.get(track as usize) else {
             return false;
         };
-        match u32::try_from(offset)
+        // 文件末尾或之后：移到末尾，之后读取返回 0（E6）。
+        let pos = u32::try_from(offset)
             .ok()
             .and_then(|o| t.offset.checked_add(o))
-        {
-            Some(pos) if pos <= end => {
-                self.open = Some((pos, end));
-                true
-            }
-            _ => false,
-        }
+            .map_or(end, |p| p.min(end));
+        self.open = Some((pos, end));
+        true
     }
 
     fn close(&mut self) {

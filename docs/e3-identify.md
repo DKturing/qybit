@@ -27,6 +27,7 @@ qy_codec_flac::identify(head, eof) -> Identify<FlacError>
 AutoDecoder::identify(&self, head, eof) -> (Codec, Identify<AutoDetail>)   // 按本解码器启用的格式
 ```
 
+- E6 补充：`NeedMore { container: true }` 表示已认领这个容器，路由层可以提前转交，不表示子格式已经支持；`total` 可能大于输入窗口（索引在文件末尾的容器），路由层见到 `container: true` 即转交，不为攒够 `total` 而等待（[tasks/E6.md](../tasks/E6.md) §2.5）。
 - `head` 总是从文件开头算起的前若干字节；不消耗，可以反复用更长的前缀再问。
 - `NeedMore { total }` 是下界：少于 `total` 字节的任何前缀都不会给出结论。标记还没读全时 `total` 为已给字节数 + 1（下一个字节就可能排除本格式）。
 - 需要的字节数由文件决定，没有固定上限：WAV 的 `fmt ` 之前、AIFF 的 COMM 之前、FLAC 的 STREAMINFO 之后都可以有任意大的块（如 FLAC 嵌入的图片）。16 位双声道 WAV 还要读 data 开头的 4096 字节，确认不是伪装成 PCM 的 DTS / IEC 61937 码流。`container` 为真时文件头标记已经符合，路由层的窗口装不下 `total` 时可以据此直接交给该解码器（它流式跳过大块）。

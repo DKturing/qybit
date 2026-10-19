@@ -47,12 +47,12 @@ qy-testkit = { git = "https://github.com/DKturing/qybit", tag = "v0.1.0" }   # �
 
 | crate | 内容 |
 | --- | --- |
-| `qy-core` | `Decoder`、`Status`、`Progress`、`DecodeError`、`SeekError`、`Identify`、`magic_matches`；`SourceFormat`、`ChannelLayout`、`SampleEncoding` 与 DSD 类型（重新导出自 `qy-pcm-format`）；容量常量（`INPUT_WINDOW_BYTES`、`PCM_WORK_SAMPLES`、`MAX_CHANNELS` 等）；`engine` 的 `Resources` 与宿主所用的 `Engine`、`HostAction`、配置档；`Core` / `Action` / `Event`（M0 T4 起冻结） |
+| `qy-core` | `Decoder`（含 E6 的 `take_jump`）、`Status`、`Progress`、`DecodeError`、`SeekError`、`Identify`、`magic_matches`；读取跳转的 `JumpGuard`、`Jump`、`JumpFault`、`ParseJump`（E6）；`SourceFormat`、`ChannelLayout`、`SampleEncoding` 与 DSD 类型（重新导出自 `qy-pcm-format`）；容量常量（`INPUT_WINDOW_BYTES`、`PCM_WORK_SAMPLES`、`MAX_CHANNELS` 等）；`engine` 的 `Resources` 与宿主所用的 `Engine`、`HostAction`、配置档；`Core` / `Action` / `Event`（M0 T4 起冻结） |
 | `qy-pcm-format` | `DeviceFormat`、DSD 传输类型、`pack`、帧队列的公开类型（`ring`、`static-queue` 特性） |
 | `qy-codec-wav` / `-flac` / `-aiff` | 解码器构造函数、`identify`、错误明细类型 |
 | `qy-codec-auto` | `AutoDecoder`（构造、`identify`、`codec`、明细）、`Codec`、`AutoDetail`、`profile` 配置档、`wav` / `flac` / `aiff` 特性 |
 | `qy-player` | `HostResources::with_decoder`、`Diagnostics`、`Formats` / `Builtin` / `Probe` / `TrackInfo` / `read_header`（E2）、`Backend` / `PendingStream` / `RunningStream`、`TrackSource`、`play_with` / `PlayControl` / `Command` / `command_channel` / `Status`、`PlaybackReport` 的字段与方法 |
-| `qy-host-embedded` | 存储、输出与喂数器的 trait 及宿主入口（板级适配用） |
+| `qy-host-embedded` | 存储、输出与喂数器的 trait 及宿主入口（板级适配用）；时序预算 `budget::Load` / `Margins`（E6 起含读取跳转的 `J`、`k`、`S`） |
 | `qybit` / `qybit-gui` | `qybit::run`、`qybit::run_args`、`qybit_gui::run`（E2） |
 | `qy-testkit` | 契约测试工具，见 §4 |
 

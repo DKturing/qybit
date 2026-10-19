@@ -20,6 +20,7 @@ use crate::render::{RenderEnd, RenderReport};
 /// 故障说明：核心故障按原名（如 `Configure`、`Decode(Malformed)`），能力不足给出具体原因。
 pub fn fault_text(fault: &EngineFault) -> String {
     match fault {
+        EngineFault::Core(qy_core::Fault::Jump(j)) => format!("Jump({j:?})：{j}"),
         EngineFault::Core(f) => format!("{f:?}"),
         EngineFault::Capability(e) => format!("能力不足：{e}"),
         EngineFault::Output => "输出队列错误".into(),
@@ -310,6 +311,9 @@ pub struct PlaybackReport<A> {
     pub sequential_seeks: Vec<u32>,
     /// 定位预滚（E5）：曲目与解码并丢弃的帧数（样本精确，见 `Decoder::take_preroll`）。
     pub seek_prerolls: Vec<(u32, u64)>,
+    /// 解码需要的读取跳转（E6）：曲目、首次产出样本之前（文件头）与之后（数据）的次数。跳转不算
+    /// 播放帧，不影响保真；只用于说明读取方式与核对时序。
+    pub parse_jumps: Vec<(u32, u32, u32)>,
     pub protocol_errors: u32,
     /// 生产端休眠后被唤醒的次数（L1：渲染线程、命令或到期唤醒；含操作系统的虚假唤醒）。
     pub producer_wakeups: u64,
@@ -335,6 +339,7 @@ impl<A> Default for PlaybackReport<A> {
             user_seeks: 0,
             sequential_seeks: Vec::new(),
             seek_prerolls: Vec::new(),
+            parse_jumps: Vec::new(),
             protocol_errors: 0,
             producer_wakeups: 0,
         }
@@ -342,6 +347,23 @@ impl<A> Default for PlaybackReport<A> {
 }
 
 impl<A> PlaybackReport<A> {
+    /// 记一次解码需要的读取跳转（E6）。
+    pub fn note_parse_jump(&mut self, track: u32, header: bool) {
+        let i = match self.parse_jumps.iter().position(|e| e.0 == track) {
+            Some(i) => i,
+            None => {
+                self.parse_jumps.push((track, 0, 0));
+                self.parse_jumps.len() - 1
+            }
+        };
+        let e = &mut self.parse_jumps[i];
+        if header {
+            e.1 = e.1.saturating_add(1);
+        } else {
+            e.2 = e.2.saturating_add(1);
+        }
+    }
+
     /// 记录一首浮点曲目的统计（同一曲目按段累加）。
     pub fn add_float_stats(&mut self, track: u32, r: FloatReport) {
         match self.float_stats.iter_mut().find(|(t, _)| *t == track) {
@@ -763,6 +785,13 @@ impl<A: AttemptRecord> PlaybackReport<A> {
             let _ = writeln!(
                 o,
                 "曲目 {} 的音源不支持定位，已按顺序解码到目标位置（结果相同，只是更慢）。",
+                track + 1
+            );
+        }
+        for (track, header, data) in &self.parse_jumps {
+            let _ = writeln!(
+                o,
+                "曲目 {} 按解码器的要求跳转读取：文件头 {header} 次、数据 {data} 次（索引在别处的容器；不改变样本）。",
                 track + 1
             );
         }

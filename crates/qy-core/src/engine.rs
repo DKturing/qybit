@@ -515,6 +515,14 @@ pub enum HostAction {
     /// 第 `track` 首的定位落在目标之前，按解码器给出的预滚（E5，[`crate::Decoder::take_preroll`]）
     /// 解码并丢弃了目标帧之前的 `frames` 帧（送出的第一帧仍是目标帧）。宿主据此在报告中写明。
     SeekPreroll { track: u32, frames: u64 },
+    /// 第 `track` 首的解码器要求跳到 `offset` 字节处读取（E6，[`crate::Decoder::take_jump`]），在对应的
+    /// [`HostAction::Seek`] 之后给出。`header`：该曲目（本次打开）首次产出样本之前。跳转不算
+    /// 播放帧数与预填；宿主据此计数并核对时序预算。
+    ParseJumped {
+        track: u32,
+        offset: u64,
+        header: bool,
+    },
     /// 第 `track` 首按 [`ChannelPolicy::DuplicateMono`] 把单声道复制到左右两路（声道布局已改变，
     /// 样本值未改变）。在设备按该曲目配置成功（新打开或续用）后给出；配置失败的曲目不给出。
     /// 宿主据此在报告中标为“已改变”。
@@ -1187,6 +1195,13 @@ impl<D: Decoder + Resources, S: FrameSink> Engine<D, S> {
                 self.push(HostAction::SeekPreroll {
                     track: self.core.track(),
                     frames,
+                });
+            }
+            if let Some(j) = self.core.take_parse_jump() {
+                self.push(HostAction::ParseJumped {
+                    track: self.core.track(),
+                    offset: j.offset,
+                    header: j.header,
                 });
             }
             let Some(action) = polled else {

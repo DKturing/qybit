@@ -14,7 +14,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use qy_core::engine::Resources;
-use qy_core::{ChannelLayout, Decoder, DeviceFormat, SampleEncoding, Status};
+use qy_core::{ChannelLayout, Decoder, DeviceFormat, Jump, JumpGuard, SampleEncoding, Status};
 use qy_pcm_format::pack::{Pcm, pack};
 use qy_pcm_format::wave::WaveFormatExtensible;
 use qy_player::{Diagnostics, Formats};
@@ -68,14 +68,31 @@ pub fn decode<F: Formats>(formats: &F, input: &Path, out: &Path) -> Result<Strin
     let mut device = None;
     let mut frames = 0u64;
     let mut pos = 0usize;
+    // E6：解码需要的读取跳转与核心同一套规则。跳转后先送空输入（`eof` 为假），再从新位置送。
+    let mut guard = JumpGuard::new();
+    let (mut fresh, mut seen) = (false, 0usize);
     let ended = loop {
-        let end = (pos + window).min(data.len());
-        let eof = end == data.len();
+        let end = if fresh {
+            pos
+        } else {
+            (pos + window).min(data.len())
+        };
+        let eof = !fresh && end == data.len();
+        if end > seen {
+            guard.on_read(end - seen);
+            seen = end;
+        }
+        fresh = false;
         let p = match d.decode(&data[pos..end], eof) {
             Ok(p) => p,
             Err(e) => break Err(e),
         };
-        pos += p.consumed;
+        pos += p.consumed.min(end - pos);
+        let jump = match guard.take(&mut d, p.status) {
+            Ok(Jump::None) => None,
+            Ok(Jump::Parse(o) | Jump::Seek(o)) => Some(o),
+            Err(f) => return Err(format!("解码失败：{f}（{}）", detail(&d))),
+        };
         match p.status {
             Status::Frames(n) => {
                 let src = d.format().ok_or("产出帧时格式未知")?;
@@ -117,10 +134,18 @@ pub fn decode<F: Formats>(formats: &F, input: &Path, out: &Path) -> Result<Strin
                 d.release(k);
             }
             Status::End => break Ok(()),
-            Status::NeedInput if p.consumed == 0 && (eof || end - pos >= window) => {
+            Status::NeedInput
+                if jump.is_none() && p.consumed == 0 && (eof || end - pos >= window) =>
+            {
                 return Err("解码器缺输入但无法推进".into());
             }
             Status::NeedInput | Status::NeedOutput => {}
+        }
+        if let Some(o) = jump {
+            pos = usize::try_from(o).unwrap_or(usize::MAX).min(data.len());
+            seen = pos;
+            fresh = true;
+            guard.restart();
         }
     };
     let Some(dev) = device else {

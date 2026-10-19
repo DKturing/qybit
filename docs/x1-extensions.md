@@ -110,9 +110,10 @@ fn main() -> std::process::ExitCode {
 | 分块无关 | 一次性、逐字节与任意分块输入，格式、样本与结束方式（正常结束或哪一种错误）完全相同。 |
 | 错误之后 | 出错后在 `reset` 之前不再产出样本；`reset` 后能解码下一个源，结果与新解码器相同。 |
 | 定位 | 核心只在文件头解析完成、首次产出样本之后调用 `seek`；之后只输出目标帧及之后的样本；目标等于或超过长度返回 `PastEnd`；不支持返回 `Unsupported`（核心改为顺序解码并丢弃）。核心在每次 `decode` 之后、看状态之前取一次 `seek_request`。定位预滚（E5，2026-10-19）：只能落在目标之前时（有损格式定位到包），`take_preroll()` 返回目标之前还会输出的帧数，核心解码并丢弃，送出的第一帧仍是目标帧；最迟在落点之后第一次产出样本时给出，不得超过目标帧号，未定位时为 0（默认）。 |
+| 读取跳转（E6，2026-10-19，可选） | 需要的字节不在当前读取位置之后时（索引在文件末尾的容器、跳过很大的块、按索引回到数据、在交错的块之间移动），`take_jump()` 返回新的字节位置，取走即清空，`reset` 清除。核心在每次成功的 `decode` 之后取一次：与 `seek_request` 不能同时给出、返回 `End` 时不得给出；跳转后旧位置的输入与 EOF 作废，解码器下一次看到的输入从新位置开始（先是空输入），跳到文件末尾之后得到 EOF。音源不可定位时曲目以 `Fault::Jump(Unseekable)` 明确失败、不重新打开；没有读到任何字节就再次跳转为 `NoProgress`。有定位目标且本次产出了样本时先 `seek`，本次的跳转作废。插件需要按格式声明 MCU 预算的 `J`、`k`（[tasks/E6.md](../tasks/E6.md)、[docs/e6-jumps.md](e6-jumps.md)）。 |
 | 停止后迟到的回报 | 由核心按代次拒绝（§3.7），解码器不需要处理。 |
 | DSD（D1，2026-10-19） | DSD 解码器（DSF / DFF 等）用 `SourceFormat::dsd(位率, 布局)` 给出格式，每帧每声道输出一个 32 位 DSD 字（`i32` 按位存放，时间上最早的位在 bit 31；DSF 每字节最低位在前，读取时反转位序）；曲目末尾不足一个字的位用 `0x69` 补齐并在明细中写明。核心按设备的传输方式（原生 DSD 或 DoP）原样送出，设备不支持时明确拒绝，不转 PCM（[docs/d1-dsd.md](d1-dsd.md)）。 |
-| 文件头识别（E3，2026-10-19，可选） | 格式可以另提供 `identify(head, eof) -> qy_core::Identify<明细>`：不消耗输入、不需要工作区，回答 `Foreign`（不是本格式）、`NeedMore { total, container }`（至少共 `total` 字节才能回答，`eof` 为真时不给出）、`Supported { format, data_start }`、`Rejected { error, detail }`。必须与完整解码一致，用 `qy_testkit::check_identify` 检查（[docs/e3-identify.md](e3-identify.md)）。官方解码器各自有 `identify`，组合识别为 `AutoDecoder::identify`。 |
+| 文件头识别（E3，2026-10-19，可选） | 格式可以另提供 `identify(head, eof) -> qy_core::Identify<明细>`：不消耗输入、不需要工作区，回答 `Foreign`（不是本格式）、`NeedMore { total, container }`（至少共 `total` 字节才能回答，`eof` 为真时不给出）、`Supported { format, data_start }`、`Rejected { error, detail }`。必须与完整解码一致，用 `qy_testkit::check_identify` 检查（[docs/e3-identify.md](e3-identify.md)）。官方解码器各自有 `identify`，组合识别为 `AutoDecoder::identify`。`container: true` 表示已认领这个容器，路由层可以提前转交，不表示子格式已经支持（容器内的编码由容器解码器解析后决定）；`total` 可能大于输入窗口（索引在文件末尾时），路由层不得为攒够它而等待（E6）。 |
 
 ### 3.2 `FrameSink` / `FrameSource`（`qy-pcm-format::queue`）
 
@@ -145,7 +146,7 @@ fn main() -> std::process::ExitCode {
 | 项 | 约定 |
 | --- | --- |
 | 读取 | `open(track)` 返回同步读取器；`read` 返回 0 表示结束，`Err` 记为读取失败（按出错策略跳过或停止）。 |
-| 定位 | 不可定位的音源在 `seek` 中返回错误，播放器改为顺序解码到目标位置。 |
+| 定位 | 不可定位的音源在 `seek` 中返回错误：用户定位改为顺序解码到目标位置；解码需要的读取跳转（E6）则使曲目明确失败。定位到文件末尾之后应成功，之后读取返回 0（`std::fs::File` 与 `Cursor` 都是这样）。 |
 | 名称 | `name(track)` 只用于显示。 |
 
 示例 `MemorySource`：内存中的曲目，可选不可定位（像管道）。
@@ -156,9 +157,9 @@ fn main() -> std::process::ExitCode {
 | --- | --- |
 | 打开 | 同时只打开一首；`open` 前已打开的先关闭。 |
 | 读取 | `read(buf)` 返回读到的字节数，**0 表示文件结束**；`Err` 记为读取错误。每步至多读 `read_chunk` 字节（主循环对命令的响应延迟因此有界）。 |
-| 定位 | `seek(offset)` 成功返回 `true`；不支持或越过文件末尾返回 `false`，引擎改为顺序解码（默认实现不支持）。 |
+| 定位 | `seek(offset)` 成功返回 `true`；位置在文件末尾或之后时也成功，之后读取返回 0（E6 起）。不支持定位返回 `false`：用户定位改为顺序解码，解码需要的读取跳转则使曲目明确失败（默认实现不支持）。耗时计入预算公式的 `S`。 |
 | 错误之后 | 读取错误后引擎按出错策略关闭该曲目；下一首重新 `open`。拔卡等全局故障由 `rescan` 恢复。 |
-| 实时约束 | 在主循环中阻塞执行（SPI/SDIO），耗时计入预算公式的 `U` 与 `O`；DMA 中断照常取数。 |
+| 实时约束 | 在主循环中阻塞执行（SPI/SDIO），耗时计入预算公式的 `U`、`O` 与 `S`；DMA 中断照常取数。 |
 
 示例 `Tracks`（[`src/embedded.rs`](../examples/qy-ext-demo/src/embedded.rs)）：内存中的曲目，可选不可定位。
 
@@ -204,6 +205,8 @@ assert_eq!(check_seek(|| MyDecoder::new(leak(4096)), &file, &[0, 1, 1000, len, l
 `check` 只证明解码器遵守接口约定，不证明解码正确：样本仍要与独立参考逐个比较（返回的 `Decoded::words` 就是用来比较的）。
 
 已接入：WAV、FLAC、AIFF 的全部测试文件，`AutoDecoder`（三种格式混合、同一解码器复用），QYT1 与组合解码器 `ExtDecoder`。契约测试本身用一个正确的极简解码器和六种故意违约的变体（`eof` 后返回 `NeedInput`、文件头解析前给出格式、结果依赖分块、出错后继续产出、`reset` 后残留格式、定位后多输出目标前一帧）验证，每种都被发现（`crates/qy-testkit/tests/violations.rs`）。
+
+E6 起，契约测试按核心的规则执行读取跳转（所有分块方式），另外发现五种跳转违约：`reset` 后残留跳转、`End` 时跳转、两种跳转同时给出、没有读到字节就再跳（`NoProgress`）、读到了字节却来回循环（跳转次数上限 `jump_limit`，只是测试保护，生产环境不检测）（`crates/qy-testkit/tests/jumps.rs`）。
 
 ## 5. 示例 crate 的验证结果（2026-10-17）
 

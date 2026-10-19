@@ -336,6 +336,10 @@ fn loads() -> ([Load; 2], usize) {
         unit_read_us: 10_000,
         decode_us: 2_000,
         open_us: OPEN_US,
+        // 官方格式没有解码需要的跳转（E6）。
+        header_jumps: 0,
+        unit_jumps: 0,
+        jump_us: 0,
     };
     #[cfg(feature = "full")]
     if let Some(c) = PROFILE.flac_capacity() {
@@ -354,6 +358,10 @@ fn loads() -> ([Load; 2], usize) {
             unit_read_us: 10_000,
             decode_us: 10_000,
             open_us: OPEN_US,
+            // 官方格式没有解码需要的跳转（E6）。
+            header_jumps: 0,
+            unit_jumps: 0,
+            jump_us: 0,
         };
         return ([wav, flac], 2);
     }

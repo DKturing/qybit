@@ -619,6 +619,9 @@ impl<B: Backend, S: TrackSource, D: Decoder + Resources + Diagnostics> Player<'_
                 ));
                 self.report.sequential_seeks.push(track);
             }
+            HostAction::ParseJumped { track, header, .. } => {
+                self.report.note_parse_jump(track, header);
+            }
             HostAction::SeekPreroll { track, frames } => {
                 self.line(&format!(
                     "  曲目 {} 定位：解码并丢弃目标之前的 {frames} 帧（预滚，送出的第一帧仍是目标帧）",
