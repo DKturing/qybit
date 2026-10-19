@@ -36,7 +36,7 @@
 | E1 | 有损标记（[任务卡](E1.md)；已完成，见 [docs/e1-lossy.md](../docs/e1-lossy.md)） | 格式信息中的结构化“有损”字段；报告、CLI、GUI 明确显示；有损格式的输出位数是解码精度，不是音源位深 |
 | E2 | 应用组装入口（[任务卡](E2.md)；已完成，见 [docs/e2-assembly.md](../docs/e2-assembly.md)） | `qybit` / `qybit-gui` 的主体可作为库调用，由调用方传入解码器与文件信息读取；文件筛选的扩展名与 `--help` 的格式列表由解码器集合提供 |
 | E3 | 格式识别（[任务卡](E3.md)；已完成，见 [docs/e3-identify.md](../docs/e3-identify.md)） | 官方解码器能回答“文件头不是我的格式”与“是我的格式但子类型不支持”，插件的路由层据此转交，不必自己缓存文件头 |
-| E4 | 接口版本（[任务卡](E4.md)） | X1 契约的版本号与兼容规则、版本 tag；`qy-testkit` 作为公开的测试工具 |
+| E4 | 接口版本（[任务卡](E4.md)；已完成，见 [docs/e4-versioning.md](../docs/e4-versioning.md)，规则待审定） | X1 契约的版本号与兼容规则、版本 tag；`qy-testkit` 作为公开的测试工具 |
 | E5 | 帧格式的定位预滚（[任务卡](E5.md)；已完成，见 [docs/e5-preroll.md](../docs/e5-preroll.md)） | 解码器可定位到目标之前的某一帧，再由核心解码并丢弃到目标，避免有损格式从头顺序解码 |
 | D1 | DSD 输出通道（[任务卡](D1.md)；软件部分已完成，见 [docs/d1-dsd.md](../docs/d1-dsd.md)） | DoP 封装与原生 DSD 格式（如 ALSA `DSD_U32_*`），设备不支持时拒绝，不转 PCM；WASAPI 只有 DoP |
 

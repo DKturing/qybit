@@ -4,6 +4,8 @@
 
 扩展只在**编译期**接入：扩展是一个普通的 Rust crate，实现下面的 trait，在组装层（应用的 `main` 或板级代码）与已有组件组合，静态分发。不需要、也不允许为扩展改核心状态机。运行时动态插件（加载 `.dll` / `.so`、ABI 稳定、版本协商）不在当前范围，以后在桌面宿主外层另行设计，MCU 核心不承担它的成本（X1 §6）。不接入 FFmpeg 等外部解码器。按 2026-10-18 的决定，基础格式之外的格式（Lite：ALAC、AAC-LC、MP3；Full：再加 HE-AAC、WavPack、APE、Vorbis、Opus、DSD）由用户另建的插件仓库用纯 Rust 实现，按本文的接口接入，不合并进本仓库；本仓库为它们提供的公共接口见 [tasks/FORMATS.md](../tasks/FORMATS.md)“公共接口”（AGENTS §1）。
 
+契约版本：**0.1**（本仓库版本 0.1.0，tag `v0.1.0`）。插件仓库按 tag 以 git 依赖本仓库的 crate；对外接口的范围与兼容规则见 [docs/e4-versioning.md](e4-versioning.md)，各版本的修改见 [CHANGELOG.md](../CHANGELOG.md)。
+
 完整的可运行示例：[`examples/qy-ext-demo`](../examples/qy-ext-demo)。
 
 ## 分层（2026-10-17 用户确认）
@@ -183,7 +185,7 @@ fn main() -> std::process::ExitCode {
 
 ```toml
 [dev-dependencies]
-qy-testkit = { path = "crates/qy-testkit" }   # 仓库内为 qy-testkit.workspace = true
+qy-testkit = { git = "https://github.com/DKturing/qybit", tag = "v0.1.0" }   # 仓库内为 qy-testkit.workspace = true
 ```
 
 ```rust

@@ -59,6 +59,25 @@ jobs:
           if-no-files-found: error
 
   # 精简 crate 的 no_std 目标编译。
+  # E4：按最近的版本 tag 的契约编译当时的 qy-ext-demo（代表仓库外插件），发现破坏性修改。
+  compat:
+    name: 接口兼容检查（上一个版本 tag）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 安装工具链（rust-toolchain.toml）
+        run: rustup show
+      - name: 按上一个版本 tag 编译示例插件
+        run: |
+          prev=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          if [ -z "$prev" ]; then
+            echo "还没有版本 tag，跳过"
+            exit 0
+          fi
+          python3 scripts/compat-check.py "$prev"
+
   no-std:
     name: no_std (thumbv7em-none-eabihf)
     runs-on: ubuntu-latest

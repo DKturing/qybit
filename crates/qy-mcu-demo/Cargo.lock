@@ -249,14 +249,14 @@ dependencies = [
 
 [[package]]
 name = "qy-codec-aiff"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-core",
 ]
 
 [[package]]
 name = "qy-codec-auto"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-codec-aiff",
  "qy-codec-flac",
@@ -266,35 +266,35 @@ dependencies = [
 
 [[package]]
 name = "qy-codec-flac"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-core",
 ]
 
 [[package]]
 name = "qy-codec-wav"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-core",
 ]
 
 [[package]]
 name = "qy-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-pcm-format",
 ]
 
 [[package]]
 name = "qy-fat-image"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "fatfs",
 ]
 
 [[package]]
 name = "qy-host-embedded"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "embedded-sdmmc",
  "embedded-storage",
@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "qy-pcm-format"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bbqueue",
 ]

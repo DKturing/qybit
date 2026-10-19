@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "qy-bench"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-codec-auto",
  "qy-core",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "qy-codec-aiff"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-core",
  "qy-testkit",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "qy-codec-auto"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-codec-aiff",
  "qy-codec-flac",
@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "qy-codec-flac"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-codec-wav",
  "qy-core",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "qy-codec-wav"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-core",
  "qy-pcm-format",
@@ -494,14 +494,14 @@ dependencies = [
 
 [[package]]
 name = "qy-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-pcm-format",
 ]
 
 [[package]]
 name = "qy-ext-demo"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-codec-auto",
  "qy-codec-flac",
@@ -517,21 +517,21 @@ dependencies = [
 
 [[package]]
 name = "qy-fat-image"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "fatfs",
 ]
 
 [[package]]
 name = "qy-gen-fixtures"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "qy-host-alsa"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "alsa",
  "libc",
@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "qy-host-embedded"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "embedded-sdmmc",
  "embedded-storage",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "qy-host-sim"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-codec-auto",
  "qy-codec-flac",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "qy-host-wasapi"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-core",
  "qy-pcm-format",
@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "qy-pcm-format"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bbqueue",
  "rtrb",
@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "qy-player"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-codec-auto",
  "qy-codec-flac",
@@ -598,14 +598,14 @@ dependencies = [
 
 [[package]]
 name = "qy-testkit"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-core",
 ]
 
 [[package]]
 name = "qy-ui"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-codec-auto",
  "qy-codec-flac",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "qybit"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "qy-core",
  "qy-host-alsa",
@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "qybit-gui"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "cosmic-text",
  "qy-core",
