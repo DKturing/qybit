@@ -9,12 +9,12 @@
 
 ```toml
 [dependencies]
-qy-core = { git = "https://github.com/DKturing/qybit", tag = "v0.1.0" }
-qy-player = { git = "https://github.com/DKturing/qybit", tag = "v0.1.0" }
-qybit = { git = "https://github.com/DKturing/qybit", tag = "v0.1.0" }        # 组装命令行（E2）
+qy-core = { git = "https://github.com/qybit-lab/qybit", tag = "v0.1.0" }
+qy-player = { git = "https://github.com/qybit-lab/qybit", tag = "v0.1.0" }
+qybit = { git = "https://github.com/qybit-lab/qybit", tag = "v0.1.0" }        # 组装命令行（E2）
 
 [dev-dependencies]
-qy-testkit = { git = "https://github.com/DKturing/qybit", tag = "v0.1.0" }   # 契约测试
+qy-testkit = { git = "https://github.com/qybit-lab/qybit", tag = "v0.1.0" }   # 契约测试
 ```
 
 同一个仓库的多个 crate 必须用同一个 tag（Cargo 按 tag 解析为同一个提交，类型才是同一个）。依赖 `branch = "main"` 不受下面的规则保护。

@@ -5,7 +5,7 @@ version = "0.0.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/DKturing/qybit"
+repository = "https://github.com/qybit-lab/qybit"
 publish = false
 
 # 只为 thumbv7em-none-eabihf 构建，不属于主工作区（主工作区在宿主目标上构建与测试）。

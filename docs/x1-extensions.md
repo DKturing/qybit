@@ -186,7 +186,7 @@ fn main() -> std::process::ExitCode {
 
 ```toml
 [dev-dependencies]
-qy-testkit = { git = "https://github.com/DKturing/qybit", tag = "v0.1.0" }   # 仓库内为 qy-testkit.workspace = true
+qy-testkit = { git = "https://github.com/qybit-lab/qybit", tag = "v0.1.0" }   # 仓库内为 qy-testkit.workspace = true
 ```
 
 ```rust
