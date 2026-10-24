@@ -15,6 +15,7 @@ license = "MIT OR Apache-2.0"
 default = ["winit-backend", "x11-backend"]
 winit-backend = ["dep:winit", "dep:softbuffer"]
 x11-backend = ["dep:x11rb"]
+xim-server = ["x11-backend", "dep:xim"]
 
 [dependencies]
 # 绘制：矩形、圆角（纯 Rust 软件光栅化）
@@ -24,6 +25,8 @@ cosmic-text = "=0.15.0"
 winit = { version = "=0.30.13", optional = true }
 softbuffer = { version = "=0.4.8", optional = true }
 x11rb = { version = "=0.13.2", optional = true, default-features = false }
+# 测试用输入法（xim-commit）：XIM 服务端，核对 qybit-gui 的输入法客户端（LG2）。
+xim = { version = "=0.5.0", optional = true, default-features = false, features = ["x11rb-server"] }
 
 [[bin]]
 name = "proto-winit"
@@ -42,3 +45,8 @@ codegen-units = 4
 [[bin]]
 name = "xdnd-send"
 required-features = ["x11-backend"]
+
+# 测试用输入法（核对 qybit-gui 的 XIM 客户端，LG2）
+[[bin]]
+name = "xim-commit"
+required-features = ["xim-server"]

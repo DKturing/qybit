@@ -582,26 +582,35 @@ jobs:
 
   # Linux 图形界面（自绘，X11）：模拟设备在 Xvfb 中运行（真实核心、自有解码、pack 与渲染循环，只模拟
   # 设备与时间），xdotool 操作并核对状态栏与指示灯、单声道的严格拒绝与明确开启的复制、拖动调整顺序、
-  # XDND 文件拖放、记住设置与恢复；截图作为构件（scripts/gui-linux-check.sh）。
+  # XDND 文件拖放、记住设置与恢复、经测试用输入法（XIM）在路径栏输入中文、经 AT-SPI 读取控件树并
+  # 执行动作（读屏支持）（LG2）；截图作为构件（scripts/gui-linux-check.sh）。
   gui-linux:
     name: Linux 图形界面（Xvfb，模拟设备）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
-      - name: 安装 Xvfb、xdotool、ImageMagick 与中文字体
-        run: sudo apt-get update && sudo apt-get install -y xvfb xdotool imagemagick fonts-wqy-zenhei
+      # dbus、at-spi2-core 与 Atspi 的 Python 绑定：读屏支持核对（LG2）。
+      - name: 安装 Xvfb、xdotool、ImageMagick、中文字体与 AT-SPI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xdotool imagemagick fonts-wqy-zenhei \
+            dbus at-spi2-core python3-gi gir1.2-atspi-2.0
       - run: cargo clippy --locked -p qybit-gui --all-targets -- -D warnings
       - run: cargo clippy --locked -p qybit-gui --features sim --all-targets -- -D warnings
       - run: cargo test --locked -p qybit-gui --features sim
       # E2：示例组装的图形界面（`gui` 特性）。
       - run: cargo clippy --locked -p qy-ext-demo --features gui --all-targets -- -D warnings
-      - name: 构建（模拟设备）与测试拖放源
+      - name: 构建（模拟设备）、测试拖放源与测试输入法
         run: |
           cargo build --locked --release -p qybit-gui --features sim
           cargo build --locked --release --manifest-path tools/gui-proto-linux/Cargo.toml --bin xdnd-send
+          cargo build --locked --release --manifest-path tools/gui-proto-linux/Cargo.toml --features xim-server --bin xim-commit
       - name: 界面核对
-        run: scripts/gui-linux-check.sh target/release/qybit-gui tools/gui-proto-linux/target/release/xdnd-send "$RUNNER_TEMP/gui-linux"
+        env:
+          QY_A11Y_CHECK: "1"
+          PYTHON: /usr/bin/python3
+        run: scripts/gui-linux-check.sh target/release/qybit-gui tools/gui-proto-linux/target/release/xdnd-send "$RUNNER_TEMP/gui-linux" tools/gui-proto-linux/target/release/xim-commit
       - if: always()
         uses: actions/upload-artifact@v4
         with:

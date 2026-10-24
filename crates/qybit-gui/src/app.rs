@@ -618,7 +618,6 @@ impl App {
             Op::Check(ID_REMEMBER, self.remember),
             Op::SortArrow(self.sort.map(|(k, d)| (sort_column(k), d))),
             Op::LogVisible(self.log_visible),
-            Op::MediaKeys(self.media_keys),
         ];
         ops.extend(self.ops(Changes {
             list: true,
@@ -626,6 +625,9 @@ impl App {
             log: true,
             session: true,
         }));
+        // 放在日志之后：前端执行它时会写一条说明到日志，排在前面会被随后的（执行前生成的）
+        // 日志内容覆盖，启动后日志区为空。
+        ops.push(Op::MediaKeys(self.media_keys));
         ops
     }
 
@@ -864,6 +866,13 @@ mod tests {
         assert!(ops.contains(&Op::SortArrow(Some((3, true)))));
         assert!(ops.contains(&Op::LogVisible(false)));
         assert!(ops.contains(&Op::MediaKeys(false)));
+        // 前端执行 MediaKeys 时写一条日志说明：它必须排在（执行前生成的）日志内容之后，否则
+        // 说明随即被覆盖，启动后日志区为空。
+        let pos = |f: fn(&Op) -> bool| ops.iter().position(f);
+        assert!(
+            pos(|o| matches!(o, Op::Log(_))) < pos(|o| matches!(o, Op::MediaKeys(_))),
+            "{ops:?}"
+        );
         assert!(ops.contains(&Op::Count(2)));
         let log = ops.iter().find_map(|o| match o {
             Op::Log(t) => Some(t.clone()),

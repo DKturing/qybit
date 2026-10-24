@@ -92,5 +92,6 @@ AGENTS 中 M0 不做的交互设备选择与拖放，在本卡只对 GUI 放开�
 - 用户经原型实测后选定自绘方案（x11rb 纯 Rust X11，musl 静态；[docs/gui-linux-prototype.md](../docs/gui-linux-prototype.md)），要求界面与选项尽量与 Windows 版一致，不另写任务卡。
 - 状态：软件部分已完成（[docs/gui-linux.md](../docs/gui-linux.md)）。界面逻辑与 Windows 共用；模拟设备在 Xvfb 中逐项核对（CI `gui-linux` 作业）；五个架构静态构建。
 - 与 Windows 的差别：没有系统默认设备；设备硬件音量按 A4 只在播放期间调整并在结束时恢复；自绘文件面板；复制日志。
+- 2026-10-24（LG2，[tasks/LG2.md](LG2.md)）：文件面板路径栏接入中文输入法（XIM），控件经 AT-SPI 提供给读屏软件；CI 用测试用输入法与 libatspi 核对，真实输入法与 Orca 未运行。
 - 用户真机（2026-10-18，经 SSH 的 X11 转发，真实 ALSA 设备）：播放、换设备与设备硬件音量正常。遗留：读秒仍略慢于实际时间，用户决定暂时略过（docs/gui-linux.md §2）。2026-10-24：状态栏改为只提交变化的文字段（稳态数据量 271 → 84 KiB/s），诊断输出增加单次提交耗时；待用户在原环境复测。
 

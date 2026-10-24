@@ -12,6 +12,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use accesskit::{Action, ActionData, Node, NodeId, Role, TextPosition, TextSelection, Toggled};
+
+use super::access::{bounds, id};
 use super::paint::{Align, Canvas, Rect};
 use super::x11::{Mods, keysym};
 
@@ -320,12 +323,7 @@ impl FileDialog {
         c.fill(bx, 0xf0f0f0);
         c.frame(bx, 0x707070);
         c.fill(title, 0xe6e6e6);
-        let heading = if self.folder {
-            "添加文件夹".to_string()
-        } else {
-            format!("添加文件（{}）", self.filter.names)
-        };
-        c.text_bold(title, pad, &heading, 0x1a1a1a, Align::Left);
+        c.text_bold(title, pad, &self.heading(), 0x1a1a1a, Align::Left);
         // 路径栏
         c.fill(path, 0xffffff);
         c.frame(path, if self.path_focus { 0x0078d7 } else { 0xadadad });
@@ -448,18 +446,7 @@ impl FileDialog {
             }
         }
         // 底部
-        let n = self.chosen().len();
-        let info = self.error.clone().unwrap_or_else(|| {
-            if self.folder {
-                if n == 0 {
-                    "未选中文件夹时加入当前文件夹".to_string()
-                } else {
-                    format!("已选中 {n} 个文件夹")
-                }
-            } else {
-                format!("{} 项，已选中 {n} 个文件", self.items.len())
-            }
-        });
+        let info = self.info();
         c.text(
             Rect::new(bx.x + pad, add.y, (add.x - bx.x - 2 * pad).max(0), add.h),
             0,
@@ -590,6 +577,242 @@ impl FileDialog {
         changed
     }
 
+    /// 在路径栏光标处插入文字（键盘直接给出的字符，或输入法提交的文字，LG2）；控制字符去掉。
+    /// 路径栏没有输入焦点或没有可插入的字符时返回 `false`。
+    pub fn insert(&mut self, text: &str) -> bool {
+        if !self.path_focus {
+            return false;
+        }
+        let add: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
+        if add.is_empty() {
+            return false;
+        }
+        let mut v: Vec<char> = self.path_text.chars().collect();
+        let at = self.path_cursor.min(v.len());
+        v.splice(at..at, add.iter().copied());
+        self.path_text = v.into_iter().collect();
+        self.path_cursor = at + add.len();
+        true
+    }
+
+    /// 路径栏有输入焦点时光标的位置（窗口坐标：光标左下角）；输入法据此放置候选框（LG2）。
+    pub fn caret(&self, c: &mut Canvas) -> Option<(i32, i32)> {
+        if !self.path_focus {
+            return None;
+        }
+        let path = self.g.path;
+        let before: String = self.path_text.chars().take(self.path_cursor).collect();
+        let x = (path.x + self.px(6) + c.text_width(&before)).min(path.right() - 2);
+        Some((x, path.bottom() - self.px(5)))
+    }
+
+    fn heading(&self) -> String {
+        if self.folder {
+            "添加文件夹".to_string()
+        } else {
+            format!("添加文件（{}）", self.filter.names)
+        }
+    }
+
+    /// 底部的说明文字（选中数量或错误）。
+    fn info(&self) -> String {
+        let n = self.chosen().len();
+        self.error.clone().unwrap_or_else(|| {
+            if self.folder {
+                if n == 0 {
+                    "未选中文件夹时加入当前文件夹".to_string()
+                } else {
+                    format!("已选中 {n} 个文件夹")
+                }
+            } else {
+                format!("{} 项，已选中 {n} 个文件", self.items.len())
+            }
+        })
+    }
+
+    /// 面板的无障碍节点（LG2）：对话框 [`id::DIALOG`] 及其控件。返回焦点所在的节点。
+    pub fn a11y_nodes(&self, nodes: &mut Vec<(NodeId, Node)>) -> NodeId {
+        let g = self.g;
+        let mut dialog = Node::new(Role::Dialog);
+        dialog.set_label(self.heading());
+        dialog.set_bounds(bounds(g.bx));
+        dialog.set_modal();
+        let mut kids = Vec::new();
+        // 路径栏：文字放在一个文字段子节点中，读屏软件可读出内容与光标位置。
+        let mut path = Node::new(Role::TextInput);
+        path.set_label("路径");
+        path.set_bounds(bounds(g.path));
+        path.add_action(Action::Focus);
+        path.add_action(Action::SetValue);
+        let mut run = Node::new(Role::TextRun);
+        run.set_value(self.path_text.as_str());
+        run.set_bounds(bounds(g.path));
+        let lengths: Vec<u8> = self
+            .path_text
+            .chars()
+            .map(|ch| ch.len_utf8() as u8)
+            .collect();
+        // 不给出每个字符的位置（可选项；逐字排版的开销随路径长度平方增长），读屏软件照常读文字
+        // 与光标。
+        run.set_character_lengths(lengths);
+        nodes.push((NodeId(id::FILE_PATH_TEXT), run));
+        path.push_child(NodeId(id::FILE_PATH_TEXT));
+        let caret = TextPosition {
+            node: NodeId(id::FILE_PATH_TEXT),
+            character_index: self.path_cursor.min(self.path_text.chars().count()),
+        };
+        path.set_text_selection(TextSelection {
+            anchor: caret,
+            focus: caret,
+        });
+        nodes.push((NodeId(id::FILE_PATH), path));
+        kids.push(NodeId(id::FILE_PATH));
+        for (i, (r, l)) in [
+            (g.go, "转到"),
+            (g.up, "上一级"),
+            (g.home, "主目录"),
+            (g.root, "根目录"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let k = NodeId(id::FILE_BUTTON + i as u64);
+            let mut n = Node::new(Role::Button);
+            n.set_label(l);
+            n.set_bounds(bounds(r));
+            n.add_action(Action::Click);
+            nodes.push((k, n));
+            kids.push(k);
+        }
+        if !self.folder {
+            let mut n = Node::new(Role::CheckBox);
+            n.set_label("显示所有文件");
+            n.set_bounds(bounds(g.all));
+            n.set_toggled(if self.show_all {
+                Toggled::True
+            } else {
+                Toggled::False
+            });
+            n.add_action(Action::Click);
+            nodes.push((NodeId(id::FILE_ALL), n));
+            kids.push(NodeId(id::FILE_ALL));
+        }
+        let mut list = Node::new(Role::ListBox);
+        list.set_label(self.dir.display().to_string());
+        list.set_bounds(bounds(g.list));
+        list.set_multiselectable();
+        let inner = g.list.inset(1);
+        let rh = self.row_h();
+        for (i, it) in self.items.iter().enumerate() {
+            let k = NodeId(id::FILE_ROW + i as u64);
+            let mut n = Node::new(Role::ListBoxOption);
+            n.set_label(match (it.dir, it.size) {
+                (true, _) => format!("{}，文件夹", it.label),
+                (false, Some(sz)) => format!("{}，{}", it.label, human_size(sz)),
+                (false, None) => it.label.clone(),
+            });
+            n.set_selected(self.selected.get(i).copied().unwrap_or(false));
+            n.set_position_in_set(i + 1);
+            n.set_size_of_set(self.items.len());
+            if i >= self.top && i < self.top + self.visible() {
+                let r = Rect::new(inner.x, inner.y + (i - self.top) as i32 * rh, inner.w, rh);
+                n.set_bounds(bounds(r.intersect(&inner)));
+            }
+            n.add_action(Action::Click);
+            n.add_action(Action::Focus);
+            list.push_child(k);
+            nodes.push((k, n));
+        }
+        nodes.push((NodeId(id::FILE_LIST), list));
+        kids.push(NodeId(id::FILE_LIST));
+        let mut info = Node::new(Role::Label);
+        info.set_value(self.info());
+        nodes.push((NodeId(id::FILE_INFO), info));
+        kids.push(NodeId(id::FILE_INFO));
+        for (k, r, l) in [
+            (
+                id::FILE_ADD,
+                g.add,
+                if self.folder {
+                    "添加文件夹"
+                } else {
+                    "添加"
+                },
+            ),
+            (id::FILE_CANCEL, g.cancel, "取消"),
+        ] {
+            let mut n = Node::new(Role::Button);
+            n.set_label(l);
+            n.set_bounds(bounds(r));
+            n.add_action(Action::Click);
+            nodes.push((NodeId(k), n));
+            kids.push(NodeId(k));
+        }
+        dialog.set_children(kids);
+        nodes.push((NodeId(id::DIALOG), dialog));
+        if self.path_focus {
+            NodeId(id::FILE_PATH)
+        } else if self.items.is_empty() {
+            NodeId(id::FILE_LIST)
+        } else {
+            NodeId(id::FILE_ROW + self.focus.min(self.items.len() - 1) as u64)
+        }
+    }
+
+    /// 读屏软件请求的动作（LG2），与鼠标、键盘的同一操作效果相同。
+    pub fn a11y_action(
+        &mut self,
+        c: &mut Canvas,
+        target: u64,
+        action: Action,
+        data: Option<&ActionData>,
+    ) -> FileResult {
+        let click = matches!(action, Action::Click);
+        let g = self.g;
+        let centre = |r: Rect| (r.x + r.w / 2, r.y + r.h / 2);
+        if let Some(i) = id::index(target, id::FILE_ROW, id::SPAN) {
+            if matches!(action, Action::Click | Action::Focus) && i < self.items.len() {
+                self.path_focus = false;
+                self.select_only(i);
+                return FileResult::Redraw;
+            }
+            return FileResult::None;
+        }
+        if let Some(i) = id::index(target, id::FILE_BUTTON, 4) {
+            if !click {
+                return FileResult::None;
+            }
+            let (x, y) = centre([g.go, g.up, g.home, g.root][i]);
+            let _ = self.press(c, x, y, Mods::default());
+            return self.release(c, x, y);
+        }
+        match (target, action, data) {
+            (id::FILE_PATH, Action::Focus, _) => {
+                self.path_focus = true;
+                self.path_cursor = self.path_text.chars().count();
+                FileResult::Redraw
+            }
+            (id::FILE_PATH, Action::SetValue, Some(ActionData::Value(v))) => {
+                self.path_focus = true;
+                self.path_text = v.to_string();
+                self.path_cursor = self.path_text.chars().count();
+                FileResult::Redraw
+            }
+            (id::FILE_ALL, Action::Click, _) if !self.folder => {
+                self.show_all = !self.show_all;
+                self.reload();
+                FileResult::Redraw
+            }
+            (id::FILE_ADD, Action::Click, _) => self.add(),
+            (id::FILE_CANCEL, Action::Click, _) => FileResult::Cancel(self.dir.clone()),
+            (id::FILE_LIST, Action::Focus, _) => {
+                self.path_focus = false;
+                FileResult::Redraw
+            }
+            _ => FileResult::None,
+        }
+    }
+
     pub fn key(&mut self, _c: &mut Canvas, sym: u32, ch: Option<char>, mods: Mods) -> FileResult {
         if sym == keysym::ESCAPE {
             return FileResult::Cancel(self.dir.clone());
@@ -618,14 +841,8 @@ impl FileDialog {
                 keysym::HOME => self.path_cursor = 0,
                 keysym::END => self.path_cursor = n,
                 _ => {
-                    if let Some(ch) = ch.filter(|c| !c.is_control())
-                        && !mods.ctrl
-                    {
-                        let mut v: Vec<char> = self.path_text.chars().collect();
-                        v.insert(self.path_cursor.min(v.len()), ch);
-                        self.path_text = v.into_iter().collect();
-                        self.path_cursor += 1;
-                    } else {
+                    let typed = ch.filter(|_| !mods.ctrl).map(String::from);
+                    if !typed.is_some_and(|t| self.insert(&t)) {
                         return FileResult::None;
                     }
                 }

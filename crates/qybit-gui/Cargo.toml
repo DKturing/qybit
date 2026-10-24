@@ -16,6 +16,10 @@ name = "qybit-gui"
 path = "src/main.rs"
 
 [features]
+default = ["a11y"]
+# Linux：读屏支持经 AT-SPI 提供给读屏软件（LG2，accesskit_unix + zbus，静态程序约增加 5.6 MB）。
+# 关闭时界面照常，只是读屏软件读不到控件。
+a11y = ["dep:accesskit_unix"]
 # GUI T3 界面核对：用模拟设备代替 WASAPI（真实核心、自有解码、pack 与渲染循环，只模拟设备与时间）。
 # 只在 CI 截图核对时编译，发布产物不含。
 sim = ["qy-player/test-support"]
@@ -47,6 +51,9 @@ qy-host-alsa.workspace = true
 x11rb.workspace = true
 tiny-skia.workspace = true
 cosmic-text.workspace = true
+xim.workspace = true
+accesskit.workspace = true
+accesskit_unix = { workspace = true, optional = true }
 
 [dev-dependencies]
 qy-player = { workspace = true, features = ["test-support"] }

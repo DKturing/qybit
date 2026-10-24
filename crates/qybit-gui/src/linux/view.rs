@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use qy_ui::SortKey;
 use qy_ui::text::RateLamp;
 
+mod a11y;
+
 use super::files::{FileDialog, FileResult};
 use super::paint::{Align, Canvas, Rect};
 use super::x11::{Cursor, Mods, keysym};
@@ -205,6 +207,7 @@ enum Drag {
     Button(usize),
 }
 
+#[derive(Clone, Copy)]
 enum Popup {
     None,
     Menu { index: usize, hover: Option<usize> },
@@ -578,6 +581,23 @@ impl View {
         self.modal = Modal::Files(Box::new(FileDialog::new(dir, folder, filter)));
         self.popup = Popup::None;
         self.overlay_dirty = true;
+    }
+
+    /// 有文字输入焦点（文件面板的路径栏）时光标的位置；输入法只在这时获得焦点（LG2）。
+    pub fn text_caret(&self, c: &mut Canvas) -> Option<(i32, i32)> {
+        match &self.modal {
+            Modal::Files(d) => d.caret(c),
+            _ => None,
+        }
+    }
+
+    /// 输入法提交的文字（LG2）。
+    pub fn insert_text(&mut self, text: &str) {
+        if let Modal::Files(d) = &mut self.modal
+            && d.insert(text)
+        {
+            self.overlay_dirty = true;
+        }
     }
 
     pub fn modal_open(&self) -> bool {

@@ -3,14 +3,18 @@
 //! - [`x11`]：X11 边界（x11rb 纯 Rust 协议实现，不含 `unsafe`，可 musl 完全静态链接）；
 //! - [`paint`]：软件绘制（tiny-skia 形状、cosmic-text 文字）；
 //! - [`view`]：主窗口控件的布局、绘制与输入；[`files`]：文件选择面板；
+//! - [`ime`]：输入法（XIM），文件面板路径栏的中文输入（LG2）；
+//! - [`access`]：读屏支持（AccessKit → AT-SPI，LG2）；
 //! - [`audio`]：ALSA hw 设备与播放期间的设备硬件音量（tasks/A4.md）；
 //! - 界面逻辑与 Windows 共用（[`crate::app`]），播放在 `qy-ui` 的后台线程中进行（真实核心、
 //!   自有解码、pack 与内核直连的 ALSA 独占输出）。
 //!
 //! 界面线程只处理通道里的消息：X 事件（读取线程转来）、后台线程的通知、定时检查设备列表。
 
+mod access;
 mod audio;
 mod files;
+mod ime;
 mod paint;
 mod view;
 mod x11;
@@ -44,6 +48,8 @@ enum Msg {
     Closed,
     /// 后台线程有新事件。
     Notify,
+    /// 读屏软件一侧的请求。
+    A11y(access::Request),
 }
 
 struct Front {
@@ -66,6 +72,16 @@ struct Front {
     quit: bool,
     /// 已收到、尚未重送的 Expose 区域。
     exposed: Vec<paint::Rect>,
+    /// 输入法（`XMODIFIERS` 指定时连接；失败后为 `None`）。
+    ime: Option<ime::Ime>,
+    /// 已在跟踪输出中报告输入法连接。
+    ime_announced: bool,
+    /// 窗口有键盘焦点（输入法只在这时获得焦点）。
+    focused: bool,
+    /// 读屏支持（辅助技术启用时维护无障碍树）。
+    access: access::Access,
+    /// 无障碍树需要重新生成（界面有变化或读屏软件刚启用）。
+    a11y_dirty: bool,
     /// 诊断：本统计周期内单次提交画面（写出并刷新到 X 连接）的最长耗时。网络带宽不足时写入
     /// 被阻塞，这个时间随之变长，画面（含读秒）就会滞后。
     slowest_put: Duration,
@@ -164,6 +180,13 @@ pub fn run<F: qy_player::Formats>(formats: F) -> ExitCode {
     if let Some(p) = &saved {
         view.log_height = p.settings.log_height;
     }
+    let ime = match ime::Ime::connect(x.conn.clone(), x.screen, x.win) {
+        Ok(i) => i,
+        Err(e) => {
+            notes.push(format!("{e}；文件面板的路径栏只能输入键盘直接给出的字符"));
+            None
+        }
+    };
     let mut f = Front {
         x,
         canvas,
@@ -178,6 +201,11 @@ pub fn run<F: qy_player::Formats>(formats: F) -> ExitCode {
         visible: true,
         quit: false,
         exposed: Vec::new(),
+        ime,
+        ime_announced: false,
+        focused: true,
+        access: access::Access::new(tx.clone(), Msg::A11y),
+        a11y_dirty: true,
         slowest_put: Duration::ZERO,
     };
     for op in f.app.initial() {
@@ -235,7 +263,9 @@ pub fn run<F: qy_player::Formats>(formats: F) -> ExitCode {
                 Err(_) => break,
             }
         }
+        f.sync_ime();
         f.repaint();
+        f.update_a11y();
         // 诊断：每 10 秒写一次界面更新的数据量与单次提交的最长耗时（经 SSH 的 X11 转发时界面
         // 响应受它们影响）。
         if f.trace && traffic.0.elapsed() >= Duration::from_secs(10) {
@@ -270,6 +300,56 @@ impl Front {
                 self.dispatch(Input::Notify);
                 self.volume_notes();
             }
+            Msg::A11y(r) => self.a11y_request(r),
+        }
+    }
+
+    fn a11y_request(&mut self, r: access::Request) {
+        match r {
+            access::Request::Activate => {
+                self.access.activate();
+                self.access.window_focus(self.focused);
+                self.window_bounds();
+                self.a11y_dirty = true;
+                if self.trace {
+                    eprintln!("读屏支持：已启用");
+                }
+            }
+            access::Request::Deactivate => self.access.deactivate(),
+            access::Request::Action(req) => {
+                let Front { view, canvas, .. } = self;
+                let acts =
+                    view.a11y_action(canvas, req.target_node.0, req.action, req.data.as_ref());
+                if self.trace {
+                    eprintln!("读屏动作：{:?} → 节点 {:#x}", req.action, req.target_node.0);
+                }
+                for a in acts {
+                    self.act(a);
+                }
+                self.a11y_dirty = true;
+            }
+        }
+    }
+
+    /// 界面变化后把无障碍树送给读屏软件（只在辅助技术启用时生成）。
+    fn update_a11y(&mut self) {
+        if !self.access.active() || !std::mem::take(&mut self.a11y_dirty) {
+            return;
+        }
+        let Front {
+            view, canvas, app, ..
+        } = self;
+        let tree = view.a11y_tree(canvas, &mut |r, c| app.cell(r, c));
+        self.access.update(tree);
+    }
+
+    /// 窗口在屏幕上的位置（读屏软件按它换算控件的屏幕坐标）。
+    fn window_bounds(&mut self) {
+        if !self.access.active() {
+            return;
+        }
+        if let Some(r) = self.x.screen_rect() {
+            self.access.window_bounds(r);
         }
     }
 
@@ -281,6 +361,9 @@ impl Front {
             view, canvas, app, ..
         } = self;
         let rects = view.paint(canvas, &mut |r, c| app.cell(r, c));
+        if !rects.is_empty() || !self.exposed.is_empty() {
+            self.a11y_dirty = true;
+        }
         let start = Instant::now();
         for r in rects.iter().chain(&self.exposed) {
             let _ = self.x.put(&self.canvas, *r);
@@ -291,6 +374,20 @@ impl Front {
     }
 
     fn event(&mut self, ev: Event) {
+        // 与输入法通信的事件（输入法客户端自己的窗口上的选择与客户消息）。
+        if let Some(ime) = &mut self.ime {
+            match ime.filter(&ev) {
+                Ok(true) => {
+                    self.ime_output();
+                    return;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    self.ime_failed(e);
+                    return;
+                }
+            }
+        }
         let ev = match self.x.protocol(ev) {
             Ok(Protocol::Pass(ev)) => ev,
             Ok(Protocol::Close) => {
@@ -321,6 +418,7 @@ impl Front {
                     self.canvas.resize(w, h);
                     self.view.mark_all();
                 }
+                self.window_bounds();
                 Vec::new()
             }
             Event::MapNotify(_) => {
@@ -355,33 +453,119 @@ impl Front {
                 self.view.leave();
                 Vec::new()
             }
+            Event::FocusIn(_) => {
+                self.focused = true;
+                self.access.window_focus(true);
+                Vec::new()
+            }
             Event::FocusOut(_) => {
+                self.focused = false;
+                self.access.window_focus(false);
                 self.view.focus_lost();
                 Vec::new()
             }
+            // 路径栏有输入焦点时按键先交给输入法；输入法送回的按键在 `ime_output` 中处理。
             Event::KeyPress(e) => {
-                let mods = Mods::from_state(e.state);
-                let sym = self.x.keysym(e.detail, mods.shift);
-                let media = match sym {
-                    keysym::AUDIO_PLAY => Some(Media::PlayPause),
-                    keysym::AUDIO_PAUSE => Some(Media::Pause),
-                    keysym::AUDIO_STOP => Some(Media::Stop),
-                    keysym::AUDIO_NEXT => Some(Media::Next),
-                    keysym::AUDIO_PREV => Some(Media::Prev),
-                    _ => None,
-                };
-                if let Some(m) = media {
-                    self.dispatch(Input::Media(m));
+                if self.ime_key(&e) {
                     Vec::new()
                 } else {
-                    self.view
-                        .key(&mut self.canvas, sym, X::keysym_char(sym), mods)
+                    self.key_press(&e)
                 }
+            }
+            Event::KeyRelease(e) => {
+                self.ime_key(&e);
+                Vec::new()
             }
             _ => Vec::new(),
         };
         for a in acts {
             self.act(a);
+        }
+    }
+
+    fn key_press(&mut self, e: &x11rb::protocol::xproto::KeyPressEvent) -> Vec<Act> {
+        let mods = Mods::from_state(e.state);
+        let sym = self.x.keysym(e.detail, mods.shift);
+        let media = match sym {
+            keysym::AUDIO_PLAY => Some(Media::PlayPause),
+            keysym::AUDIO_PAUSE => Some(Media::Pause),
+            keysym::AUDIO_STOP => Some(Media::Stop),
+            keysym::AUDIO_NEXT => Some(Media::Next),
+            keysym::AUDIO_PREV => Some(Media::Prev),
+            _ => None,
+        };
+        if let Some(m) = media {
+            self.dispatch(Input::Media(m));
+            Vec::new()
+        } else {
+            self.view
+                .key(&mut self.canvas, sym, X::keysym_char(sym), mods)
+        }
+    }
+
+    /// 把按键转发给输入法；返回 `true` 表示已转发（结果稍后经 [`Front::ime_output`] 回来）。
+    fn ime_key(&mut self, e: &x11rb::protocol::xproto::KeyPressEvent) -> bool {
+        let Some(ime) = &mut self.ime else {
+            return false;
+        };
+        match ime.key(e) {
+            Ok(sent) => sent,
+            Err(err) => {
+                self.ime_failed(err);
+                false
+            }
+        }
+    }
+
+    /// 输入法提交的文字插入路径栏；输入法不处理而送回的按键按普通按键处理。
+    fn ime_output(&mut self) {
+        let Some(ime) = &mut self.ime else {
+            return;
+        };
+        if !self.ime_announced
+            && let Some(style) = ime.ready()
+        {
+            self.ime_announced = true;
+            if self.trace {
+                eprintln!("输入法：已连接 {}（{style}）", ime.name);
+            }
+        }
+        let (texts, keys) = ime.take();
+        for t in texts {
+            if self.trace {
+                eprintln!("输入法提交：{t}");
+            }
+            self.view.insert_text(&t);
+        }
+        for k in keys {
+            for a in self.key_press(&k) {
+                self.act(a);
+            }
+        }
+    }
+
+    fn ime_failed(&mut self, e: String) {
+        if let Some(ime) = self.ime.take() {
+            let note = format!(
+                "{e}（输入法 {}）：已停用输入法，文件面板的路径栏只能输入键盘直接给出的字符",
+                ime.name
+            );
+            self.dispatch(Input::Note(note));
+        }
+    }
+
+    /// 输入法的焦点跟随路径栏的输入焦点与窗口焦点；光标移动时更新候选框位置。
+    fn sync_ime(&mut self) {
+        let Some(ime) = &mut self.ime else {
+            return;
+        };
+        let at = if self.focused {
+            self.view.text_caret(&mut self.canvas)
+        } else {
+            None
+        };
+        if let Err(e) = ime.want(at) {
+            self.ime_failed(e);
         }
     }
 

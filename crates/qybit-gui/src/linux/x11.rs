@@ -113,6 +113,8 @@ fn atom(c: &RustConnection, name: &str) -> Res<u32> {
 pub struct X {
     pub conn: Arc<RustConnection>,
     pub win: u32,
+    /// 窗口所在屏幕的编号（输入法客户端在该屏幕上创建通信窗口）。
+    pub screen: usize,
     root: u32,
     gc: u32,
     atoms: Atoms,
@@ -219,6 +221,8 @@ impl X {
                     | EventMask::BUTTON_RELEASE
                     | EventMask::POINTER_MOTION
                     | EventMask::KEY_PRESS
+                    // 输入法要求转发松开按键（如按 Shift 切换中英文，LG2）。
+                    | EventMask::KEY_RELEASE
                     | EventMask::FOCUS_CHANGE
                     | EventMask::LEAVE_WINDOW,
             ),
@@ -321,6 +325,7 @@ impl X {
         Ok(X {
             conn,
             win,
+            screen: screen_num,
             root,
             gc,
             atoms,
@@ -337,6 +342,23 @@ impl X {
             sent_bytes: 0,
             scale,
         })
+    }
+
+    /// 窗口内容区在屏幕上的位置与大小（根窗口坐标）。
+    pub fn screen_rect(&self) -> Option<Rect> {
+        let g = self.conn.get_geometry(self.win).ok()?.reply().ok()?;
+        let t = self
+            .conn
+            .translate_coordinates(self.win, self.root, 0, 0)
+            .ok()?
+            .reply()
+            .ok()?;
+        Some(Rect::new(
+            i32::from(t.dst_x),
+            i32::from(t.dst_y),
+            i32::from(g.width),
+            i32::from(g.height),
+        ))
     }
 
     pub fn map(&self) -> Res<()> {
