@@ -106,7 +106,7 @@ qybit --device hw:CARD=Generic_1,DEV=0 --volume-control Headphone a.flac
 | 纯函数 | 名称分组与 alsa-lib 特例、显示文字、提示规则；百分比换算（对数映射、dB 线性、无 dB、静音最小档、步长），对照 alsamixer 公式独立算出的值；控制选择；dB TLV 的四种类型、容器、损坏与嵌套过深；参数解析 | 通过，含 qemu-user 下的 armv7 |
 | QEMU 虚拟机（snd-dummy，`tests/mixer.rs`） | 见下 | x86_64、aarch64、armv7（aarch64 虚拟机中的兼容层）均通过 |
 | 用户机器（2026-10-18，A2 当时的设置方式） | `Master 40% on`（当时按原始值线性，即 35 档、−39.00 dB）后 3.5 mm 耳机出声 | 通过（真机） |
-| 用户机器（A4 默认 40%） | — | **未运行** |
+| 用户机器（A4 默认 40%，2026-10-18） | 播放开始时 Master 从 35/87（15%，−39.00 dB）设为 59/87（40%，−21.00 dB）；按 Ctrl+C 中断后输出“设备硬件音量已恢复”，`qybit mixer` 读回 35/87 | 通过（真机） |
 
 虚拟机中的检查，期望值按 `sound/drivers/dummy.c` 与 alsamixer 公式独立算出：`Master Volume` 范围 −50..100，−45 dB 起每档 0.30 dB，dB 范围 45 dB，按对数映射。
 

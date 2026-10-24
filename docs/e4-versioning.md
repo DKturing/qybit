@@ -5,7 +5,7 @@
 ## 1. 版本与依赖方式
 
 - 工作区所有 crate 共用一个版本号（`Cargo.toml` 的 `[workspace.package] version`），当前为 **0.1.0**；对应 git tag `v0.1.0`。版本记录见 [CHANGELOG.md](../CHANGELOG.md)。
-- 暂不发布 crates.io（AGENTS §4：先在 GitHub 开发）。插件仓库按 tag 以 git 依赖：
+- 暂不发布 crates.io（AGENTS §4：先在 GitHub 开发；2026-10-24 用户再次决定暂不发布，各 crate 保持 `publish = false`）。插件仓库按 tag 以 git 依赖：
 
 ```toml
 [dependencies]
