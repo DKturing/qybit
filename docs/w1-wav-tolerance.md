@@ -216,7 +216,7 @@ cargo +nightly fuzz run wav_decode corpus/wav_decode_w1b -- \
   - 播放器曾据此加入 WAVEFORMATEX 候选。实际播放时，48 kHz 单声道文件消耗了全部数据、报告无欠载无错误，但听不到声音。
   - 现已改为只对标准立体声使用 WAVEFORMATEX，单声道被拒即明确报告，见 [m0-t5-wasapi.md](m0-t5-wasapi.md)“16/16 的 WAVEFORMATEX 候选”。
 - **端点不支持的采样率**（例如 8、16、96 kHz 的文件）按“设备不支持”报告。本程序不重采样；系统自带播放器走共享模式，由 Windows 混音器重采样，所以能出声。
-- 系统音量滑块不起作用，符合预期：独占模式绕过 Windows 混音器，软件增益恒为 1。音量需由设备端控制（README “使用（Windows）”）。
+- 系统音量滑块不起作用，符合预期：独占模式绕过 Windows 混音器，软件增益恒为 1。音量需由设备端控制（README “音量”）。
 
 ## 7. 范围外
 

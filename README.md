@@ -1,156 +1,176 @@
 # QyBit
 
-QyBit Core：Rust 编写的 `no_std`、无 alloc 本地音频播放引擎，桌面播放器、CLI 与嵌入式播放器共用同一核心（定位与 MCU 缺口分析见 [docs/arch-core-mcu.md](docs/arch-core-mcu.md)）。纯本地、严格保真：不重采样、不降精度、不混音，设备不支持源格式时明确报错。
+QyBit 是用 Rust 编写的本地音频播放器，用来把音频文件里的样本原样送到声卡。它在 Windows 上以 WASAPI 独占模式输出，在 Linux 上直接打开 ALSA 硬件设备，不经过系统混音器，不重采样，不改变位深，也不做任何音量缩放或音效处理。设备不能按原格式播放时，QyBit 会说明原因并停止，而不是悄悄转换后继续播放。
 
-软件不设人为上限：采样率、声道、位深只受格式规范、设备能力与宿主资源限制，并在播放前说明原因。本仓库维护基础格式：WAV、FLAC、AIFF / AIFF-C（未压缩）；其余格式（Lite：ALAC、AAC-LC、MP3；Full：再加 HE-AAC、WavPack、APE、Vorbis、Opus、DSD）由独立的插件仓库实现，见 [tasks/FORMATS.md](tasks/FORMATS.md)。
+播放器由一个与操作系统无关的核心 QyBit Core 驱动。核心负责解析、解码、播放调度和输出数据的组织，不依赖标准库与堆内存，因此同一套代码既用于桌面上的命令行和图形界面，也可以运行在单片机上，从 SD 卡等存储经 I²S 播放。
 
-长期规则见 [AGENTS.md](AGENTS.md)，阶段任务卡见 [tasks/](tasks/)（接下来：M3 T3 实物验证 → [P1 按实测数据的性能优化](tasks/P1.md)；基础格式补全与插件接口见 [tasks/FORMATS.md](tasks/FORMATS.md)）。
+## 播放方式
 
-## 当前状态
+采样率、声道数和位深都按文件本身的格式请求设备。打开设备后，QyBit 会读回设备实际接受的参数并逐项核对，不一致就拒绝播放。播放结束后给出报告，写明源格式、设备格式、欠载和丢帧情况；只要出现欠载，这段播放就不会被记为完整。
 
-M0 T1–T6 已实现：自有推送式 WAV 解码（[docs/m0-t2-wav.md](docs/m0-t2-wav.md)），pack 与 Windows 纯格式描述（[docs/m0-t3-pack.md](docs/m0-t3-pack.md)），真实路径模拟（[docs/m0-t4-sim.md](docs/m0-t4-sim.md)，`Action`/`Event`/`Decoder` 自此冻结），WASAPI 独占宿主（[docs/m0-t5-wasapi.md](docs/m0-t5-wasapi.md)），CLI 与真机矩阵（[docs/m0-t6-cli.md](docs/m0-t6-cli.md)）。M1 T1–T3 已实现：自有 FLAC 解码（[docs/m1-t2-flac.md](docs/m1-t2-flac.md)），libFLAC 参考核对、按文件头识别 WAV/FLAC 并接入模拟与桌面播放（[docs/m1-t3-integration.md](docs/m1-t3-integration.md)）。M2 进行中：T1 平台无关播放器层（[docs/m2-t1-player.md](docs/m2-t1-player.md)）、T2 ALSA 格式映射与参数确认（[docs/m2-t2-alsa-format.md](docs/m2-t2-alsa-format.md)）、T3 ALSA 渲染后端与 Linux CLI（[docs/m2-t3-alsa-backend.md](docs/m2-t3-alsa-backend.md)）、T4 两层数字回环（[docs/m2-t4-loopback.md](docs/m2-t4-loopback.md)：A 层 file 插件在 CI 运行；B 层 snd-aloop 当时未运行，A1 起在 QEMU 虚拟机中运行）已完成；T5 验证加强已完成（[docs/m2-t5-verification.md](docs/m2-t5-verification.md)）：Kani 有界证明 24 个（pack 单样本内核、CRC、WAV/FLAC/AIFF 文件头整数计算），5 个 crate 的 cargo-mutants（补测试后存活项逐个说明为等价或不可达，CI 每周运行），由 libFuzzer 直接生成模拟场景的 fuzz 目标（10 分钟记录，CI 冒烟），Miri 运行队列与播放器渲染测试（FFI 部分不适用）。M3 T1 核心下沉已完成（[docs/m3-t1-engine.md](docs/m3-t1-engine.md)）：`no_std` 播放引擎（预填、换格式排空、暂停、上一首/下一首、出错跳过、能力检查）由模拟、桌面与 MCU 宿主共用，静态帧队列（bbqueue），Desktop / Embedded 配置档与 RAM 预算公式，解码器按需链接，thumbv7em 演示程序在 QEMU 中按独立参考核对通过（指令集仿真，不是实机）。F1 多声道已完成软件部分（[docs/f1-multichannel.md](docs/f1-multichannel.md)）：WAV EXTENSIBLE 声道掩码与 FLAC 1–8 声道（含 `WAVEFORMATEXTENSIBLE_CHANNEL_MASK` 标签）按扬声器位置保真送到设备，WASAPI 声道掩码、ALSA 声道映射设置与读回，设备顺序不同时纯置换，布局无法确认时明确拒绝；Embedded 配置档仍为双声道；真实多声道设备未运行。M3 T2 通用嵌入式宿主的软件部分已完成（[docs/m3-t2-embedded-host.md](docs/m3-t2-embedded-host.md)）：`qy-host-embedded` 与开发板和存储介质无关（块设备上的 FAT 经 `embedded-sdmmc`，无文件系统的闪存经 `embedded-storage` 标准接口，其他文件系统由板级实现存储接口）、DMA 中断喂数、串口命令，预填按最坏读取耗时公式核对；宿主侧虚拟时间仿真（慢读、读错、拔卡）与 QEMU 中运行同一宿主，按独立参考逐字节核对；附 STM32F411 板级适配示例（只编译）。实物验收需要用户在任一满足最低要求的板上运行，尚未运行。R1 资源计划与可靠性验证已完成（[docs/r1-reliability.md](docs/r1-reliability.md)）：播放前统一给出带数值的能力不足原因与播放计划；MCU、桌面与模拟宿主记录缓冲水位；虚拟时间仿真上的模型随机命令与故障测试（500 种子进 CI）；损坏文件系统 fuzz 发现 `embedded-sdmmc` 的 panic，已在存储层按 FAT 规范独立核对拦下；四个确定性约束写入架构文档；桌面吞吐基准在开发机上测得全部规格达到实时（结论只对该机器成立）。W1 已完成（[docs/w1-wav-tolerance.md](docs/w1-wav-tolerance.md)）：8 位 PCM；真实世界 WAV 文件头（ffmpeg 管道输出的占位长度、RIFF 长度写错、不足一帧的尾部）在意图明确时可播放，只修正结构、不改样本，每条修正写入报告；有歧义的照旧拒绝。F2 已完成（[docs/f2-aiff.md](docs/f2-aiff.md)）：自有 AIFF / AIFF-C（未压缩）解码，按 AIFF 1.3 与 AIFF-C 原文只接受规范定义的内容，拒绝分为不合规、合规但尚不支持、规范之外的扩展三类；与 WAV 共用流式工作区，三个配置档都启用且 RAM 不变。O1 已完成软件部分（[docs/o1-mono-to-stereo.md](docs/o1-mono-to-stereo.md)）：明确开启的单声道复制到左右两路（`--mono-to-stereo`、嵌入式串口命令；样本值不变、不混音，报告标为“声道已改变”），WASAPI 端点物理扬声器配置只作提示。Windows WASAPI 独占已在一个音频端点上真机运行（格式矩阵 70 项、顺序换曲、WAV/FLAC 播放），记录见 [docs/w1-wav-tolerance.md](docs/w1-wav-tolerance.md) §6；ALSA 真机、多声道设备与 MCU 实物尚未运行，见下方手动步骤。后续顺序（2026-10-15 调整）：先完成 Windows，包括参考 foobar2000 布局的极简 Rust GUI（[tasks/GUI.md](tasks/GUI.md)）：T1 选定 Windows 原生控件（[docs/gui-t1-selection.md](docs/gui-t1-selection.md)），T2 已实现（[docs/gui-t2-windows.md](docs/gui-t2-windows.md)：暂停、上一首、下一首、跳曲与状态快照，平台无关界面模型 `qy-ui`，`qybit-gui` 原生前端 0.71 MiB，CI 中启动、空闲与关闭通过；用户已在真机上运行）、T3 显示与报告（模拟设备逐状态截图核对，修正了格式行、错误原因与状态栏截断）与 T4 发布构建（单文件 exe，静态 C 运行库，要求 x64 Windows 10 1607 起）已完成（[docs/gui-t3-t4-windows.md](docs/gui-t3-t4-windows.md)）；S1 曲目内定位已完成软件部分（[docs/s1-seek.md](docs/s1-seek.md)）：样本级精确（定位后第一帧就是目标帧），WAV / AIFF 按字节直接定位，FLAC 用 SEEKTABLE 或插值查找并以整帧 CRC 排除误同步，音源不可定位时顺序解码；GUI 进度条与 ←/→、嵌入式串口 `seek <毫秒>`；Windows 真机上 GUI 定位用户已确认，ALSA 与 MCU 实物未运行。GUI T5 设备硬件音量（[docs/gui-t5-volume.md](docs/gui-t5-volume.md)）：只调节设备在硬件上实现的音量，送到设备的数据不变；设备没有硬件音量时不可用并写明原因；真机未运行。F3 浮点 PCM 已完成软件部分（[docs/f3-float.md](docs/f3-float.md)）：自有 WAV 32/64 位 IEEE 浮点解码（`fact` 可有可无，有则须与数据一致）；设备接受同一浮点格式时按位原样输出，不接受时严格路径拒绝；明确开启的浮点转整数（`--float-to-int`、GUI 复选框、嵌入式串口命令；整数运算、round-half-even、不加抖动，NaN / 无穷拒绝并报告位置，报告标为“样本已改变”）；WASAPI IEEE_FLOAT 与 ALSA FLOAT_LE / FLOAT64_LE，A 层回环与 QEMU 演示通过；真机未运行。再做 Linux；单片机实物验证放在最后。2026-10-16 外部审查的四个问题（嵌入式换曲阻塞、FLAC 帧号不核对、浮点拒绝记录跨会话、短曲目时状态缺源格式）已修正并有回归测试（[docs/fixes-2026-10-16.md](docs/fixes-2026-10-16.md)）。架构收紧的三张任务卡已审定（2026-10-17），按 B1 → L1 → X1 实施：[B1 边界整理](tasks/B1.md)已完成（[docs/b1-boundaries.md](docs/b1-boundaries.md)）：核心只按资源表达能力不足与播放计划，格式的叫法由解码器给出；单声道复制与浮点转整数收进引擎内部的选项模块；`qy-player` 增加默认开启的 `flac` 特性，关闭后为 WAV / AIFF 最小配置，FLAC 文件按不支持拒绝并说明原因；MCU 演示 `.text` 增加约 2 KB、RAM 不变。[L1 低功耗宿主](tasks/L1.md)已完成（[docs/l1-low-power.md](docs/l1-low-power.md)）：桌面生产端不再每 2 ms 轮询，改为由渲染线程、命令与状态快照唤醒，开发机上暂停时唤醒从约 460 次 / s 降到 1 次 / s、进程 CPU 降约四分之三，命令响应不超过 5 ms、无欠载；窗口最小化时不重绘；MCU 板级示例改为串口中断接收、空闲 WFI，并有 `stats` 统计（仿真验证，实物与电流未测）。GUI T6 使用体验已完成软件部分（[docs/gui-t6-windows.md](docs/gui-t6-windows.md)）：采样率指示灯（按独占协商结果显示“44.1 kHz 原生”或未能打开，不宣称 DAC 实际状态）、输出设备列表随插拔自动更新（选定设备消失时标明“未连接”，不自动换设备）、键盘媒体键（含窗口不在前台时）、可选的“记住播放列表与设置”（默认关闭，不保存两个非严格选项）、点击列标题排序与拖动调整顺序、另一个虚拟桌面时不重绘；用户已在 Windows 真机上测试，反馈基本没有问题。Windows 阶段到此收尾，下一阶段是 Linux（ALSA 真机与 GUI）。[A1 ALSA 内核直连与多架构静态程序](tasks/A1.md)已完成软件部分（[docs/a1-kernel-alsa.md](docs/a1-kernel-alsa.md)）：Linux 版不再依赖 alsa-lib，直接使用内核 ALSA 接口；x86_64、aarch64、armv7、loongarch64、riscv64 各编译为一个完全静态的 musl 程序，放到该架构的任意发行版上即可运行；真实内核路径（设备枚举、格式矩阵、播放、B 层逐字节回环）在 QEMU 虚拟机（Ubuntu 通用内核 + snd-aloop）中验证，x86_64 与 aarch64 内核，armv7 程序经 64 位内核的 32 位兼容层；2026-10-18 用户真机：USB 耳机播放正常；主板声卡因混音器 Master 静音而不出声，为此增加 [A2](tasks/A2.md) `qybit mixer`（经内核控制接口查看设备自身的硬件静音与音量，不依赖 alsa-utils）与 [A4](tasks/A4.md) 播放期间的硬件音量（默认 40%，结束后恢复；用户决定 qybit 不在播放之外改动混音器，A3 保存/恢复已撤销），记录见 [docs/a2-mixer.md](docs/a2-mixer.md)；用户真机上打开 Master 后 3.5 mm 耳机出声，A4 默认 40% 播放与结束后恢复已在用户真机确认。Linux 图形界面（[docs/gui-linux.md](docs/gui-linux.md)）：用户经原型实测后选定自绘方案（x11rb 纯 Rust X11，musl 静态，[docs/gui-linux-prototype.md](docs/gui-linux-prototype.md)），界面与选项与 Windows 版一致、共用界面逻辑；模拟设备在 Xvfb 中逐项核对通过，图形界面的播放路径在虚拟机内核回环中逐字节核对通过；2026-10-18 用户真机（经 SSH 的 X11 转发）上各设备正常出声，播放中换设备在新设备上继续；读秒略慢于实际时间列为遗留，暂时略过。[LG2](tasks/LG2.md)（2026-10-24）：文件面板路径栏接入中文输入法（XIM），控件经 AT-SPI 提供给 Orca 等读屏软件（AccessKit，纯 Rust，仍为 musl 静态程序）；CI 中用测试用输入法与 libatspi 核对，真实输入法与读屏软件未运行。macOS 版只写了任务卡（[tasks/MAC.md](tasks/MAC.md)，待审定）。2026-10-18 用户决定格式分层：本仓库只维护基础格式，Lite / Full 由独立插件仓库实现（[tasks/FORMATS.md](tasks/FORMATS.md)）。[F4 RF64 / BW64](tasks/F4.md) 已完成软件部分（[docs/f4-rf64.md](docs/f4-rf64.md)）：`ds64` 给出 64 位长度，支持超过 4 GiB 的 WAV，流式写入程序的占位值按 W1 规则处理并报告；按 ITU-R BS.2088-2 原文核对（EBU Tech 3306 v2 指定以它为准）；真实设备未运行。[F5 AIFF-C 未压缩变体](tasks/F5.md) 已完成软件部分（[docs/f5-aifc-variants.md](docs/f5-aifc-variants.md)）：`twos`、`sowt`（1–32 位）与 `fl32` / `fl64`（按位输出，接入 F3 的浮点路径），出处为 QuickTime File Format 表 3-3；真实设备未运行。[E1 有损标记](tasks/E1.md)已完成（[docs/e1-lossy.md](docs/e1-lossy.md)）：`SourceFormat::lossy()` / `is_lossy()`，插件的有损解码器据此标记，播放报告、命令行、图形界面与嵌入式串口写明“有损”，位数说明为解码精度；标记不影响设备选择与送出的数据。[E2 应用组装入口](tasks/E2.md)已完成（[docs/e2-assembly.md](docs/e2-assembly.md)）：`qybit` 与 `qybit-gui` 的主体改为对格式集合 `qy_player::Formats` 泛型的库，官方二进制传入 `Builtin`；插件仓库传入自己的格式集合即得到带新格式的同一个命令行与图形界面（文件筛选、`--help` 与“关于”的格式列表随之变化），示例 `examples/qy-ext-demo` 组装了带 QYT1 的 `qybit-ext` 并在测试中运行。[E3 格式识别](tasks/E3.md)已完成（[docs/e3-identify.md](docs/e3-identify.md)）：WAV、AIFF、FLAC 各有不消耗输入的识别函数（与完整解码同一个状态机），回答不是本格式、还要多少字节、支持、或不支持的子类型与明细，插件的路由层不必缓存文件头；全部夹具、fuzz 语料与 fuzz 目标上与完整解码一致。[E5 定位预滚](tasks/E5.md)已完成（[docs/e5-preroll.md](docs/e5-preroll.md)）：解码器只能定位到目标之前的包时（有损格式），以 `Decoder::take_preroll` 说明预滚帧数，核心解码并丢弃，定位后的第一帧仍是目标帧，不必从头顺序解码；官方解码器不需要预滚，行为不变。[E4 接口版本](tasks/E4.md)已完成（[docs/e4-versioning.md](docs/e4-versioning.md)）：工作区版本 0.1.0、tag `v0.1.0`，插件仓库按 tag 以 git 依赖；写明对外接口的范围与 0.x 兼容规则（破坏性修改升次版本号并写入 [CHANGELOG.md](CHANGELOG.md)），规则已于 2026-10-19 审定；CI 按上一个版本 tag 的 `qy-ext-demo` 编译当前接口，故意制造的破坏性修改被发现。[E6 解码需要的读取跳转](tasks/E6.md)已完成（[docs/e6-jumps.md](docs/e6-jumps.md)）：解码器以 `Decoder::take_jump` 说明需要的字节在别处（索引在文件末尾的容器，如 M4A 的尾置 `moov`），核心调度读取与跳转，桌面、模拟与嵌入式宿主只执行定位；跳转后旧输入与 EOF 作废；音源不可定位时明确失败、不反复重开；没有读到字节就再跳转判为解码器错误；`qybit decode`、`read_header` 与 `qy-testkit` 用同一套规则；嵌入式时序预算计入跳转（`J`、`k`、`S`）；示例尾部索引格式 QYI1 在桌面、嵌入式、命令行与文件信息读取上逐字节通过。[D1 DSD 输出通道](tasks/D1.md)已完成软件部分（[docs/d1-dsd.md](docs/d1-dsd.md)）：插件的 DSF / DFF 解码器可以把 1 位 DSD 原样送到设备——ALSA 原生 `DSD_U8` / `DSD_U16_*` / `DSD_U32_*` 优先、其次 DoP，WASAPI 只有 DoP；设备不支持时明确拒绝，不转 PCM；暂停与排空送 DSD 静音，DoP 标记相位连续；嵌入式暂不提供 DSD 输出；真实 DAC 未运行。代码分三层（2026-10-17 确认）：核心 `qy-core` 不含任何格式；官方解码器 `qy-codec-wav` / `-flac` / `-aiff` 各自可选，由项目维护，默认发行版包含；第三方扩展按 [docs/x1-extensions.md](docs/x1-extensions.md) 的契约编写，在组装层接入。[X1 外部扩展示例与契约测试](tasks/X1.md)已完成（[docs/x1-extensions.md](docs/x1-extensions.md)）：扩展在编译期接入，各扩展点（解码器、帧队列、桌面后端与音源、MCU 存储与输出）的契约表与接入方法；`qy-testkit` 对任意解码器检查状态语义、格式不伪造、分块无关、复位复用与定位，WAV / FLAC / AIFF 全部测试文件通过，六种故意违约的解码器都被发现；`examples/qy-ext-demo` 只用公开接口接入示例格式 QYT1、内存音源与无硬件输出，与 WAV / FLAC 混排、暂停、切歌、停止、定位及其顺序降级、出错跳过在桌面与嵌入式虚拟时间下逐字节通过（为此 `qy-player` 的 `HostResources` 改为对解码器泛型）；真实设备未运行。
+软件本身不限制采样率、声道数、位深和 FLAC 块大小，限制只来自格式规范、设备能力和可用内存。资源不够时，播放前会给出具体的数值和原因。
 
-## 工程结构
+WAV、FLAC、AIFF 解码器由 QyBit 自己实现，不调用 FFmpeg 或其他外部程序。整数样本从解码到输出一直以整数处理，到最后一步才按设备格式放置，中间不转成浮点。
 
-| crate | 说明 |
-| --- | --- |
-| `qy-core` | sans-IO 播放核心与播放引擎（`engine`：调度、暂停、切歌、出错策略、能力检查），`no_std`、无 alloc |
-| `qy-codec-wav` | 自有推送式 WAV 解码器，`no_std`、无 alloc |
-| `qy-codec-flac` | 自有推送式 FLAC 解码器（见 [docs/m1-t2-flac.md](docs/m1-t2-flac.md)），`no_std`、无 alloc；`static-cell` 特性提供 MCU 静态缓冲，`test-metrics` 特性仅供测试统计 |
-| `qy-codec-aiff` | 自有推送式 AIFF / AIFF-C（未压缩）解码器（见 [docs/f2-aiff.md](docs/f2-aiff.md)），`no_std`、无 alloc |
-| `qy-codec-auto` | 按文件头（`RIFF`/`FORM`+`AIFF`/`AIFC`/`fLaC`，前置 ID3v2 标签先跳过）选择自有 WAV/AIFF/FLAC 解码器，静态分发，`no_std`、无 alloc；WAV 与 AIFF 共用一块流式工作区；`wav`/`flac`/`aiff` 特性按需链接；`profile` 提供 Desktop / Embedded Full / Embedded Lite 配置档与 RAM 预算 |
-| `qy-pcm-format` | 与平台 SDK 无关的格式字段与声道布局、WAVEFORMATEX/EXTENSIBLE 纯描述、ALSA 格式映射/设备名/参数确认/声道映射与 pack（按扬声器位置纯置换），`no_std`；设备帧队列接口与预算公式；`ring` 特性提供桌面用的 `rtrb` 队列，`static-queue` 特性提供 MCU 用的静态 `bbqueue` 队列 |
-| `qy-host-sim` | 模拟宿主：真实核心/解码/pack/队列，模拟文件、时间与设备；WAV 1000 种子与 FLAC 1200 种子场景、并发实例测试 |
-| `qy-player` | 平台无关播放器层：宿主资源、播放驱动、整包（WASAPI）与短写（ALSA）两种渲染循环、协商与播放报告；`test-support` 特性提供假平台 API 与假后端 |
-| `qy-host-wasapi` | WASAPI 独占宿主：协商记录（HRESULT）、格式矩阵，Windows 绑定仅在 Windows 目标编译；真机测试见 `tests/device.rs`（默认忽略） |
-| `qy-host-embedded` | 通用嵌入式宿主（M3 T2），`no_std`、无 alloc：曲目存储接口（介质不限）及两种通用实现（块设备上的 FAT、无文件系统的曲目表 + `ReadStorage`）、I²S/DMA 输出接口与板级能力声明、DMA 中断喂数器、主循环宿主、串口命令、预填与读卡时序公式 |
-| `qy-host-alsa` | Linux ALSA 严格输出宿主：只接受 hw 设备，直接使用内核 ALSA 接口（A1，不依赖 alsa-lib），参数设置后读回核对，短写渲染；内核结构体与参数空间运算是纯函数、跨平台可测，系统调用仅在 Linux 目标编译；alsa-lib 后端只在 `alsa-lib` 可选特性下编译，供 A 层回环测试；真机测试见 `tests/device.rs`（默认忽略） |
-| `qybit` | 命令行程序，二进制名 `qybit` |
-| `qy-ui` | 平台无关的界面模型：播放列表、控制命令、状态与显示文字、后台文件头读取、设置文件 |
-| `qybit-gui` | 图形界面：Windows 原生控件前端（WASAPI 独占）与 Linux 自绘前端（x11rb 纯 Rust X11，可 musl 完全静态；ALSA hw），共用界面逻辑 |
-| `qy-bench` | 桌面吞吐基准（R1 §6，开发工具，不发布）：解码 + pack 实时倍数、高规格端到端余量与读取延迟影响 |
-| `qy-mcu-demo` | MCU 演示（thumbv7em，不在主工作区，单独构建）：运行 `qy-host-embedded`，闪存中的 FAT16 “SD 卡”镜像、软件模拟 DMA 与串口命令脚本，在 QEMU 中由 `qy-host-sim/tests/mcu_demo.rs` 核对 |
-| `qy-board` | 板级适配层（MCU 目标，不在主工作区）：每块板一个模块，按 Cargo 特性选择，只做外设初始化与 `qy-host-embedded` 接口实现；现有 `stm32f411`（SDIO、I²S2 + DMA、USART2）。只验证能编译，未在实物上运行 |
+## 支持的格式
 
-## 依赖
+- WAV：整数 PCM（含 8 位）、IEEE 浮点、WAVE_FORMAT_EXTENSIBLE（含声道掩码）、RF64 / BW64（超过 4 GiB 的文件）
+- FLAC：1–8 声道，最高 32 位
+- AIFF 与 AIFF-C 未压缩：`NONE`、`twos`、`sowt`、`fl32`、`fl64`
 
-| 依赖 | 版本 | 用途 |
+文件开头若有 ID3v2 标签，会先跳过再识别格式。常见的不规范 WAV 文件头（如流式写入程序留下的占位长度）在意图明确时可以正常播放，报告中会写明修正了什么；有歧义的文件仍会被拒绝。
+
+ALAC、AAC、MP3、Opus、DSD 等格式可以通过扩展接入，见下文“扩展格式”。
+
+## 运行环境
+
+| 平台 | 输出方式 | 说明 |
 | --- | --- | --- |
-| `rtrb` | =0.4.0 | 成熟 SPSC 环形缓冲，存放已 pack 的设备帧字节 |
-| `windows` | =0.62.2 | Windows SDK 绑定（COM、WASAPI），仅 Windows 目标 |
-| `alsa` | =0.12.1 | alsa-lib 安全封装，仅 `qy-host-alsa` 的 `alsa-lib` 可选特性（只用于 CI 的 A 层回环测试；构建需要 libasound 开发包，如 `libasound2-dev`）；发布版不含 |
-| `libc` | =0.2.190 | Linux 系统调用（内核 ALSA 接口的 `ioctl`、`poll`、`fcntl`）与渲染线程实时调度（`pthread_setschedparam`），仅 Linux 目标 |
-| `static_cell` | =2.1.1 | MCU 一次性静态零缓冲（`ConstStaticCell`），`qy-codec-flac` 的 `static-cell` 特性与 `qy-mcu-demo` |
-| `bbqueue` | =0.7.0 | 成熟静态 SPSC BipBuffer（关闭默认特性，只用 CAS 原子协调），MCU 设备帧队列，仅 `qy-pcm-format` 的 `static-queue` 特性 |
-| `cortex-m-rt` / `cortex-m` / `cortex-m-semihosting` | =0.7.5 / =0.7.7 / =0.5.0 | Cortex-M 运行时、MSP/WFI、临界区与半主机输出，仅 `qy-mcu-demo` 与板级示例（板级示例不用半主机） |
-| `embedded-sdmmc` | =0.10.0 | 块设备（SD 卡、eMMC、U 盘、闪存镜像等）上的 FAT16、FAT32 读取（no_std，无 alloc），`qy-host-embedded` |
-| `x11rb` | =0.13.2 | X11 协议的纯 Rust 实现（不链接 libX11 / libxcb，不启用 `allow-unsafe-code`），仅 Linux 图形界面 |
-| `tiny-skia` | =0.11.4 | 软件绘制的抗锯齿形状，仅 Linux 图形界面 |
-| `cosmic-text` | =0.15.0 | 文字排版、字体回退与字形光栅化（直接读系统字体与 fontconfig 配置文件，不链接 libfontconfig），仅 Linux 图形界面 |
-| `embedded-storage` | =0.3.2 | 按偏移读取的存储设备标准接口（no_std，无依赖），`qy-host-embedded` 的无文件系统曲目存储 |
-| `stm32f4xx-hal` / `stm32f4` | =0.23.0 / =0.16.0 | STM32F4 HAL 与 PAC（打开 `rt`），仅 `qy-board` 的 `stm32f411` 特性 |
+| Windows | WASAPI 独占 | x64 Windows 10 1607 或更新 |
+| Linux | ALSA 硬件设备（`hw:`），直接使用内核接口 | 完全静态的程序，不依赖 alsa-lib 或任何系统库，可在任意发行版上运行。提供 x86_64、aarch64、armv7、loongarch64、riscv64 五个架构 |
+| 单片机 | I²S / SAI + DMA | 带原子比较交换指令的 Cortex-M（M3 / M4 / M7 / M33），具体要求见下文 |
 
-## 本地检查
+Linux 上普通用户需要属于 `audio` 组才能打开 `/dev/snd/` 下的设备。
 
-```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo build --target thumbv7em-none-eabihf -p qy-core -p qy-codec-wav -p qy-pcm-format -p qy-codec-flac -p qy-codec-auto
-cargo build --target thumbv7em-none-eabihf -p qy-codec-flac --features static-cell
-cargo test -p qy-codec-flac --features test-metrics   # 含整帧重试复杂度测试
-cargo test -p qy-pcm-format --features ring,static-queue
-cargo build --target thumbv7em-none-eabihf -p qy-pcm-format --features static-queue
-cargo build --target thumbv7em-none-eabihf -p qy-codec-auto --no-default-features --features wav
-cargo build --target thumbv7em-none-eabihf -p qy-host-embedded
-(cd crates/qy-board && cargo build --release --target thumbv7em-none-eabihf --features stm32f411)   # 板级适配，按板选特性，只编译
-```
+## 获取
 
-MCU 演示（需要 `qemu-system-arm` ≥ 8，`mps2-an386`）：
+预编译程序由 GitHub Actions 构建，在 [Actions](https://github.com/qybit-lab/qybit/actions) 页面最近一次成功运行的构件中下载：
 
-```sh
-cd crates/qy-mcu-demo
-cargo build --release --target thumbv7em-none-eabihf --features hold
-cp target/thumbv7em-none-eabihf/release/qy-mcu-demo target/qy-mcu-demo-full.elf
-cargo build --release --target thumbv7em-none-eabihf --no-default-features --features hold
-cp target/thumbv7em-none-eabihf/release/qy-mcu-demo target/qy-mcu-demo-lite.elf
-cd ../..
-QY_MCU_DEMO_ELF=crates/qy-mcu-demo/target/qy-mcu-demo-full.elf \
-QY_MCU_DEMO_LITE_ELF=crates/qy-mcu-demo/target/qy-mcu-demo-lite.elf \
-  cargo test -p qy-host-sim --test mcu_demo -- --nocapture
-```
+- `qybit-windows`：`qybit.exe`（命令行）和 `qybit-gui.exe`（图形界面），单个可执行文件，不需要安装运行库；
+- `qybit-linux-<架构>`：`qybit` 和 `qybit-gui`，下载后 `chmod +x` 即可运行。
 
-测试夹具由 `cargo run -p qy-gen-fixtures -- [wav|flac|aiff|all]` 生成：WAV 需要 PATH 中有 ffmpeg 作为第二参考，FLAC 需要 Xiph `flac`/`metaflac` ≥ 1.4.0（编码、显式格式参考解码、实际格式与 `--analyze` 分支核对，清单含 SHA-256 与种子）。fuzz 步骤见 [docs/m0-t2-wav.md](docs/m0-t2-wav.md)（`wav_decode`）、[docs/m1-t3-integration.md](docs/m1-t3-integration.md)（`flac_decode`）、[docs/f2-aiff.md](docs/f2-aiff.md)（`aiff_decode`）、[docs/w1-wav-tolerance.md](docs/w1-wav-tolerance.md)（`auto_decode`）与 [docs/r1-reliability.md](docs/r1-reliability.md)（`fat_storage`，损坏文件系统）。桌面吞吐基准：`cargo run --release -p qy-bench -- decode` 与 `-- e2e`（release 构建，结论只对运行它的机器成立，记录见 [docs/r1-reliability.md](docs/r1-reliability.md) §6）。
+也可以从源码构建，见“从源码构建”。
 
-| fuzz 依赖 | 版本 | 用途 |
-| --- | --- | --- |
-| `libfuzzer-sys` | =0.4.10 | libFuzzer 绑定，仅 `fuzz/`（独立 workspace，nightly） |
-| `sha2` | =0.10.9 | 夹具 SHA-256 摘要，仅 `tools/qy-gen-fixtures` |
-| `fatfs` | =0.3.6 | 生成测试与 MCU 演示用的 FAT16 镜像，仅 `tools/qy-fat-image`（与被测读取路径独立） |
-
-## 使用（Windows）
+## 命令行
 
 ```
-qybit list-devices                          # 列出端点 ID 与名称
-qybit --device '<端点ID>' a.wav b.flac      # WASAPI 独占顺序播放（按文件头识别 WAV/FLAC）
-qybit matrix --device '<端点ID>' --out report # 设备格式矩阵，写出 JSON/CSV
+qybit list-devices                          列出输出设备
+qybit --device <设备> <文件>...              按顺序播放
+qybit matrix --device <设备> --out <目录>    测试设备支持的格式，写出 JSON / CSV 报告
+qybit mixer --device <设备>                  （Linux）查看声卡的硬件混音器，只读
+qybit decode <输入> <输出.wav>               用 QyBit 的解码器把文件解码为标准 WAV
+qybit tone <输出.wav> [--rate 44100] [--bits 16]   生成测试音
 ```
 
-诊断（任何平台）：`qybit decode <输入> <输出.wav>` 用自有解码器与 pack 写成标准 WAV，可用任何播放器试听，用来区分“解码出错”与“设备输出出错”；`qybit tone <输出.wav> --rate 44100 --bits 16` 写一个 1 kHz 正弦测试音。文件开头的 ID3v2 标签（常见于被标签软件写过的 FLAC）先按标签长度跳过再识别容器，播放与 `decode` 都会写明跳过的字节数（[docs/w1-wav-tolerance.md](docs/w1-wav-tolerance.md) §6）。
-
-端点 ID 形如 `{0.0.0.00000000}.{…}`。在 PowerShell 中必须加单引号，否则 `{…}` 会被当成脚本块，设备 ID 传不进程序；cmd 中不需要引号。
-
-播放时实时显示每首曲目、源格式、每次独占请求的格式与 HRESULT、选定的设备格式、结构修正与跳过；按 Ctrl+C 立即停止（不排空）并输出完整报告（MMCSS 结果、有效帧、尾部填充与欠载），再按一次直接结束进程。驱动对某种格式回报支持、实际播放却是杂音时，可用 `--container 16|24|32` 只请求该容器位宽的格式排查（例如 24 位源用 `--container 32` 避开 3 字节紧凑格式），样本值不变。只接受立体声的设备播放单声道文件时，可用 `--mono-to-stereo` 明确开启单声道复制：`[FC]` 的每个样本原样写入左右两路，不混音、不改增益，报告标为“声道已改变”，不再算严格路径。打开设备后报告端点的物理扬声器配置（WASAPI，驱动填写，只作提示）。设备不支持源格式或独占打开失败时直接报错，不回退共享模式、不转换音频。输出不宣称设备端 bit-perfect。
-
-**音量**：独占模式绕过 Windows 混音器，软件增益恒为 1（不做数字音量，不改样本）。所以 Windows 音量滑块和音量合成器通常不起作用，只有设备本身实现了硬件音量时，滑块才可能还有效。请用显示器、音箱、功放或 DAC 自己的音量控制，播放前先调低：独占输出是满幅的源信号。
-
-## 使用（Linux）
-
-Linux 版是完全静态的程序（musl），不依赖 alsa-lib 或任何系统库：CI 的 `linux-static` 作业为 x86_64、aarch64、armv7、loongarch64、riscv64 各上传一个（构件 `qybit-linux-<架构>`），也可以自己构建：
-
-```
-rustup target add x86_64-unknown-linux-musl
-cargo build --release -p qybit --target x86_64-unknown-linux-musl   # 结果在 target/x86_64-unknown-linux-musl/release/qybit
-```
-
-普通用户需要在 `audio` 组中才能打开 `/dev/snd/*`。
-
-图形界面 `qybit-gui` 同样是静态程序（同一构件中），需要图形桌面（X11，或 Wayland 桌面自带的 XWayland；经 SSH 时用 `ssh -X` 或 MobaXterm），界面、菜单与选项与 Windows 版一致；播放期间的设备硬件音量与命令行相同（默认 40%，结束后恢复），见 [docs/gui-linux.md](docs/gui-linux.md)。
-
-```
-qybit list-devices                              # 列出 hw:CARD=…,DEV=… 设备
-qybit --device hw:CARD=DAC,DEV=0 a.flac b.wav   # ALSA hw 顺序播放（按文件头识别 WAV/FLAC）
-qybit matrix --device hw:CARD=DAC,DEV=0 --out report
-qybit --device hw:CARD=DAC,DEV=0 --volume 60% a.flac   # 播放期间设备硬件音量 60%（默认 40%，off 不调整），结束后恢复
-qybit mixer --device hw:CARD=DAC                # 只读：列出声卡的硬件混音器（静音开关、音量、dB）
-```
-
-没有桌面的系统上没有音频服务去打开混音器，主板声卡常停在开机时的静音状态。Linux 播放时默认把设备自身的硬件音量设为 40% 并打开其静音开关（按标准控制名 Master、PCM 选择，`--volume-control` 可指定），播放结束或 Ctrl+C 后恢复原值；只调设备的硬件控制，送出的数据不变，设备没有硬件音量时不以软件缩放代替。播放前若该卡还有播放控制处于关闭或最小音量，会打印提示；`qybit mixer` 只查看，不修改（[docs/a2-mixer.md](docs/a2-mixer.md)）。
-
-只接受 `hw:` 设备，拒绝 `plughw`/`default`/`dmix`/`pipewire`/`pulse` 等会转换或混音的设备。设备被 PipeWire/PulseAudio 占用（EBUSY）时报告占用进程，不改用共享路径。参数设置后读回核对（格式、精确采样率、声道、周期、缓冲、重采样关闭、有效位），不一致即报错。
-
-## 真机测试（Linux ALSA，手动，需要音频设备）
-
-```
-QYBIT_ALSA_DEVICE=hw:CARD=DAC,DEV=0 cargo test -p qy-host-alsa --test device -- --ignored --test-threads=1 --nocapture
-```
-
-包括 48 kHz/16 位播放、FLAC 播放与 48 项格式矩阵（报告写入 `QYBIT_REPORT_DIR`，默认 `target/qybit-report`）。只证明参数读回一致与播放运行，不证明 DAC 输入样本逐位一致。
-
-数字回环（M2 T4）：A 层 `cargo test -p qy-host-alsa --features alsa-lib --test loopback_file`（alsa-lib file 插件，需要 libasound 开发包）；B 层在能加载 snd-aloop 的机器上运行 `scripts/aloop-loopback.sh`，不能加载内核模块时运行 `scripts/aloop-vm.sh`（QEMU 虚拟机，`QYBIT_VM_ARCH=x86_64|aarch64`，见 [docs/a1-kernel-alsa.md](docs/a1-kernel-alsa.md) §8）。报告写入 `target/qybit-report/`。均为虚拟回环，不证明真实 DAC。用户机器上的测试步骤见 [docs/a1-kernel-alsa.md](docs/a1-kernel-alsa.md) §9。
-
-## 真机测试（手动，需要 Windows 与音频设备）
+Windows 上的设备是端点 ID，形如 `{0.0.0.00000000}.{…}`。在 PowerShell 中要加单引号，否则花括号会被当成脚本块：
 
 ```
 qybit list-devices
-set QYBIT_DEVICE_ID=<端点ID>                (cmd)
-$env:QYBIT_DEVICE_ID='<端点ID>'             (PowerShell)
-set QYBIT_REPORT_DIR=<报告目录>   (可选，默认 target/qybit-report；PowerShell 为 $env:QYBIT_REPORT_DIR='<目录>')
-cargo test -p qy-host-wasapi --test device -- --ignored --test-threads=1 --nocapture
+qybit --device '{0.0.0.00000000}.{…}' a.flac b.wav
 ```
 
-- `exclusive_playback_48k_16bit`：48 kHz/16 位双声道 1 秒独占播放。
-- `exclusive_playback_flac_44k_16bit`：自有 FLAC 解码，libFLAC 生成的 44.1 kHz/16 位双声道夹具（20000 帧）独占播放。
-- `format_matrix_and_sequential`：44.1–192 kHz × 16/16、24/24、32/24、32/32 × 单/双声道（EXTENSIBLE），16/16 另测 WAVEFORMATEX，再加 48 kHz 多声道 3.0/4.0/5.1/5.1 侧/7.1 × 16/16、32/24（F1），共 70 项；再用两个不同采样率顺序换曲。生成 `qybit-device-matrix.json` / `.csv`。
+Linux 上的设备写作 `hw:卡,设备` 或 `hw:CARD=名称,DEV=编号`：
 
-未设置 `QYBIT_DEVICE_ID` 或设备不存在时测试明确失败，不跳过。接口成功与播放统计只证明兼容与运行，不证明 DAC 输入样本逐位一致。
+```
+qybit list-devices
+qybit --device hw:CARD=DAC,DEV=0 a.flac b.wav
+```
+
+Linux 版只接受 `hw:` 设备，`plughw`、`default`、`dmix`、`pipewire`、`pulse` 这类会转换或混音的设备会被拒绝。设备正被 PipeWire 或 PulseAudio 占用时，QyBit 会报告占用它的进程。
+
+播放过程中会实时显示每首曲目的源格式、向设备请求的格式和设备的回应。按一次 Ctrl+C 立即停止并输出完整报告，再按一次直接结束进程。
+
+退出码：`0` 完整播放；`2` 播放完成但有欠载；`1` 失败（设备不支持、打开失败、设备出错或被中断）。
+
+### 音量
+
+独占输出绕过了系统混音器，QyBit 本身不做数字音量，送出的是满幅的源信号。因此 Windows 系统的音量滑块在独占播放时通常不起作用。请先把音箱、耳放或 DAC 的音量调低，再开始播放。
+
+Linux 版在播放期间会把声卡自己的硬件音量设为 40%，并打开它的静音开关，播放结束或按 Ctrl+C 后恢复原来的设置。这只调整声卡的硬件控制，送出的数据不变。可以用 `--volume 60%` 指定音量，`--volume off` 不做任何调整，`--volume-control Headphone` 指定要调的控制。声卡没有硬件音量时照常播放，不会用软件缩放代替。没有桌面环境的系统上，主板声卡开机后常处于静音状态，`qybit mixer` 可以查看各个控制的当前值。
+
+### 可选的格式调整
+
+下面两个选项会改变送出的数据，默认关闭，开启后报告中会明确标出：
+
+- `--mono-to-stereo`：设备只接受立体声时，把单声道的每个样本原样复制到左右两路，不混音，不改增益；
+- `--float-to-int`：设备不接受浮点格式时，把浮点样本转为设备支持的整数位数，不加抖动，超出范围的样本限幅，报告中给出不精确和限幅的样本数。
+
+### 排查问题
+
+`qybit decode` 用 QyBit 自己的解码器把文件写成标准 WAV，可以用任何播放器试听，用来判断问题出在解码还是设备输出。`qybit matrix` 逐一尝试常见的采样率、位深和声道组合，记录设备接受哪些。Windows 上驱动声称支持某种格式、实际播放却是杂音时，可以用 `--container 32` 等参数只请求某一种容器位宽来排查。
+
+## 图形界面
+
+`qybit-gui` 在 Windows 上使用系统原生控件，在 Linux 上自行绘制界面（X11，Wayland 桌面通过 XWayland 运行，也可以经 SSH 的 X11 转发使用）。两个平台的菜单、选项和操作相同。
+
+- 播放列表：添加文件或文件夹，从文件管理器拖入；点击列标题排序，拖动行调整顺序；
+- 播放、暂停、停止、上一首、下一首，拖动进度条或用 ← / → 定位；
+- 输出设备下拉框，设备插拔后列表自动更新；
+- 状态栏显示播放状态、样本是否保持原样，以及采样率指示灯：灰色为未播放，琥珀色为正在打开设备，绿色表示设备以源采样率打开，红色表示设备不接受；
+- 音量滑块调节的是设备自身的硬件音量，设备没有硬件音量时不可用。Linux 版与命令行相同，只在播放期间调整，结束后恢复；
+- 键盘媒体键，可选在窗口不在前台时也响应；
+- 日志区记录每次打开设备的协商过程，可以复制；
+- 可选的“记住播放列表与设置”，默认关闭。设置保存在 `%APPDATA%\QyBit\qybit-gui.cfg`（Windows）或 `~/.config/qybit/qybit-gui.cfg`（Linux）。
+
+Linux 版的文件面板路径栏支持 fcitx5、ibus 等输入法（通过 XIM，需设置 `XMODIFIERS`）。界面控件通过 AT-SPI 提供给 Orca 等读屏软件，读屏软件运行时自动启用。Linux 版图形界面同样是完全静态的程序。
+
+## 关于“保真”的边界
+
+QyBit 能保证的是软件这一侧：从文件到交给驱动的数据，样本值、采样率和声道顺序都不变。驱动和设备内部如何处理这些数据，不在软件的控制范围内。设备报告接受了某种格式，也不等于 DAC 收到的数据与文件逐位一致。需要确认这一点时，可以用数字回录设备采集输出，与文件对比。
+
+## 单片机
+
+`qy-host-embedded` 是一个不绑定具体开发板的嵌入式宿主，与桌面版共用同一个核心和解码器。它从板载存储读取曲目（块设备上的 FAT16 / FAT32，或者没有文件系统、按偏移读取的闪存），经 I²S 和 DMA 输出，通过串口接受 `ls`、`play`、`pause`、`resume`、`stop`、`next`、`prev`、`seek`、`status` 等命令。移植到一块新板只需实现存储和音频输出两个接口。
+
+最低要求：带原子比较交换指令的 Cortex-M（`thumbv7m`、`thumbv7em` 或 `thumbv8m.main`），有 I²S 或 SAI 与 DMA；内存视配置而定：只播放 WAV 与 AIFF 的精简配置约 90 KiB，加上 FLAC 的完整配置约 360 KiB。仓库中的 `crates/qy-board` 是 STM32F411 的板级适配示例。缓冲大小和读卡时序按公式计算，详见 [docs/m3-t2-embedded-host.md](docs/m3-t2-embedded-host.md)。
+
+## 扩展格式
+
+新的格式以 Rust crate 的形式在编译时接入，不需要修改本仓库：实现解码器接口，再把它和内置格式组合起来，就能得到支持新格式的同一个命令行、图形界面和嵌入式播放器。扩展可以声明解码结果为有损，报告和界面会相应标出；也可以通过 DoP 或原生 DSD 把 1 位 DSD 数据送到支持的设备。
+
+`qy-testkit` 提供契约测试，检查解码器在任意输入分块、复位重用和定位下的行为是否符合要求。`examples/qy-ext-demo` 是一个扩展示例，包含解码器、组合方式和命令行、图形界面、嵌入式三种组装。接口说明见 [docs/x1-extensions.md](docs/x1-extensions.md)，版本与兼容规则见 [docs/e4-versioning.md](docs/e4-versioning.md)，各版本的变化见 [CHANGELOG.md](CHANGELOG.md)。扩展按版本 tag 以 git 依赖引用本仓库：
+
+```toml
+[dependencies]
+qy-core = { git = "https://github.com/qybit-lab/qybit", tag = "v0.1.0" }
+qy-player = { git = "https://github.com/qybit-lab/qybit", tag = "v0.1.0" }
+```
+
+## 从源码构建
+
+需要 Rust 1.88 或更新。
+
+```
+cargo build --release -p qybit -p qybit-gui
+```
+
+Linux 静态程序：
+
+```
+rustup target add x86_64-unknown-linux-musl
+cargo build --release -p qybit -p qybit-gui --target x86_64-unknown-linux-musl
+```
+
+其他架构把目标换成 `aarch64-unknown-linux-musl`、`armv7-unknown-linux-musleabihf`、`loongarch64-unknown-linux-musl` 或 `riscv64gc-unknown-linux-musl`。链接使用工具链自带的 `rust-lld`，不需要交叉编译的 C 工具链。不需要读屏支持时，可以加 `--no-default-features` 构建 `qybit-gui`，程序约小 5.6 MB。
+
+运行测试：
+
+```
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+依赖清单、嵌入式目标的构建、测试工具和需要真实设备的测试见 [docs/development.md](docs/development.md)。
+
+## 代码结构
+
+| crate | 内容 |
+| --- | --- |
+| `qy-core` | 播放核心与调度引擎，`no_std`，不使用堆内存 |
+| `qy-codec-wav`、`qy-codec-flac`、`qy-codec-aiff` | 解码器，`no_std`，不使用堆内存 |
+| `qy-codec-auto` | 按文件头选择解码器；桌面与嵌入式的资源配置 |
+| `qy-pcm-format` | 格式描述、按设备格式放置样本（pack）、声道映射、帧队列 |
+| `qy-player` | 桌面播放器层：渲染循环、格式协商、播放报告 |
+| `qy-host-wasapi`、`qy-host-alsa` | Windows 与 Linux 的输出后端 |
+| `qy-host-embedded` | 嵌入式宿主 |
+| `qy-host-sim` | 模拟宿主：用真实的核心与解码器，只模拟文件、时间和设备，用于测试 |
+| `qy-ui` | 与平台无关的界面模型 |
+| `qybit`、`qybit-gui` | 命令行与图形界面 |
+| `qy-testkit` | 解码器契约测试 |
+
+设计说明在 [docs/](docs/) 目录，其中 [docs/arch-core-mcu.md](docs/arch-core-mcu.md) 介绍核心的整体结构。
+
+## 许可
+
+MIT 或 Apache-2.0，任选其一。
