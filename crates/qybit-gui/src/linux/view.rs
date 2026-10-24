@@ -81,6 +81,9 @@ enum Area {
     /// 只有进度条滑块移动（播放进度）：整行重画到画布，只提交滑块经过的一段（`seek_span`），
     /// 经 SSH 的 X11 转发时大幅减少数据量。不在 `ALL` 中：整行重绘时不需要它。
     SeekThumb = 512,
+    /// 只有状态栏第一段文字变化（播放中每秒的读秒）：整行重画到画布，只提交文字变化的一段
+    /// （`status_prev`）。不在 `ALL` 中，原因同 `SeekThumb`。
+    StatusText = 1024,
 }
 const ALL: u16 = 0x1ff;
 
@@ -295,6 +298,8 @@ pub struct View {
     last_dir: Option<std::path::PathBuf>,
     /// 播放进度移动时需要提交的一段（见 `Area::SeekThumb`）。
     seek_span: Option<Rect>,
+    /// 状态栏第一段上次提交时的文字（见 `Area::StatusText`）；`None` 表示没有待提交的文字变化。
+    status_prev: Option<String>,
 }
 
 impl View {
@@ -362,6 +367,7 @@ impl View {
             modal: Modal::None,
             last_dir: None,
             seek_span: None,
+            status_prev: None,
         }
     }
 
@@ -395,10 +401,15 @@ impl View {
     }
 
     pub fn set_status(&mut self, status: String, fidelity: String, format: String) {
-        if status != self.status || fidelity != self.fidelity {
+        if fidelity != self.fidelity || (status != self.status && self.status_override.is_some()) {
             self.status = status;
             self.fidelity = fidelity;
             self.mark(Area::Status);
+        } else if status != self.status {
+            // 只有第一段文字变化（播放中多为读秒）：只提交变化的一段。
+            let old = std::mem::replace(&mut self.status, status);
+            self.status_prev.get_or_insert(old);
+            self.mark(Area::StatusText);
         }
         if format != self.format {
             self.format = format;
@@ -715,6 +726,18 @@ impl View {
         if d & Area::Seek as u16 != 0 {
             d &= !(Area::SeekThumb as u16);
         }
+        let status_prev = self.status_prev.take();
+        if d & Area::Status as u16 != 0 {
+            d &= !(Area::StatusText as u16);
+        }
+        if d & Area::StatusText as u16 != 0
+            && let Some(old) = status_prev
+        {
+            self.paint_status(c);
+            if let Some(span) = self.status_text_span(c, &old) {
+                out.push(span);
+            }
+        }
         let parts: [(Area, Rect); 9] = [
             (Area::Menu, self.menu_rect),
             (
@@ -785,7 +808,7 @@ impl View {
                 Area::Splitter => c.fill(r, BG),
                 Area::Log => self.paint_log(c),
                 Area::Status => self.paint_status(c),
-                Area::SeekThumb => {}
+                Area::SeekThumb | Area::StatusText => {}
             }
             out.push(r);
         }
@@ -1141,6 +1164,30 @@ impl View {
             Rect::new(r.x + first, r.y, rest - first, r.h),
             Rect::new(r.x + rest, r.y, lamp_w, r.h),
         ]
+    }
+
+    /// 状态栏第一段从 `old` 变为当前文字时需要提交的一段：从两者第一个不同的字符起，到两者中
+    /// 较长的一个的末尾（后面的文字可能随宽度变化平移）。文字放不下（截断）时提交整段。
+    fn status_text_span(&self, c: &mut Canvas, old: &str) -> Option<Rect> {
+        let [a, ..] = self.status_parts();
+        let new = &self.status;
+        let pad = self.px(6);
+        let (w_old, w_new) = (c.text_width(old), c.text_width(new));
+        if w_old.max(w_new) > a.w - 2 * pad {
+            return Some(a);
+        }
+        let same = old
+            .char_indices()
+            .zip(new.chars())
+            .find(|((_, x), y)| x != y)
+            .map_or(old.len().min(new.len()), |((i, _), _)| i);
+        // 两段文字的前 `same` 字节相同（`same` 落在字符边界上）。
+        let prefix = &new[..same];
+        // 字形可能略超出前进宽度（抗锯齿、字距）：两端各多留一点。
+        let margin = self.px(3);
+        let x0 = (a.x + pad + c.text_width(prefix) - margin).max(a.x);
+        let x1 = (a.x + pad + w_old.max(w_new) + margin).min(a.right());
+        (x1 > x0).then(|| Rect::new(x0, a.y, x1 - x0, a.h))
     }
 
     fn paint_status(&self, c: &mut Canvas) {
@@ -2184,7 +2231,7 @@ fn thumb(track: Rect, pos: i64, page: i64, total: i64, min: i32) -> Option<Rect>
 
 #[cfg(test)]
 mod tests {
-    use super::{Rect, mnemonic, thumb};
+    use super::{Canvas, Rect, View, mnemonic, thumb};
 
     #[test]
     fn mnemonics() {
@@ -2200,5 +2247,74 @@ mod tests {
         assert_eq!(thumb(t, 0, 10, 100, 20), Some(Rect::new(0, 0, 10, 20)));
         assert_eq!(thumb(t, 90, 10, 100, 20), Some(Rect::new(0, 80, 10, 20)));
         assert_eq!(thumb(t, 45, 50, 100, 20), Some(Rect::new(0, 45, 10, 50)));
+    }
+
+    /// 把画布上 `r` 的像素拷到 `screen`（模拟 X 服务器收到的提交）。
+    fn submit(screen: &mut [u8], c: &Canvas, r: Rect) {
+        let w = c.width();
+        let r = r.intersect(&Rect::new(0, 0, w, c.height()));
+        let src = c.pix.data();
+        for y in r.y..r.y + r.h {
+            let a = ((y * w + r.x) * 4) as usize;
+            let b = a + (r.w * 4) as usize;
+            screen[a..b].copy_from_slice(&src[a..b]);
+        }
+    }
+
+    fn full(status: &str, fidelity: &str) -> Vec<u8> {
+        let mut c = Canvas::new(1200, 700, 1.5);
+        let mut v = View::new(1.5);
+        v.set_status(status.into(), fidelity.into(), String::new());
+        v.paint(&mut c, &mut |_, _| String::new());
+        c.pix.data().to_vec()
+    }
+
+    /// 读秒只提交状态栏文字变化的一段（经 SSH 的 X11 转发时减少数据量）；“屏幕”上只拷入提交的
+    /// 矩形，结果与按新状态完整重绘逐像素相同。
+    #[test]
+    fn status_text_partial_submit_is_pixel_exact() {
+        const FID: &str = "严格路径 · 样本未改变";
+        let mut c = Canvas::new(1200, 700, 1.5);
+        let mut v = View::new(1.5);
+        let cells = &mut |_: usize, _: usize| String::new();
+        v.set_status(
+            "▶ 1/12  0:59 / 3:45  ·  欠载 0".into(),
+            FID.into(),
+            String::new(),
+        );
+        v.paint(&mut c, cells);
+        let mut screen = c.pix.data().to_vec();
+        let row = v.status_rect.w * v.status_rect.h;
+        for (next, small) in [
+            ("▶ 1/12  1:00 / 3:45  ·  欠载 0", true),
+            ("▶ 1/12  1:01 / 3:45  ·  欠载 0", true),
+            ("▶ 1/12  1:11 / 3:45  ·  欠载 0", true),
+            ("▶ 1/12  10:11 / 13:45  ·  欠载 0", true),
+            ("▶ 1/12  10:11 / 13:45  ·  欠载 1（缺 512 帧）", true),
+            ("‖ 1/12  10:11 / 13:45  ·  欠载 1（缺 512 帧）", false),
+            ("▶ 2/12  0:00  ·  欠载 0", false),
+        ] {
+            v.set_status(next.into(), FID.into(), String::new());
+            let rects = v.paint(&mut c, cells);
+            assert_eq!(rects.len(), 1, "{next}");
+            let area = rects[0].w * rects[0].h;
+            assert!(area < row, "{next}：只提交状态栏的一部分");
+            if small {
+                assert!(
+                    area * 2 < row,
+                    "{next}：读秒变化应少于状态栏一半（{area} / {row}）"
+                );
+            }
+            submit(&mut screen, &c, rects[0]);
+            assert!(screen == full(next, FID), "{next}：与完整重绘不同");
+        }
+        // 第二段（保真说明）变化时整行重绘。
+        v.set_status(
+            "▶ 2/12  0:00  ·  欠载 0".into(),
+            "已改变".into(),
+            String::new(),
+        );
+        let rects = v.paint(&mut c, cells);
+        assert_eq!(rects, vec![v.status_rect]);
     }
 }

@@ -66,6 +66,9 @@ struct Front {
     quit: bool,
     /// 已收到、尚未重送的 Expose 区域。
     exposed: Vec<paint::Rect>,
+    /// 诊断：本统计周期内单次提交画面（写出并刷新到 X 连接）的最长耗时。网络带宽不足时写入
+    /// 被阻塞，这个时间随之变长，画面（含读秒）就会滞后。
+    slowest_put: Duration,
 }
 
 pub fn run<F: qy_player::Formats>(formats: F) -> ExitCode {
@@ -175,6 +178,7 @@ pub fn run<F: qy_player::Formats>(formats: F) -> ExitCode {
         visible: true,
         quit: false,
         exposed: Vec::new(),
+        slowest_put: Duration::ZERO,
     };
     for op in f.app.initial() {
         f.exec(op);
@@ -232,12 +236,14 @@ pub fn run<F: qy_player::Formats>(formats: F) -> ExitCode {
             }
         }
         f.repaint();
-        // 诊断：每 10 秒写一次界面更新的数据量（经 SSH 的 X11 转发时界面响应受它影响）。
+        // 诊断：每 10 秒写一次界面更新的数据量与单次提交的最长耗时（经 SSH 的 X11 转发时界面
+        // 响应受它们影响）。
         if f.trace && traffic.0.elapsed() >= Duration::from_secs(10) {
             let kib = (f.x.sent_bytes - traffic.1) / 1024;
             eprintln!(
-                "界面更新：{:.0} KiB/s",
-                kib as f64 / traffic.0.elapsed().as_secs_f64()
+                "界面更新：{:.0} KiB/s，单次提交最长 {} ms",
+                kib as f64 / traffic.0.elapsed().as_secs_f64(),
+                std::mem::take(&mut f.slowest_put).as_millis()
             );
             traffic = (Instant::now(), f.x.sent_bytes);
         }
@@ -275,11 +281,13 @@ impl Front {
             view, canvas, app, ..
         } = self;
         let rects = view.paint(canvas, &mut |r, c| app.cell(r, c));
+        let start = Instant::now();
         for r in rects.iter().chain(&self.exposed) {
             let _ = self.x.put(&self.canvas, *r);
         }
         self.exposed.clear();
         let _ = self.x.flush();
+        self.slowest_put = self.slowest_put.max(start.elapsed());
     }
 
     fn event(&mut self, ev: Event) {
